@@ -824,6 +824,7 @@ function RootStack() {
         <Stack.Screen name="settings/projects/index" />
         <Stack.Screen name="settings/projects/[projectKey]" />
         <Stack.Screen name="pair-scan" />
+        <Stack.Screen name="orchestra/setup" />
       </Stack.Protected>
       {/*
         Do not add getId or dangerouslySingular back to the workspace route.
