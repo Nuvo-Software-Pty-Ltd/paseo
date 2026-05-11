@@ -38,7 +38,9 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
           echo "upstream=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${VERSION}+cloud.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          # Docker tag format forbids `+`. Use `-cloud.<sha>` instead of `+cloud.<sha>`.
+          # Semver-friendly form is preserved in FORK-NOTES.md when humans need it.
+          echo "tag=${VERSION}-cloud.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
