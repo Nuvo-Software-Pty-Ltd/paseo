@@ -106,7 +106,8 @@ import {
 } from "./agent/provider-registry.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
-import { FileBackedChatService } from "./chat/chat-service.js";
+import { ChatService } from "./chat/chat-service.js";
+import { FileBackedChatStore } from "./chat/chat-store.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { LoopService } from "./loop-service.js";
 import { ScheduleService } from "./schedule/service.js";
@@ -477,8 +478,11 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
-  const chatService = new FileBackedChatService({
-    paseoHome: config.paseoHome,
+  const chatService = new ChatService({
+    store: new FileBackedChatStore({
+      paseoHome: config.paseoHome,
+      logger,
+    }),
     logger,
   });
   const terminalManager = createConfiguredTerminalManager();

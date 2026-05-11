@@ -4,15 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 import {
+  ChatService,
   type ChatServiceError,
-  FileBackedChatService,
   parseMentionAgentIds,
   type PostChatMessageInput,
 } from "./chat-service.js";
+import { FileBackedChatStore } from "./chat-store.js";
 
-describe("FileBackedChatService", () => {
+describe("ChatService (file-backed)", () => {
   let paseoHome: string;
-  let service: FileBackedChatService;
+  let service: ChatService;
 
   async function sendChatMessage(input: PostChatMessageInput) {
     return await service.dispatchMessage(input);
@@ -20,9 +21,10 @@ describe("FileBackedChatService", () => {
 
   beforeEach(async () => {
     paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-chat-service-"));
-    service = new FileBackedChatService({
-      paseoHome,
-      logger: pino({ level: "silent" }),
+    const logger = pino({ level: "silent" });
+    service = new ChatService({
+      store: new FileBackedChatStore({ paseoHome, logger }),
+      logger,
     });
     await service.initialize();
   });

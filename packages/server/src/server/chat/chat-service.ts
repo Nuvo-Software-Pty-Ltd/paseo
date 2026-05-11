@@ -1,8 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import type pino from "pino";
-import { z } from "zod";
 import {
   ChatMessageSchema,
   ChatRoomDetailSchema,
@@ -11,13 +8,7 @@ import {
   type ChatRoom,
   type ChatRoomDetail,
 } from "./chat-types.js";
-
-const ChatStorePayloadSchema = z.object({
-  rooms: z.array(ChatRoomSchema),
-  messages: z.array(ChatMessageSchema),
-});
-
-type ChatStorePayload = z.infer<typeof ChatStorePayloadSchema>;
+import type { ChatStore, ChatStorePayload } from "./chat-store.js";
 
 function normalizeRoomName(name: string): string {
   return name.trim().toLocaleLowerCase();
@@ -107,8 +98,8 @@ export interface InspectChatRoomResult {
   room: ChatRoomDetail;
 }
 
-export class FileBackedChatService {
-  private readonly filePath: string;
+export class ChatService {
+  private readonly store: ChatStore;
   private readonly logger: pino.Logger;
   private loaded = false;
   private readonly rooms = new Map<string, ChatRoom>();
@@ -116,8 +107,8 @@ export class FileBackedChatService {
   private persistQueue: Promise<void> = Promise.resolve();
   private readonly waitersByRoomId = new Map<string, Set<Waiter>>();
 
-  constructor(options: { paseoHome: string; logger: pino.Logger }) {
-    this.filePath = path.join(options.paseoHome, "chat", "rooms.json");
+  constructor(options: { store: ChatStore; logger: pino.Logger }) {
+    this.store = options.store;
     this.logger = options.logger.child({ component: "chat-service" });
   }
 
@@ -328,22 +319,14 @@ export class FileBackedChatService {
     this.rooms.clear();
     this.messagesByRoomId.clear();
 
-    try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed = ChatStorePayloadSchema.parse(JSON.parse(raw));
-      for (const room of parsed.rooms) {
-        this.rooms.set(room.id, room);
-      }
-      for (const message of parsed.messages) {
-        const messages = this.messagesByRoomId.get(message.roomId) ?? [];
-        messages.push(message);
-        this.messagesByRoomId.set(message.roomId, messages);
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        this.logger.error({ err: error, filePath: this.filePath }, "Failed to load chat store");
-      }
+    const parsed = await this.store.loadAll();
+    for (const room of parsed.rooms) {
+      this.rooms.set(room.id, room);
+    }
+    for (const message of parsed.messages) {
+      const messages = this.messagesByRoomId.get(message.roomId) ?? [];
+      messages.push(message);
+      this.messagesByRoomId.set(message.roomId, messages);
     }
 
     this.loaded = true;
@@ -351,7 +334,9 @@ export class FileBackedChatService {
 
   private async enqueuePersist(): Promise<void> {
     const nextPersist = this.persistQueue.then(() => this.persist());
-    this.persistQueue = nextPersist.catch(() => {});
+    this.persistQueue = nextPersist.catch((error) => {
+      this.logger.error({ err: error }, "Chat store persist failed");
+    });
     await nextPersist;
   }
 
@@ -364,10 +349,7 @@ export class FileBackedChatService {
         .flat()
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
     };
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), "utf8");
-    await fs.rename(tempPath, this.filePath);
+    await this.store.save(payload);
   }
 
   private findRoomByName(name: string): ChatRoom | null {
