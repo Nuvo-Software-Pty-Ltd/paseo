@@ -75,7 +75,7 @@ This is the smallest possible cloud-mode delta. Things that are deferred to D-1+
 
 ## Tagging conventions
 
-- **Cloud-aware release tags:** `<upstream-version>+cloud.<sha>` — e.g., `0.1.73+cloud.4141c76`. Published to ECR with both that tag and `dev-latest`.
+- **Cloud-aware ECR tags:** `<upstream-version>-cloud.<sha>` — e.g., `0.1.73-cloud.d908984`. Docker image tags forbid `+`, so `-` is used as the separator. Published to ECR with both the immutable tag and the rolling `dev-latest`.
 - **Upstream merges:** keep upstream's `v0.1.X` and `v0.2.X` tags; do NOT delete them.
 
 ## See also
