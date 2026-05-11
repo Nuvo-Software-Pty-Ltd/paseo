@@ -148,6 +148,7 @@ import {
 } from "./auth.js";
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
+import { createInternalRoutes } from "./internal-routes.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -377,6 +378,22 @@ export async function createPaseoDaemon(
     }
     next();
   });
+
+  // Internal HMAC-auth'd routes (auth-service → daemon RPC). Mounted BEFORE
+  // the workspace-token middleware so they use their own auth mechanism.
+  // Only enabled in cloud mode; on-host daemon ignores these routes.
+  if (isPaseoCloudMode()) {
+    const internalHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY;
+    if (internalHmacKey && internalHmacKey.trim().length > 0) {
+      app.use(createInternalRoutes({ hmacKey: internalHmacKey, logger }));
+      logger.info("Internal HMAC-auth'd routes registered (cloud mode)");
+    } else {
+      logger.warn(
+        "ORCHESTRA_INTERNAL_HMAC_KEY not set — internal routes (clone-repo) disabled. " +
+          "The auth service will not be able to trigger repo clones on this daemon.",
+      );
+    }
+  }
 
   // Cloud-mode swaps the bcrypt-Bearer middleware for workspace-token (JWT)
   // validation. The JWKS URL must be present at boot — fail loud rather than
