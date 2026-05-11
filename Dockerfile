@@ -80,17 +80,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tini ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the install root (lockfile + monorepo package.jsons) so npm can resolve
-# workspace bins at runtime.
+# Copy the install root (lockfile + monorepo package.jsons + node_modules) so
+# npm can resolve workspace bins at runtime.
 COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY --from=builder /app/node_modules ./node_modules
 
-# Copy each daemon-relevant package: its package.json + its built dist + its
-# static assets (sherpa for local-speech, when the user opts in).
+# Each workspace package needs its own node_modules tree because npm workspaces
+# does NOT hoist 100% of deps to the root (per-package conflicts land in the
+# package's own node_modules). Copy these in addition to the hoisted ones.
+COPY --from=builder /app/packages/cli/node_modules ./packages/cli/node_modules
 COPY --from=builder /app/packages/cli/package.json ./packages/cli/package.json
 COPY --from=builder /app/packages/cli/dist ./packages/cli/dist
 COPY --from=builder /app/packages/cli/bin ./packages/cli/bin
 
+COPY --from=builder /app/packages/server/node_modules ./packages/server/node_modules
 COPY --from=builder /app/packages/server/package.json ./packages/server/package.json
 COPY --from=builder /app/packages/server/dist ./packages/server/dist
 COPY --from=builder /app/packages/server/src/server/speech/providers/local/sherpa/assets ./packages/server/src/server/speech/providers/local/sherpa/assets
