@@ -7,7 +7,15 @@ function generateScheduleId(): string {
   return randomBytes(4).toString("hex");
 }
 
-export class ScheduleStore {
+export interface ScheduleStore {
+  list(): Promise<StoredSchedule[]>;
+  get(id: string): Promise<StoredSchedule | null>;
+  create(schedule: Omit<StoredSchedule, "id">): Promise<StoredSchedule>;
+  put(schedule: StoredSchedule): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
+export class FileBackedScheduleStore implements ScheduleStore {
   constructor(private readonly dir: string) {}
 
   private filePath(id: string): string {

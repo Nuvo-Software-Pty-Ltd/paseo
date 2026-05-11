@@ -2,15 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { ScheduleStore } from "./store.js";
+import { FileBackedScheduleStore } from "./store.js";
 
-describe("ScheduleStore", () => {
+describe("FileBackedScheduleStore", () => {
   let tempDir: string;
-  let store: ScheduleStore;
+  let store: FileBackedScheduleStore;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "schedule-store-test-"));
-    store = new ScheduleStore(tempDir);
+    store = new FileBackedScheduleStore(tempDir);
   });
 
   afterEach(async () => {
@@ -40,7 +40,7 @@ describe("ScheduleStore", () => {
       runs: [],
     });
 
-    const reloaded = new ScheduleStore(tempDir);
+    const reloaded = new FileBackedScheduleStore(tempDir);
     const listed = await reloaded.list();
 
     expect(created.id).toHaveLength(8);
@@ -81,7 +81,7 @@ describe("ScheduleStore", () => {
     };
     await store.put(updated);
 
-    const reloaded = await new ScheduleStore(tempDir).get(created.id);
+    const reloaded = await new FileBackedScheduleStore(tempDir).get(created.id);
     expect(reloaded).toEqual(updated);
   });
 
