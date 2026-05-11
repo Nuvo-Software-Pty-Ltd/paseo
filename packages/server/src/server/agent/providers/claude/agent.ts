@@ -80,6 +80,11 @@ import { findExecutable, isCommandAvailable } from "../../../../utils/executable
 import { withTimeout } from "../../../../utils/promise-timeout.js";
 import { execCommand } from "../../../../utils/spawn.js";
 import { getOrchestratorModeInstructions } from "../../orchestrator-instructions.js";
+import { isPaseoCloudMode } from "../../../paseo-env.js";
+import {
+  provisionCloudClaudeHome,
+  type MaterializedClaudeHome,
+} from "../../../cloud-credentials.js";
 
 const fsPromises = promises;
 const CLAUDE_SETTING_SOURCES: NonNullable<ClaudeOptions["settingSources"]> = ["user", "project"];
@@ -1522,6 +1527,11 @@ class ClaudeAgentSession implements AgentSession {
   private userMessageIds: string[] = [];
   private recentStderr = "";
   private closed = false;
+  // Cloud-mode only: per-spawn ephemeral Claude home dirs that need rm -rf
+  // when the session ends. Tracked as a list because each call to
+  // ensureQuery() can materialize a fresh dir (e.g. after a query restart),
+  // and we must reclaim every one of them on close. See cloud-credentials.ts.
+  private readonly cloudClaudeHomes: MaterializedClaudeHome[] = [];
 
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
@@ -1909,6 +1919,13 @@ class ClaudeAgentSession implements AgentSession {
         }
       }
     }
+    // Cloud-mode cleanup: reclaim every per-spawn `~/.claude` we materialized
+    // during the session. Done in parallel; each cleanup logs its own failures
+    // and never throws, so close() always completes.
+    if (this.cloudClaudeHomes.length > 0) {
+      await Promise.all(this.cloudClaudeHomes.map((home) => home.cleanup()));
+      this.cloudClaudeHomes.length = 0;
+    }
     this.logger.trace(
       { claudeSessionId: this.claudeSessionId, turnState: this.turnState },
       "Claude session close: completed",
@@ -2228,6 +2245,18 @@ class ClaudeAgentSession implements AgentSession {
     const { thinking, effort } = this.resolveThinkingConfig();
     const appendedSystemPrompt = this.buildAppendedSystemPrompt();
     const extraClaudeOptions = this.config.extra?.claude;
+    // Cloud-mode: materialize a fresh per-spawn `~/.claude` containing the
+    // workspace's Anthropic credential and overlay HOME / CLAUDE_CONFIG_DIR /
+    // ANTHROPIC_API_KEY so the subprocess reads only that ephemeral config.
+    // Tracked on the session for rm -rf at close(). Workspace id flows from
+    // the validated workspace JWT via the workspaceAuthStorage
+    // AsyncLocalStorage — never from any wire payload (F-design-out).
+    let cloudEnvOverlay: Record<string, string> | undefined;
+    if (isPaseoCloudMode()) {
+      const home = await provisionCloudClaudeHome({ logger: this.logger });
+      this.cloudClaudeHomes.push(home);
+      cloudEnvOverlay = home.env;
+    }
     const sdkEnv = createProviderEnv({
       baseEnv: process.env,
       runtimeSettings: this.runtimeSettings,
@@ -2239,6 +2268,7 @@ class ClaudeAgentSession implements AgentSession {
           MCP_TOOL_TIMEOUT: "600000",
         },
         this.launchEnv,
+        cloudEnvOverlay,
       ],
     });
 
