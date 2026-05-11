@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { hostname } from "node:os";
 import { z } from "zod";
 
+import { isPaseoCloudMode } from "./paseo-env.js";
+
 export const pidLockInfoSchema = z.object({
   pid: z.number(),
   startedAt: z.string(),
@@ -59,6 +61,10 @@ export async function acquirePidLock(
   listen: string | null,
   options?: { ownerPid?: number },
 ): Promise<void> {
+  // Cloud mode: container = workspace = singleton. No per-host pid-file needed,
+  // and an existing pid file from a sibling process must not block startup.
+  if (isPaseoCloudMode()) return;
+
   const pidPath = getPidFilePath(paseoHome);
 
   // Ensure paseoHome directory exists

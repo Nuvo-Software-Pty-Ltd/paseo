@@ -1,5 +1,5 @@
 import path from "node:path";
-import { resolvePaseoNodeEnv } from "./paseo-env.js";
+import { isPaseoCloudMode, resolvePaseoNodeEnv } from "./paseo-env.js";
 import { z } from "zod";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
@@ -210,18 +210,20 @@ function resolveCorsAllowedOrigins(
 // - host:port (TCP)
 // - /path/to/socket (Unix socket)
 // - unix:///path/to/socket (Unix socket)
-// Default is TCP at 127.0.0.1:6767
+// Default is TCP at 127.0.0.1:6767 — or 0.0.0.0:6767 under PASEO_CLOUD_MODE,
+// where the container is fronted by an ALB and must bind on all interfaces.
+// Cloud-mode bypasses persisted.daemon.listen because the upstream default
+// config writes "127.0.0.1:6767" on first start; cloud containers always need 0.0.0.0.
 function resolveListenAddress(
   env: NodeJS.ProcessEnv,
   cli: CliConfigOverrides | undefined,
   persisted: ReturnType<typeof loadPersistedConfig>,
 ): string {
-  return (
-    cli?.listen ??
-    env.PASEO_LISTEN ??
-    persisted.daemon?.listen ??
-    `127.0.0.1:${env.PORT ?? DEFAULT_PORT}`
-  );
+  const port = env.PORT ?? DEFAULT_PORT;
+  if (cli?.listen) return cli.listen;
+  if (env.PASEO_LISTEN) return env.PASEO_LISTEN;
+  if (isPaseoCloudMode(env)) return `0.0.0.0:${port}`;
+  return persisted.daemon?.listen ?? `127.0.0.1:${port}`;
 }
 
 function resolveAuthConfig(
@@ -247,6 +249,10 @@ function resolveStaticLoadConfigSettings(
     mcpInjectIntoAgents:
       cli?.mcpInjectIntoAgents ?? persisted.daemon?.mcp?.injectIntoAgents ?? false,
     hostnames: mergeHostnames([
+      // Cloud mode bypasses the localhost-rebinding allowlist: the daemon is
+      // reachable only via the ALB at a public DNS name, so the on-host threat
+      // model does not apply. `true` short-circuits mergeHostnames.
+      isPaseoCloudMode(env) ? true : undefined,
       persisted.daemon?.hostnames,
       parseHostnamesEnv(env.PASEO_HOSTNAMES ?? env.PASEO_ALLOWED_HOSTS),
       cli?.hostnames,

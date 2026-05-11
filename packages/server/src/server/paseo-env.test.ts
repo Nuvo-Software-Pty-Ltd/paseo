@@ -4,6 +4,7 @@ import {
   createExternalCommandProcessEnv,
   createExternalProcessEnv,
   createPaseoInternalEnv,
+  isPaseoCloudMode,
   resolvePaseoNodeEnv,
 } from "./paseo-env.js";
 
@@ -115,5 +116,24 @@ describe("paseo env contract", () => {
       "production",
     );
     expect(resolvePaseoNodeEnv({ NODE_ENV: "test", PASEO_NODE_ENV: "local" })).toBeUndefined();
+  });
+});
+
+describe("isPaseoCloudMode", () => {
+  test("returns true when PASEO_CLOUD_MODE is exactly '1'", () => {
+    expect(isPaseoCloudMode({ PASEO_CLOUD_MODE: "1" })).toBe(true);
+  });
+
+  test("returns false when PASEO_CLOUD_MODE is unset", () => {
+    expect(isPaseoCloudMode({})).toBe(false);
+  });
+
+  test("returns false for truthy-looking values other than '1'", () => {
+    // Single-boolean discipline: only exactly "1" enables cloud mode.
+    // Anything else is rejected to keep the discriminator unambiguous.
+    expect(isPaseoCloudMode({ PASEO_CLOUD_MODE: "true" })).toBe(false);
+    expect(isPaseoCloudMode({ PASEO_CLOUD_MODE: "yes" })).toBe(false);
+    expect(isPaseoCloudMode({ PASEO_CLOUD_MODE: "0" })).toBe(false);
+    expect(isPaseoCloudMode({ PASEO_CLOUD_MODE: "" })).toBe(false);
   });
 });

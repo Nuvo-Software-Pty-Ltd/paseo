@@ -79,3 +79,10 @@ export function resolvePaseoNodeEnv(env: NodeJS.ProcessEnv): PaseoNodeEnv | unde
   const value = env[PASEO_NODE_ENV];
   return value === "development" || value === "production" || value === "test" ? value : undefined;
 }
+
+// Single source of truth for "is the daemon running in SaaS cloud-mode?"
+// Only exact "1" enables cloud mode — keeps the discriminator unambiguous and avoids
+// the prior-attempt F11 footgun where overloaded discriminators silently collapse.
+export function isPaseoCloudMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PASEO_CLOUD_MODE === "1";
+}

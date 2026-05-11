@@ -1,0 +1,67 @@
+# Build the daemon Docker image and push to private ECR.
+#
+# Triggered on push to main. The image is tagged twice:
+#   - <upstream-version>+cloud.<git-sha>  (immutable; what the proprietary CDK pins)
+#   - dev-latest                           (rolling; convenience for ad-hoc `docker run`)
+#
+# Auth via OIDC: the workflow assumes the `gh-actions-paseo-fork` IAM role in
+# the Nuvo dev account, which has AmazonEC2ContainerRegistryPowerUser scoped
+# to ECR. No long-lived secrets.
+
+name: Build and publish daemon image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC AssumeRoleWithWebIdentity
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-2
+  AWS_ACCOUNT_ID: "437906455141"
+  ECR_REPOSITORY: paseo-daemon
+  OIDC_ROLE_ARN: arn:aws:iam::437906455141:role/gh-actions-paseo-fork
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read upstream package version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "upstream=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION}+cloud.${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          platforms: linux/arm64
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.tag }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:dev-latest
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max
