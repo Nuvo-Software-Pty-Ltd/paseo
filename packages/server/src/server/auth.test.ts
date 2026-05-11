@@ -4,6 +4,8 @@ import {
   extractHttpBearerToken,
   extractWsBearerProtocol,
   extractWsBearerToken,
+  extractWsWorkspaceProtocol,
+  extractWsWorkspaceToken,
   hashDaemonPassword,
   isBearerTokenValidAsync,
   isBearerTokenValid,
@@ -51,5 +53,17 @@ describe("daemon bearer validator", () => {
     expect(protocol).toBe("paseo.bearer.secret.with.dots");
     expect(extractWsBearerToken(protocol)).toBe("secret.with.dots");
     expect(extractWsBearerToken("paseo.other.secret")).toBeNull();
+  });
+
+  test("extracts WebSocket paseo workspace subprotocol tokens (JWT-shaped)", () => {
+    const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ3In0.signature";
+    const protocol = extractWsWorkspaceProtocol(`chat, paseo.workspace.${jwt}`);
+
+    expect(protocol).toBe(`paseo.workspace.${jwt}`);
+    expect(extractWsWorkspaceToken(protocol)).toBe(jwt);
+    // The workspace parser must not match a bearer protocol — they are
+    // mutually exclusive in cloud vs on-host mode.
+    expect(extractWsWorkspaceProtocol("paseo.bearer.token")).toBeNull();
+    expect(extractWsWorkspaceToken("paseo.bearer.token")).toBeNull();
   });
 });

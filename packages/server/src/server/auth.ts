@@ -86,6 +86,46 @@ export function extractWsBearerToken(protocol: string | null): string | null {
   return segments.slice(2).join(".");
 }
 
+// Cloud-mode WS subprotocol — `paseo.workspace.<jwt>`. Mirrors the bearer
+// parsers above; the JWT itself contains dots so we re-join the tail after
+// stripping the two-segment prefix.
+export function extractWsWorkspaceProtocol(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  for (const protocol of value.split(",")) {
+    const trimmed = protocol.trim();
+    const segments = trimmed.split(".");
+    if (segments[0] === "paseo" && segments[1] === "workspace" && segments.length >= 3) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
+export function extractWsWorkspaceToken(protocol: string | null): string | null {
+  if (!protocol) {
+    return null;
+  }
+  const segments = protocol.split(".");
+  if (segments[0] !== "paseo" || segments[1] !== "workspace" || segments.length < 3) {
+    return null;
+  }
+  return segments.slice(2).join(".");
+}
+
+export interface WorkspaceAuthClaims {
+  accountId: string;
+  workspaceId: string;
+  expiresAt: number;
+}
+
+export interface WorkspaceAuthCallback {
+  validateWorkspaceToken(token: string): Promise<WorkspaceAuthClaims | null>;
+}
+
 export function createRequireBearerMiddleware(
   auth: DaemonAuthConfig | undefined,
   onReject?: (context: BearerAuthRejectContext) => void,
@@ -123,4 +163,43 @@ export function shouldBypassBearerAuth(method: string, path: string): boolean {
     return true;
   }
   return path === "/api/health";
+}
+
+declare module "express-serve-static-core" {
+  interface Request {
+    workspaceAuth?: WorkspaceAuthClaims;
+  }
+}
+
+export function createRequireWorkspaceMiddleware(
+  authCallback: WorkspaceAuthCallback,
+  onReject?: (context: BearerAuthRejectContext) => void,
+): RequestHandler {
+  return (req, res, next) => {
+    if (shouldBypassBearerAuth(req.method, req.path)) {
+      next();
+      return;
+    }
+
+    void (async () => {
+      try {
+        const token = extractHttpBearerToken(req.header("authorization"));
+        if (token === null) {
+          onReject?.({ path: req.path, method: req.method, hasToken: false });
+          res.status(401).json({ error: "Unauthorized" });
+          return;
+        }
+        const claims = await authCallback.validateWorkspaceToken(token);
+        if (!claims) {
+          onReject?.({ path: req.path, method: req.method, hasToken: true });
+          res.status(401).json({ error: "Unauthorized" });
+          return;
+        }
+        req.workspaceAuth = claims;
+        next();
+      } catch (error) {
+        next(error);
+      }
+    })();
+  };
 }
