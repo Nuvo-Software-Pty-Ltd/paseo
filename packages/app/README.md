@@ -1,54 +1,52 @@
-# Welcome to your Expo app 👋
+# Paseo App
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Cross-platform client for Paseo — runs on iOS, Android, web (browser), and web (Electron desktop).
 
-## Get started
-
-1. Install dependencies
-
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Development
 
 ```bash
-npm run reset-project
+# From repo root
+npm run dev            # Starts daemon + Expo in Tmux
+
+# Or app-only
+cd packages/app
+npx expo start         # Dev server for all platforms
+npx expo start --web   # Web only
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Web build
 
-## Learn more
+```bash
+npm run build:web      # Output in dist/
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+## Environment variables
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+| Variable                              | Purpose                                          | Default                                                             |
+| ------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------- |
+| `EXPO_PUBLIC_ORCHESTRA_AUTH_URL`      | Orchestra auth service base URL                  | `http://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com`  |
+| `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL` | Orchestra daemon WebSocket URL                   | `ws://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com/ws` |
+| `EXPO_PUBLIC_ENABLE_AUDIO_DEBUG`      | Set to `1` to render the in-app audio debug card | (unset)                                                             |
 
-## Join the community
+## Orchestra cloud mode (D-1)
 
-Join our community of developers creating universal apps.
+The web client can connect to Orchestra — a cloud-hosted daemon that provisions workspaces, clones repos, and runs agents remotely.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+### Known limitation: mixed content
 
-## Dictation debugging
+At D-1, the Orchestra auth service and daemon run behind an HTTP-only ALB. Cloudflare Pages serves the app over HTTPS. Browsers block mixed content (HTTPS page making HTTP requests / opening WS connections to an HTTP origin), so the deployed Pages build **cannot reach the D-1 ALB**.
 
-Set `EXPO_PUBLIC_ENABLE_AUDIO_DEBUG=1` before running `npx expo start` to render the in-app audio debug card. Pair it with the server-side `STT_DEBUG_AUDIO_DIR` flag so every dictation includes a copyable path to the saved raw audio file.
+Workarounds for local testing:
+
+- Run the web client locally via `npx expo start --web` (served over HTTP)
+- Use `EXPO_PUBLIC_ORCHESTRA_AUTH_URL` / `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL` to point at the ALB
+
+This limitation is resolved in D-2 when the ALB gets TLS termination.
+
+## Cloudflare Pages deployment
+
+The `wrangler.toml` in this directory configures the `orchestra-app` Pages project. Build output is `dist/` from `npm run build:web`.
+
+```bash
+npx wrangler pages deploy dist/
+```

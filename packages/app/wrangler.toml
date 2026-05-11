@@ -1,0 +1,7 @@
+name = "orchestra-app"
+account_id = "10ed39a1dbf316e30abd0c409bed40d6"
+compatibility_date = "2024-12-01"
+
+# Cloudflare Pages static site — build output from `npm run build:web`
+[site]
+bucket = "./dist"
