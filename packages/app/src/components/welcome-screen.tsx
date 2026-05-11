@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { Pressable, Text, View, ScrollView } from "react-native";
 import { useRouter } from "expo-router";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { QrCode, Link2, ClipboardPaste, ExternalLink, Settings } from "lucide-react-native";
+import { QrCode, Link2, ClipboardPaste, ExternalLink, Settings, Cloud } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { HostProfile } from "@/types/host-connection";
 import { getHostRuntimeStore, isHostRuntimeConnected, useHosts } from "@/runtime/host-runtime";
@@ -15,9 +15,10 @@ import { buildHostRootRoute } from "@/utils/host-routes";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { isWeb, isNative } from "@/constants/platform";
+import { loginWithOAuthPopup } from "@/lib/orchestra-cloud-client";
 
 interface WelcomeAction {
-  key: "scan-qr" | "direct-connection" | "paste-pairing-link";
+  key: "scan-qr" | "direct-connection" | "paste-pairing-link" | "orchestra-cloud";
   label: string;
   testID: string;
   primary: boolean;
@@ -194,6 +195,17 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
     router.push("/pair-scan?source=onboarding");
   }, [router]);
 
+  const handleConnectOrchestra = useCallback(() => {
+    void loginWithOAuthPopup()
+      .then(() => {
+        router.push("/orchestra/setup");
+        return undefined;
+      })
+      .catch((error) => {
+        console.warn("[Welcome] Orchestra OAuth failed:", error);
+      });
+  }, [router]);
+
   const handleHostSaved = useCallback(
     ({ profile, serverId }: { profile: HostProfile; serverId: string }) => {
       onHostAdded?.(profile);
@@ -205,10 +217,18 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
   const actions: WelcomeAction[] = isWeb
     ? [
         {
+          key: "orchestra-cloud",
+          label: "Connect to Orchestra",
+          testID: "welcome-orchestra-cloud",
+          primary: true,
+          icon: Cloud,
+          onPress: handleConnectOrchestra,
+        },
+        {
           key: "direct-connection",
           label: "Direct connection",
           testID: "welcome-direct-connection",
-          primary: true,
+          primary: false,
           icon: Link2,
           onPress: handleOpenDirect,
         },
