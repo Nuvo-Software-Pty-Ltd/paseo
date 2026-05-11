@@ -32,6 +32,7 @@ import type {
 import { AgentStorage } from "./agent/agent-storage.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { LoopService } from "./loop-service.js";
+import { FileBackedLoopStore } from "./loop-store.js";
 import { isPlatform } from "../test-utils/platform.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
 
@@ -266,7 +267,11 @@ describe("LoopService", () => {
         registry: storage,
         logger,
       });
-      const service = new LoopService({ paseoHome, agentManager: manager, logger });
+      const service = new LoopService({
+        store: new FileBackedLoopStore({ paseoHome, logger }),
+        agentManager: manager,
+        logger,
+      });
       await service.initialize();
 
       const loop = await service.runLoop({
@@ -317,7 +322,11 @@ describe("LoopService", () => {
       registry: storage,
       logger,
     });
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({
@@ -378,7 +387,11 @@ describe("LoopService", () => {
       archivedAgentIds.push(agentId);
       await archiveAgent(agentId);
     };
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({
@@ -430,7 +443,11 @@ describe("LoopService", () => {
       registry: storage,
       logger,
     });
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({
@@ -472,7 +489,11 @@ describe("LoopService", () => {
       registry: storage,
       logger,
     });
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({
@@ -508,7 +529,11 @@ describe("LoopService", () => {
       registry: storage,
       logger,
     });
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({
@@ -546,7 +571,11 @@ describe("LoopService", () => {
       registry: storage,
       logger,
     });
-    const service = new LoopService({ paseoHome, agentManager: manager, logger });
+    const service = new LoopService({
+      store: new FileBackedLoopStore({ paseoHome, logger }),
+      agentManager: manager,
+      logger,
+    });
     await service.initialize();
 
     const loop = await service.runLoop({

@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
 import path from "node:path";
-import { z } from "zod";
 import type { Logger } from "pino";
 import { curateAgentActivity } from "./agent/activity-curator.js";
 import type { AgentManager } from "./agent/agent-manager.js";
@@ -15,97 +13,31 @@ import type {
 } from "./agent/agent-sdk-types.js";
 import { execCommand, platformShell } from "../utils/spawn.js";
 import { getUnattendedModeId } from "./agent/provider-manifest.js";
+import type { LoopStore } from "./loop-store.js";
+import {
+  LoopIterationRecordSchema,
+  LoopLogEntrySchema,
+  LoopRecordSchema,
+  LoopVerifyPromptSchema,
+  type LoopIterationRecord,
+  type LoopLogEntry,
+  type LoopRecord,
+  type LoopStatus,
+  type LoopVerifyCheckResult,
+} from "./loop-types.js";
+
+export type {
+  LoopStatus,
+  LoopLogEntry,
+  LoopVerifyCheckResult,
+  LoopVerifyPromptResult,
+  LoopIterationRecord,
+  LoopRecord,
+} from "./loop-types.js";
 
 const LOOP_ID_LENGTH = 8;
 const DEFAULT_LOOP_PROVIDER: AgentProvider = "claude";
 const MAX_VERIFY_OUTPUT_BYTES = 64 * 1024;
-
-const LoopVerifyPromptSchema = z.object({
-  passed: z.boolean(),
-  reason: z.string().min(1),
-});
-
-const LoopLogEntrySchema = z.object({
-  seq: z.number().int().positive(),
-  timestamp: z.string(),
-  iteration: z.number().int().positive().nullable(),
-  source: z.enum(["loop", "worker", "verifier", "verify-check"]),
-  level: z.enum(["info", "error"]),
-  text: z.string(),
-});
-
-const LoopVerifyCheckResultSchema = z.object({
-  command: z.string(),
-  exitCode: z.number().int(),
-  passed: z.boolean(),
-  stdout: z.string(),
-  stderr: z.string(),
-  startedAt: z.string(),
-  completedAt: z.string(),
-});
-
-const LoopVerifyPromptResultSchema = z.object({
-  passed: z.boolean(),
-  reason: z.string(),
-  verifierAgentId: z.string().nullable(),
-  startedAt: z.string(),
-  completedAt: z.string(),
-});
-
-const LoopIterationRecordSchema = z.object({
-  index: z.number().int().positive(),
-  workerAgentId: z.string().nullable(),
-  workerStartedAt: z.string(),
-  workerCompletedAt: z.string().nullable(),
-  verifierAgentId: z.string().nullable(),
-  status: z.enum(["running", "succeeded", "failed", "stopped"]),
-  workerOutcome: z.enum(["completed", "failed", "canceled"]).nullable(),
-  failureReason: z.string().nullable(),
-  verifyChecks: z.array(LoopVerifyCheckResultSchema),
-  verifyPrompt: LoopVerifyPromptResultSchema.nullable(),
-});
-
-const LoopRecordSchema = z.object({
-  id: z.string(),
-  name: z.string().nullable(),
-  prompt: z.string(),
-  cwd: z.string(),
-  provider: z.string(),
-  model: z.string().nullable(),
-  modeId: z.string().nullable().default(null),
-  workerProvider: z.string().nullable(),
-  workerModel: z.string().nullable(),
-  verifierProvider: z.string().nullable(),
-  verifierModel: z.string().nullable(),
-  verifierModeId: z.string().nullable().default(null),
-  verifyPrompt: z.string().nullable(),
-  verifyChecks: z.array(z.string()),
-  archive: z.boolean(),
-  sleepMs: z.number().int().nonnegative(),
-  maxIterations: z.number().int().positive().nullable(),
-  maxTimeMs: z.number().int().positive().nullable(),
-  status: z.enum(["running", "succeeded", "failed", "stopped"]),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  startedAt: z.string(),
-  completedAt: z.string().nullable(),
-  stopRequestedAt: z.string().nullable(),
-  iterations: z.array(LoopIterationRecordSchema),
-  logs: z.array(LoopLogEntrySchema),
-  nextLogSeq: z.number().int().positive(),
-  activeIteration: z.number().int().positive().nullable(),
-  activeWorkerAgentId: z.string().nullable(),
-  activeVerifierAgentId: z.string().nullable(),
-});
-
-const StoredLoopsSchema = z.array(LoopRecordSchema);
-
-export type LoopStatus = z.infer<typeof LoopRecordSchema>["status"];
-export type LoopLogEntry = z.infer<typeof LoopLogEntrySchema>;
-export type LoopVerifyCheckResult = z.infer<typeof LoopVerifyCheckResultSchema>;
-export type LoopVerifyPromptResult = z.infer<typeof LoopVerifyPromptResultSchema>;
-export type LoopIterationRecord = z.infer<typeof LoopIterationRecordSchema>;
-export type LoopRecord = z.infer<typeof LoopRecordSchema>;
 
 export interface LoopRunOptions {
   prompt: string;
@@ -292,21 +224,17 @@ async function runVerifyCheck(options: {
 }
 
 export class LoopService {
-  private readonly storePath: string;
+  private readonly store: LoopStore;
   private readonly logger: Logger;
+  private readonly agentManager: AgentManager;
   private loaded = false;
   private readonly loops = new Map<string, LoopRecord>();
   private persistQueue: Promise<void> = Promise.resolve();
   private readonly running = new Map<string, RunningLoopState>();
 
-  constructor(
-    private readonly options: {
-      paseoHome: string;
-      agentManager: AgentManager;
-      logger: Logger;
-    },
-  ) {
-    this.storePath = path.join(options.paseoHome, "loops", "loops.json");
+  constructor(options: { store: LoopStore; agentManager: AgentManager; logger: Logger }) {
+    this.store = options.store;
+    this.agentManager = options.agentManager;
     this.logger = options.logger.child({ module: "loop-service" });
   }
 
@@ -315,41 +243,33 @@ export class LoopService {
       return;
     }
     this.loops.clear();
-    try {
-      const raw = await fs.readFile(this.storePath, "utf8");
-      const parsed = StoredLoopsSchema.parse(JSON.parse(raw));
-      for (const record of parsed) {
-        if (record.status === "running") {
-          const recovered = cloneLoop(record);
-          recovered.status = "stopped";
-          recovered.updatedAt = nowIso();
-          recovered.completedAt = recovered.updatedAt;
-          recovered.stopRequestedAt = recovered.updatedAt;
-          recovered.activeIteration = null;
-          recovered.activeWorkerAgentId = null;
-          recovered.activeVerifierAgentId = null;
-          this.appendLog(recovered, {
-            iteration: null,
-            source: "loop",
-            level: "error",
-            text: "Loop was interrupted by daemon restart.",
-          });
-          const lastIteration = recovered.iterations.at(-1);
-          if (lastIteration && lastIteration.status === "running") {
-            lastIteration.status = "stopped";
-            lastIteration.failureReason = "Daemon restarted";
-            lastIteration.workerCompletedAt = recovered.updatedAt;
-          }
-          this.loops.set(recovered.id, recovered);
-          continue;
+    const parsed = await this.store.loadAll();
+    for (const record of parsed) {
+      if (record.status === "running") {
+        const recovered = cloneLoop(record);
+        recovered.status = "stopped";
+        recovered.updatedAt = nowIso();
+        recovered.completedAt = recovered.updatedAt;
+        recovered.stopRequestedAt = recovered.updatedAt;
+        recovered.activeIteration = null;
+        recovered.activeWorkerAgentId = null;
+        recovered.activeVerifierAgentId = null;
+        this.appendLog(recovered, {
+          iteration: null,
+          source: "loop",
+          level: "error",
+          text: "Loop was interrupted by daemon restart.",
+        });
+        const lastIteration = recovered.iterations.at(-1);
+        if (lastIteration && lastIteration.status === "running") {
+          lastIteration.status = "stopped";
+          lastIteration.failureReason = "Daemon restarted";
+          lastIteration.workerCompletedAt = recovered.updatedAt;
         }
-        this.loops.set(record.id, record);
+        this.loops.set(recovered.id, recovered);
+        continue;
       }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        this.logger.error({ err: error, storePath: this.storePath }, "Failed to load loops");
-      }
+      this.loops.set(record.id, record);
     }
     this.loaded = true;
     await this.persist();
@@ -477,10 +397,10 @@ export class LoopService {
     if (running) {
       running.abortController.abort(new Error("Loop aborted"));
       if (loop.activeWorkerAgentId) {
-        await this.options.agentManager.cancelAgentRun(loop.activeWorkerAgentId).catch(() => {});
+        await this.agentManager.cancelAgentRun(loop.activeWorkerAgentId).catch(() => {});
       }
       if (loop.activeVerifierAgentId) {
-        await this.options.agentManager.cancelAgentRun(loop.activeVerifierAgentId).catch(() => {});
+        await this.agentManager.cancelAgentRun(loop.activeVerifierAgentId).catch(() => {});
       }
       await running.promise.catch(() => {});
     } else {
@@ -612,15 +532,13 @@ export class LoopService {
     iteration: LoopIterationRecord,
     signal: AbortSignal,
   ): Promise<boolean> {
-    const agent = await this.options.agentManager.createAgent(
-      this.buildWorkerConfig(loop, iteration),
-    );
+    const agent = await this.agentManager.createAgent(this.buildWorkerConfig(loop, iteration));
     iteration.workerAgentId = agent.id;
     loop.activeWorkerAgentId = agent.id;
     loop.updatedAt = nowIso();
     await this.persist();
 
-    const unsubscribe = this.options.agentManager.subscribe(
+    const unsubscribe = this.agentManager.subscribe(
       (event) => {
         if (event.type !== "agent_stream") {
           return;
@@ -642,7 +560,7 @@ export class LoopService {
 
     try {
       const prompt = this.toPrompt(loop.prompt);
-      const result = await this.options.agentManager.runAgent(agent.id, prompt);
+      const result = await this.agentManager.runAgent(agent.id, prompt);
       iteration.workerCompletedAt = nowIso();
       iteration.workerOutcome = result.canceled ? "canceled" : "completed";
       if (result.canceled) {
@@ -669,9 +587,9 @@ export class LoopService {
       await this.persist();
       try {
         if (loop.archive) {
-          await this.options.agentManager.archiveAgent(agent.id);
+          await this.agentManager.archiveAgent(agent.id);
         } else {
-          await this.options.agentManager.closeAgent(agent.id);
+          await this.agentManager.closeAgent(agent.id);
         }
       } catch {
         // Ignore cleanup errors for internal loop workers.
@@ -719,7 +637,7 @@ export class LoopService {
     }
 
     const startedAt = nowIso();
-    const verifierAgent = await this.options.agentManager.createAgent(
+    const verifierAgent = await this.agentManager.createAgent(
       this.buildVerifierConfig(loop, iteration),
     );
     iteration.verifierAgentId = verifierAgent.id;
@@ -727,7 +645,7 @@ export class LoopService {
     loop.updatedAt = nowIso();
     await this.persist();
 
-    const unsubscribe = this.options.agentManager.subscribe(
+    const unsubscribe = this.agentManager.subscribe(
       (event) => {
         if (event.type !== "agent_stream") {
           return;
@@ -750,10 +668,7 @@ export class LoopService {
     try {
       const result = await getStructuredAgentResponse({
         caller: async (nextPrompt) => {
-          const run = await this.options.agentManager.runAgent(
-            verifierAgent.id,
-            this.toPrompt(nextPrompt),
-          );
+          const run = await this.agentManager.runAgent(verifierAgent.id, this.toPrompt(nextPrompt));
           return this.resolveFinalText(run.timeline, run.finalText);
         },
         prompt: loop.verifyPrompt,
@@ -785,9 +700,9 @@ export class LoopService {
       await this.persist();
       try {
         if (loop.archive) {
-          await this.options.agentManager.archiveAgent(verifierAgent.id);
+          await this.agentManager.archiveAgent(verifierAgent.id);
         } else {
-          await this.options.agentManager.closeAgent(verifierAgent.id);
+          await this.agentManager.closeAgent(verifierAgent.id);
         }
       } catch {
         // Ignore cleanup errors for internal loop verifiers.
@@ -891,14 +806,15 @@ export class LoopService {
 
   private async persist(): Promise<void> {
     const nextPersist = this.persistQueue.then(async () => {
-      await fs.mkdir(path.dirname(this.storePath), { recursive: true });
       const records = Array.from(this.loops.values()).sort((left, right) =>
         left.createdAt.localeCompare(right.createdAt),
       );
-      await fs.writeFile(this.storePath, JSON.stringify(records, null, 2), "utf8");
+      await this.store.save(records);
       return;
     });
-    this.persistQueue = nextPersist.catch(() => {});
+    this.persistQueue = nextPersist.catch((error) => {
+      this.logger.error({ err: error }, "Loop store persist failed");
+    });
     await nextPersist;
   }
 }

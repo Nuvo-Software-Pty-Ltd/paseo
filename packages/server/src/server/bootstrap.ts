@@ -110,6 +110,7 @@ import { ChatService } from "./chat/chat-service.js";
 import { FileBackedChatStore } from "./chat/chat-store.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { LoopService } from "./loop-service.js";
+import { FileBackedLoopStore } from "./loop-store.js";
 import { ScheduleService } from "./schedule/service.js";
 import { FileBackedScheduleStore } from "./schedule/store.js";
 import { DaemonConfigStore } from "./daemon-config-store.js";
@@ -535,7 +536,10 @@ export async function createPaseoDaemon(
     workspaceGitService,
   });
   const loopService = new LoopService({
-    paseoHome: config.paseoHome,
+    store: new FileBackedLoopStore({
+      paseoHome: config.paseoHome,
+      logger,
+    }),
     logger,
     agentManager,
   });
