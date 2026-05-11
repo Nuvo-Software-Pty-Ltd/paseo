@@ -140,7 +140,14 @@ import { ScriptHealthMonitor } from "./script-health-monitor.js";
 import { createScriptStatusEmitter } from "./script-status-projection.js";
 import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import { isHostnameAllowed, type HostnamesConfig } from "./hostnames.js";
-import { createRequireBearerMiddleware, type DaemonAuthConfig } from "./auth.js";
+import {
+  createRequireBearerMiddleware,
+  createRequireWorkspaceMiddleware,
+  type DaemonAuthConfig,
+  type WorkspaceAuthCallback,
+} from "./auth.js";
+import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
+import { isPaseoCloudMode } from "./paseo-env.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -371,11 +378,34 @@ export async function createPaseoDaemon(
     next();
   });
 
-  app.use(
-    createRequireBearerMiddleware(config.auth, (context) => {
-      logger.warn(context, "Rejected HTTP request with invalid daemon password");
-    }),
-  );
+  // Cloud-mode swaps the bcrypt-Bearer middleware for workspace-token (JWT)
+  // validation. The JWKS URL must be present at boot — fail loud rather than
+  // fall through to the on-host bcrypt path, which would silently accept any
+  // request with no daemon password configured. (F11: one mode discriminator;
+  // F7: no silent fallback.)
+  let workspaceAuthCallback: WorkspaceAuthCallback | null = null;
+  if (isPaseoCloudMode()) {
+    const jwksUrl = process.env.ORCHESTRA_AUTH_JWKS_URL;
+    if (!jwksUrl || jwksUrl.trim().length === 0) {
+      throw new Error(
+        "PASEO_CLOUD_MODE=1 requires ORCHESTRA_AUTH_JWKS_URL to be set " +
+          "(workspace-token validation cannot start without the auth service's JWKS).",
+      );
+    }
+    workspaceAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    logger.info({ jwksUrl }, "Cloud-mode workspace-token auth enabled");
+    app.use(
+      createRequireWorkspaceMiddleware(workspaceAuthCallback, (context) => {
+        logger.warn(context, "Rejected HTTP request with invalid workspace token");
+      }),
+    );
+  } else {
+    app.use(
+      createRequireBearerMiddleware(config.auth, (context) => {
+        logger.warn(context, "Rejected HTTP request with invalid daemon password");
+      }),
+    );
+  }
 
   // Script proxy — intercepts requests for registered *.localhost hostnames
   // and forwards them to the corresponding local script port. Placed after
@@ -896,6 +926,7 @@ export async function createPaseoDaemon(
             workspaceGitService,
             github,
             config.pushNotificationSender,
+            workspaceAuthCallback,
           );
 
           if (relayEnabled) {

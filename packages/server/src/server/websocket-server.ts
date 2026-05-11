@@ -54,9 +54,14 @@ import { createGitHubService, type GitHubService } from "../services/github-serv
 import {
   extractWsBearerProtocol,
   extractWsBearerToken,
+  extractWsWorkspaceProtocol,
+  extractWsWorkspaceToken,
   isBearerTokenValid,
+  type WorkspaceAuthCallback,
+  type WorkspaceAuthClaims,
   type DaemonAuthConfig,
 } from "./auth.js";
+import { workspaceAuthStorage } from "./cloud-auth.js";
 import {
   WebSocketRuntimeMetricsWindow,
   type WebSocketRuntimeCounters,
@@ -72,6 +77,9 @@ export interface ExternalSocketMetadata {
 interface PendingConnection {
   connectionLogger: pino.Logger;
   helloTimeout: ReturnType<typeof setTimeout> | null;
+  // Cloud-mode only: workspace claims captured at upgrade time. Propagate
+  // onto the SessionConnection once the hello arrives.
+  workspaceAuth?: WorkspaceAuthClaims;
 }
 
 interface WebSocketServerConfig {
@@ -271,6 +279,11 @@ interface SessionConnection {
   connectionLogger: pino.Logger;
   sockets: Set<WebSocketLike>;
   externalDisconnectCleanupTimeout: ReturnType<typeof setTimeout> | null;
+  // Cloud-mode only: claims extracted from the validated `paseo.workspace.<jwt>`
+  // subprotocol. Drives the workspace-auth AsyncLocalStorage wrap on inbound
+  // message dispatch; downstream provider spawn sites read the workspace id
+  // from there. Always undefined on the on-host bcrypt-Bearer path.
+  workspaceAuth?: WorkspaceAuthClaims;
 }
 
 const SLOW_REQUEST_THRESHOLD_MS = 500;
@@ -367,6 +380,10 @@ export class VoiceAssistantWebSocketServer {
     | ((workspaceId: string, oldBranch: string | null, newBranch: string | null) => void)
     | null;
   private serverCapabilities: ServerCapabilities | undefined;
+  // Cloud-mode only: workspace-token validator. When present, the WS upgrade
+  // requires the `paseo.workspace.<jwt>` subprotocol instead of `paseo.bearer.*`.
+  // Null in on-host mode so the bcrypt-Bearer path remains the sole authority.
+  private readonly workspaceAuth: WorkspaceAuthCallback | null;
   private readonly runtimeMetrics = new WebSocketRuntimeMetricsWindow();
   private runtimeMetricsInterval: ReturnType<typeof setInterval> | null = null;
   private unsubscribeSpeechReadiness: (() => void) | null = null;
@@ -413,6 +430,7 @@ export class VoiceAssistantWebSocketServer {
     workspaceGitService?: WorkspaceGitService,
     github?: GitHubService,
     pushNotificationSender?: PushNotificationSender,
+    workspaceAuth?: WorkspaceAuthCallback | null,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.serverId = serverId;
@@ -498,10 +516,14 @@ export class VoiceAssistantWebSocketServer {
       });
     });
 
+    this.workspaceAuth = workspaceAuth ?? null;
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
     this.startRuntimeMetricsInterval();
 
-    this.logger.info("WebSocket server initialized on /ws");
+    this.logger.info(
+      { cloudMode: this.workspaceAuth !== null },
+      "WebSocket server initialized on /ws",
+    );
   }
 
   private assignOptionalServices(params: {
@@ -543,10 +565,14 @@ export class VoiceAssistantWebSocketServer {
   ): WebSocketServer {
     const { allowedOrigins, hostnames } = wsConfig;
     const password = auth?.password;
+    const cloudMode = this.workspaceAuth !== null;
     const wss = new WebSocketServer({
       server,
       path: "/ws",
-      handleProtocols: (protocols) => selectWebSocketProtocol(protocols, password),
+      handleProtocols: (protocols) =>
+        cloudMode
+          ? selectWebSocketWorkspaceProtocol(protocols)
+          : selectWebSocketProtocol(protocols, password),
       verifyClient: ({ req }, callback) => {
         this.verifyWsUpgrade(req, allowedOrigins, hostnames, callback);
       },
@@ -602,7 +628,30 @@ export class VoiceAssistantWebSocketServer {
     request: IncomingMessage,
     password: string | undefined,
   ): Promise<void> {
-    if (password) {
+    let workspaceClaims: WorkspaceAuthClaims | undefined;
+    if (this.workspaceAuth) {
+      const requestMetadata = extractSocketRequestMetadata(request);
+      const protocol = extractWsWorkspaceProtocol(request.headers["sec-websocket-protocol"]);
+      const token = extractWsWorkspaceToken(protocol);
+      if (token === null) {
+        this.logger.warn(
+          { ...requestMetadata, hasToken: false },
+          "Rejected WebSocket connection — missing paseo.workspace subprotocol",
+        );
+        ws.close(WS_CLOSE_DAEMON_AUTH_FAILED, "Workspace token required");
+        return;
+      }
+      const claims = await this.workspaceAuth.validateWorkspaceToken(token);
+      if (!claims) {
+        this.logger.warn(
+          { ...requestMetadata, hasToken: true },
+          "Rejected WebSocket connection — workspace token failed validation",
+        );
+        ws.close(WS_CLOSE_DAEMON_AUTH_FAILED, "Invalid workspace token");
+        return;
+      }
+      workspaceClaims = claims;
+    } else if (password) {
       const requestMetadata = extractSocketRequestMetadata(request);
       const protocol = extractWsBearerProtocol(request.headers["sec-websocket-protocol"]);
       const token = extractWsBearerToken(protocol);
@@ -618,7 +667,7 @@ export class VoiceAssistantWebSocketServer {
       }
     }
 
-    await this.attachSocket(ws, request);
+    await this.attachSocket(ws, request, undefined, workspaceClaims);
   }
 
   public broadcast(message: WSOutboundMessage): void {
@@ -778,6 +827,7 @@ export class VoiceAssistantWebSocketServer {
     ws: WebSocketLike,
     request?: unknown,
     metadata?: ExternalSocketMetadata,
+    workspaceAuth?: WorkspaceAuthClaims,
   ): Promise<void> {
     const requestMetadata = extractSocketRequestMetadata(request);
     const connectionLoggerFields: Record<string, string> = {
@@ -800,6 +850,7 @@ export class VoiceAssistantWebSocketServer {
     const pending: PendingConnection = {
       connectionLogger,
       helloTimeout: null,
+      ...(workspaceAuth ? { workspaceAuth } : {}),
     };
     const timeout = setTimeout(() => {
       if (this.pendingConnections.get(ws) !== pending) {
@@ -838,8 +889,10 @@ export class VoiceAssistantWebSocketServer {
     appVersion: string | null;
     clientCapabilities: Record<string, unknown> | null;
     connectionLogger: pino.Logger;
+    workspaceAuth?: WorkspaceAuthClaims;
   }): SessionConnection {
-    const { ws, clientId, appVersion, clientCapabilities, connectionLogger } = params;
+    const { ws, clientId, appVersion, clientCapabilities, connectionLogger, workspaceAuth } =
+      params;
     let connection: SessionConnection | null = null;
 
     const session = new Session({
@@ -926,6 +979,7 @@ export class VoiceAssistantWebSocketServer {
       connectionLogger,
       sockets: new Set([ws]),
       externalDisconnectCleanupTimeout: null,
+      ...(workspaceAuth ? { workspaceAuth } : {}),
     };
     return connection;
   }
@@ -1022,6 +1076,7 @@ export class VoiceAssistantWebSocketServer {
       appVersion: message.appVersion ?? null,
       clientCapabilities: message.capabilities ?? null,
       connectionLogger,
+      workspaceAuth: pending.workspaceAuth,
     });
     this.sessions.set(ws, connection);
     this.externalSessionsByKey.set(clientId, connection);
@@ -1428,7 +1483,17 @@ export class VoiceAssistantWebSocketServer {
   ): Promise<void> {
     this.recordInboundSessionRequestType(message.message.type);
     const startMs = performance.now();
-    await activeConnection.session.handleMessage(message.message);
+    // Cloud-mode: propagate the validated workspace claims through async
+    // boundaries via AsyncLocalStorage. The Claude provider's spawn site
+    // reads from this store to fetch the per-workspace Anthropic credential.
+    // On-host (no workspaceAuth) — falls through to the plain await; no
+    // storage context is set so `getStore()` returns undefined.
+    const handle = (): Promise<void> => activeConnection.session.handleMessage(message.message);
+    if (activeConnection.workspaceAuth) {
+      await workspaceAuthStorage.run(activeConnection.workspaceAuth, handle);
+    } else {
+      await handle();
+    }
     const durationMs = performance.now() - startMs;
     this.recordRequestLatency(message.message.type, durationMs);
 
@@ -1747,6 +1812,20 @@ function selectWebSocketProtocol(
     }
   }
 
+  return false;
+}
+
+// Cloud-mode equivalent of selectWebSocketProtocol. The auth token is
+// validated later in attachAuthenticatedSocket — this selector only confirms
+// that the client offered a `paseo.workspace.<jwt>` subprotocol so the
+// browser handshake completes with a matching response.
+function selectWebSocketWorkspaceProtocol(protocols: Set<string>): string | false {
+  for (const protocol of protocols) {
+    const token = extractWsWorkspaceToken(protocol);
+    if (token !== null) {
+      return protocol;
+    }
+  }
   return false;
 }
 
