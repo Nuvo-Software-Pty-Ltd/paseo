@@ -110,20 +110,35 @@ export async function materializeClaudeHome(params: {
   const spawnId = randomBytes(8).toString("hex");
   const homeDir = path.join(CLAUDE_HOME_ROOT, spawnId);
   const configDir = path.join(homeDir, ".claude");
+  const isOAuth = params.credential.startsWith("sk-ant-oat");
   await fs.mkdir(configDir, { recursive: true });
-  const configPath = path.join(configDir, "config.json");
+
   // Restrictive perms — the credential lives on disk only for the spawn
   // lifetime, but tightening visibility within the container is cheap.
-  await fs.writeFile(configPath, JSON.stringify({ primaryApiKey: params.credential }), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-
-  const env: Record<string, string> = {
-    HOME: homeDir,
-    CLAUDE_CONFIG_DIR: configDir,
-    ANTHROPIC_API_KEY: params.credential,
-  };
+  let env: Record<string, string>;
+  if (isOAuth) {
+    await fs.writeFile(
+      path.join(configDir, ".credentials.json"),
+      JSON.stringify({ oauthToken: params.credential }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    env = {
+      HOME: homeDir,
+      CLAUDE_CONFIG_DIR: configDir,
+      CLAUDE_CODE_OAUTH_TOKEN: params.credential,
+    };
+  } else {
+    await fs.writeFile(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ primaryApiKey: params.credential }),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    env = {
+      HOME: homeDir,
+      CLAUDE_CONFIG_DIR: configDir,
+      ANTHROPIC_API_KEY: params.credential,
+    };
+  }
 
   const cleanup = async (): Promise<void> => {
     try {
@@ -136,7 +151,10 @@ export async function materializeClaudeHome(params: {
     }
   };
 
-  params.logger.info({ spawnId, homeDir }, "Materialized per-spawn Claude home for cloud mode");
+  params.logger.info(
+    { spawnId, homeDir, credentialKind: isOAuth ? "oauth" : "api_key" },
+    "Materialized per-spawn Claude home for cloud mode",
+  );
   return { spawnId, homeDir, configDir, env, cleanup };
 }
 

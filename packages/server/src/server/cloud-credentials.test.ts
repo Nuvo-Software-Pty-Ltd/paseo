@@ -78,6 +78,26 @@ describe("materializeClaudeHome", () => {
     expect(config.primaryApiKey).toBe("sk-ant-secret");
   });
 
+  test("writes .credentials.json with oauthToken and sets CLAUDE_CODE_OAUTH_TOKEN", async () => {
+    const home = await materializeClaudeHome({
+      credential: "sk-ant-oat01-test",
+      logger: silentLogger,
+    });
+    written.push(home.homeDir);
+
+    expect(home.env.HOME).toBe(home.homeDir);
+    expect(home.env.CLAUDE_CONFIG_DIR).toBe(home.configDir);
+    expect(home.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-test");
+    expect(home.env.ANTHROPIC_API_KEY).toBeUndefined();
+
+    const creds = JSON.parse(await fs.readFile(`${home.configDir}/.credentials.json`, "utf8"));
+    expect(creds.oauthToken).toBe("sk-ant-oat01-test");
+
+    await expect(fs.stat(`${home.configDir}/config.json`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   test("cleanup removes the spawn directory", async () => {
     const home = await materializeClaudeHome({
       credential: "sk-ant-secret",
