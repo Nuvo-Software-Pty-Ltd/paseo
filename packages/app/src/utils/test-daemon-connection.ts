@@ -12,6 +12,8 @@ import {
   buildLocalDaemonTransportUrl,
   createDesktopLocalDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
+import { createWorkspaceTokenRefreshingTransportFactory } from "@/lib/orchestra-cloud-transport";
+import { mintWorkspaceToken } from "@/lib/orchestra-cloud-client";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -127,6 +129,23 @@ export async function buildClientConfig(
   }
 
   if (connection.type === "directTcp") {
+    if (connection.workspaceId) {
+      // Cloud-mode probe: must mint a fresh workspace token and present it as
+      // the `paseo.workspace.<jwt>` subprotocol, matching the runtime active
+      // path. The on-host bcrypt-Bearer path is mutually exclusive with this.
+      const workspaceId = connection.workspaceId;
+      const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
+        tokenProvider: async () => {
+          const { token } = await mintWorkspaceToken(workspaceId);
+          return token;
+        },
+      });
+      return {
+        ...base,
+        url: buildDaemonWebSocketUrl(connection.endpoint, { useTls: connection.useTls ?? false }),
+        transportFactory,
+      };
+    }
     return {
       ...base,
       url: buildDaemonWebSocketUrl(connection.endpoint, { useTls: connection.useTls ?? false }),
