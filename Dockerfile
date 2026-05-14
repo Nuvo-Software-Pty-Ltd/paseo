@@ -77,7 +77,7 @@ WORKDIR /app
 # Tini gives us a proper PID 1 so SIGTERM from ECS reaches the daemon and the
 # graceful-shutdown path runs (close code 1000, etc.).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini ca-certificates \
+    && apt-get install -y --no-install-recommends tini ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the install root (lockfile + monorepo package.jsons + node_modules) so
