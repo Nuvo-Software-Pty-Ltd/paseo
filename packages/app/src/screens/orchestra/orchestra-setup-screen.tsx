@@ -20,6 +20,7 @@ import { connectAndProbe } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
 import { resolveAppVersion } from "@/utils/app-version";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { extractHostPortFromWebSocketUrl } from "@server/shared/daemon-endpoints";
 
 type SetupStep = "workspace" | "credential" | "connecting" | "done";
 
@@ -225,7 +226,10 @@ export function OrchestraSetupScreen() {
         10_000,
       );
 
-      const wsEndpoint = wsUrl.replace(/^wss?:\/\//, "").replace(/\/ws$/, "");
+      // parseHostPort downstream requires a literal `host:port`. When the
+      // daemon URL omits the port (ALB on default :80 / :443), the regex
+      // strip leaves a bare hostname and fails. Use the URL-aware helper.
+      const wsEndpoint = extractHostPortFromWebSocketUrl(wsUrl);
       const store = getHostRuntimeStore();
       await store.upsertDirectConnection({
         serverId,
