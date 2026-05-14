@@ -49,6 +49,29 @@ describe("normalizeStoredHostProfile", () => {
     });
   });
 
+  it("round-trips workspaceId on directTcp connections", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_cloud",
+      connections: [
+        {
+          id: "direct:cloud.example.com:443",
+          type: "directTcp",
+          endpoint: "cloud.example.com:443",
+          useTls: true,
+          workspaceId: "wks_abc123",
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "direct:cloud.example.com:443",
+      type: "directTcp",
+      endpoint: "cloud.example.com:443",
+      useTls: true,
+      workspaceId: "wks_abc123",
+    });
+  });
+
   it("namespaces relay ids only when TLS is true", () => {
     const profile = normalizeStoredHostProfile({
       serverId: "srv_relay",

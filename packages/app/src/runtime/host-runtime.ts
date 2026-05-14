@@ -38,6 +38,8 @@ import {
 } from "@/desktop/daemon/desktop-daemon-transport";
 import { replaceFetchedAgentDirectory } from "@/utils/agent-directory-sync";
 import { useSessionStore } from "@/stores/session-store";
+import { createWorkspaceTokenRefreshingTransportFactory } from "@/lib/orchestra-cloud-transport";
+import { mintWorkspaceToken } from "@/lib/orchestra-cloud-client";
 
 export type HostRuntimeConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
 
@@ -446,7 +448,7 @@ function probeIntervalForConnection(
   return PROBE_MAX_BACKOFF_MS;
 }
 
-function createDefaultDeps(): HostRuntimeControllerDeps {
+export function createDefaultDeps(): HostRuntimeControllerDeps {
   return {
     createClient: ({ host, connection, clientId, runtimeGeneration }) => {
       const localTransportFactory = createDesktopLocalDaemonTransportFactory();
@@ -468,6 +470,24 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
         });
       }
       if (connection.type === "directTcp") {
+        const workspaceId = connection.workspaceId;
+        if (workspaceId) {
+          // Cloud-mode: mint a fresh short-lived workspace token per WS connect.
+          // Token lives only in the transport closure, never persisted.
+          const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
+            tokenProvider: async () => {
+              const { token } = await mintWorkspaceToken(workspaceId);
+              return token;
+            },
+          });
+          return new DaemonClient({
+            ...base,
+            url: buildDaemonWebSocketUrl(connection.endpoint, {
+              useTls: connection.useTls ?? false,
+            }),
+            transportFactory,
+          });
+        }
         return new DaemonClient({
           ...base,
           url: buildDaemonWebSocketUrl(connection.endpoint, {
@@ -1408,11 +1428,13 @@ export class HostRuntimeStore {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    workspaceId?: string;
     label?: string;
     existingClient?: DaemonClient;
   }): Promise<HostProfile> {
     const endpoint = normalizeHostPort(input.endpoint);
     const password = input.password?.trim();
+    const workspaceId = input.workspaceId?.trim();
     return this.upsertHostConnection({
       serverId: input.serverId,
       label: input.label,
@@ -1422,6 +1444,7 @@ export class HostRuntimeStore {
         endpoint,
         useTls: input.useTls ?? false,
         ...(password ? { password } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
       },
       existingClient: input.existingClient,
     });
@@ -2052,6 +2075,7 @@ export interface HostMutations {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    workspaceId?: string;
     label?: string;
   }) => Promise<HostProfile>;
   probeAndUpsertDirectConnection: (input: {

@@ -62,7 +62,8 @@ function hostConnectionEquals(left: HostConnection, right: HostConnection): bool
     return (
       left.endpoint === right.endpoint &&
       (left.useTls ?? false) === (right.useTls ?? false) &&
-      left.password === right.password
+      left.password === right.password &&
+      left.workspaceId === right.workspaceId
     );
   }
   if (left.type === "directSocket" && right.type === "directSocket") {
@@ -240,6 +241,26 @@ function toObjectRecord(value: unknown): Record<string, unknown> | undefined {
   return isPlainRecord(value) ? value : undefined;
 }
 
+function normalizeStoredDirectTcpConnection(
+  record: Record<string, unknown>,
+): HostConnection | null {
+  try {
+    const endpoint = normalizeLoopbackToLocalhost(
+      normalizeHostPort(typeof record.endpoint === "string" ? record.endpoint : ""),
+    );
+    return DirectTcpHostConnectionSchema.parse({
+      id: `direct:${endpoint}`,
+      type: "directTcp",
+      endpoint,
+      useTls: record.useTls,
+      ...(typeof record.password === "string" ? { password: record.password } : {}),
+      ...(typeof record.workspaceId === "string" ? { workspaceId: record.workspaceId } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
 function normalizeStoredConnection(connection: unknown): HostConnection | null {
   const record = toObjectRecord(connection);
   if (!record) {
@@ -247,20 +268,7 @@ function normalizeStoredConnection(connection: unknown): HostConnection | null {
   }
   const type = record.type;
   if (type === "directTcp") {
-    try {
-      const endpoint = normalizeLoopbackToLocalhost(
-        normalizeHostPort(typeof record.endpoint === "string" ? record.endpoint : ""),
-      );
-      return DirectTcpHostConnectionSchema.parse({
-        id: `direct:${endpoint}`,
-        type: "directTcp",
-        endpoint,
-        useTls: record.useTls,
-        ...(typeof record.password === "string" ? { password: record.password } : {}),
-      });
-    } catch {
-      return null;
-    }
+    return normalizeStoredDirectTcpConnection(record);
   }
   if (type === "directSocket") {
     const path = (typeof record.path === "string" ? record.path : "").trim();

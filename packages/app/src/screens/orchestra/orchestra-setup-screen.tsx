@@ -235,6 +235,7 @@ export function OrchestraSetupScreen() {
         serverId,
         endpoint: wsEndpoint,
         useTls: wsUrl.startsWith("wss"),
+        workspaceId: workspace.workspaceId,
         label: workspace.displayName ?? workspace.workspaceId,
       });
 
