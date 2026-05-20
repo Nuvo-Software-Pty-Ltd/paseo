@@ -107,7 +107,7 @@ COPY --from=builder /app/packages/highlight/dist ./packages/highlight/dist
 # Daemon's writable working dir — $PASEO_HOME. ECS will mount a per-workspace
 # EBS volume here at D-2; D-0 just uses a container-local path.
 ENV PASEO_HOME=/var/lib/paseo
-RUN mkdir -p "$PASEO_HOME" && chown -R node:node "$PASEO_HOME" /app
+RUN mkdir -p "$PASEO_HOME" /workspace && chown -R node:node "$PASEO_HOME" /workspace /app
 
 # Cloud-mode flag is baked in. Override with -e PASEO_CLOUD_MODE= (empty) for
 # on-host smoke tests.
