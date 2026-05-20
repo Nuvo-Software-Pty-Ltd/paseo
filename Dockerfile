@@ -80,6 +80,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tini ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
+# Claude Code CLI — the daemon's agent runtime spawns it per-turn. Pinned to a
+# known-good version; bump deliberately when the SDK upgrades.
+RUN npm install -g @anthropic-ai/claude-code@2.1.145 \
+    && npm cache clean --force
+
 # Copy the install root (lockfile + monorepo package.jsons + node_modules) so
 # npm can resolve workspace bins at runtime.
 COPY --from=builder /app/package.json /app/package-lock.json ./
