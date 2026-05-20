@@ -8,22 +8,78 @@ import {
   View,
   type PressableStateCallbackType,
 } from "react-native";
-import { Folder } from "lucide-react-native";
+import { Cloud, Folder } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useQuery } from "@tanstack/react-query";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { shortenPath } from "@/utils/shorten-path";
 import { useRecommendedProjectPaths } from "@/stores/session-store-hooks";
-import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import {
+  useHostRuntimeClient,
+  useHostRuntimeIsConnected,
+  useIsCloudHost,
+} from "@/runtime/host-runtime";
 import { useOpenProject } from "@/hooks/use-open-project";
+import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
+import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 
 interface PathRowProps {
   path: string;
   active: boolean;
   onSelect: (path: string) => void;
+}
+
+interface CloudWorkspaceRowProps {
+  workspace: WorkspaceRecord;
+  onSelect: (workspace: WorkspaceRecord) => void;
+}
+
+function CloudWorkspaceRow({ workspace, onSelect }: CloudWorkspaceRowProps) {
+  const { theme } = useUnistyles();
+  const handlePress = useCallback(() => {
+    onSelect(workspace);
+  }, [onSelect, workspace]);
+  const pressableStyle = useCallback(
+    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.row,
+      (Boolean(hovered) || pressed) && {
+        backgroundColor: theme.colors.surface1,
+      },
+    ],
+    [theme.colors.surface1],
+  );
+  const rowTextStyle = useMemo(
+    () => [styles.rowText, { color: theme.colors.foreground }],
+    [theme.colors.foreground],
+  );
+  const subTextStyle = useMemo(
+    () => [styles.rowSubText, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const displayLabel =
+    workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
+  return (
+    <Pressable style={pressableStyle} onPress={handlePress}>
+      <View style={styles.rowContent}>
+        <View style={styles.iconSlot}>
+          <Cloud size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />
+        </View>
+        <View style={styles.rowTextColumn}>
+          <Text style={rowTextStyle} numberOfLines={1}>
+            {displayLabel}
+          </Text>
+          {workspace.repoUrl ? (
+            <Text style={subTextStyle} numberOfLines={1}>
+              {workspace.repoUrl}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    </Pressable>
+  );
 }
 
 function PathRow({ path, active, onSelect }: PathRowProps) {
@@ -68,12 +124,18 @@ export function ProjectPickerModal() {
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const recommendedPaths = useRecommendedProjectPaths(serverId);
+  const isCloudHost = useIsCloudHost(serverId);
 
   const inputRef = useRef<TextInput>(null);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const openProject = useOpenProject(serverId);
+
+  const cloudWorkspacesQuery = useCloudWorkspaces(serverId, {
+    enabled: isCloudHost && open,
+  });
+  const cloudWorkspaces = cloudWorkspacesQuery.data ?? [];
 
   const directorySuggestionsQuery = useQuery({
     queryKey: ["project-picker-directory-suggestions", serverId, query],
@@ -134,6 +196,16 @@ export function ProjectPickerModal() {
     if (!trimmed) return;
     void handleSelectPath(trimmed);
   }, [handleSelectPath, query]);
+
+  const handleSelectCloudWorkspace = useCallback(
+    (workspace: WorkspaceRecord) => {
+      // The daemon's container exposes each cloud workspace at this canonical
+      // mount; openProject clones-on-miss, so we never client-side-precheck.
+      const path = `/workspace/${workspace.workspaceId}/.git-canonical`;
+      void handleSelectPath(path);
+    },
+    [handleSelectPath],
+  );
 
   const handleChangeQuery = useCallback((text: string) => {
     setQuery(text);
@@ -221,6 +293,10 @@ export function ProjectPickerModal() {
     () => [styles.emptyText, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
   );
+  const sectionHeaderStyle = useMemo(
+    () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
 
   if (!serverId) return null;
 
@@ -256,6 +332,18 @@ export function ProjectPickerModal() {
             {isSubmitting ? <Text style={emptyTextStyle}>Opening project...</Text> : null}
             {!isSubmitting && options.length === 0 && !query.trim() ? (
               <Text style={emptyTextStyle}>Start typing a path</Text>
+            ) : null}
+            {!isSubmitting && isCloudHost && cloudWorkspaces.length > 0 ? (
+              <View style={styles.section}>
+                <Text style={sectionHeaderStyle}>Cloud workspaces</Text>
+                {cloudWorkspaces.map((workspace) => (
+                  <CloudWorkspaceRow
+                    key={workspace.workspaceId}
+                    workspace={workspace}
+                    onSelect={handleSelectCloudWorkspace}
+                  />
+                ))}
+              </View>
             ) : null}
             {!isSubmitting && !(options.length === 0 && !query.trim()) ? (
               <>
@@ -332,6 +420,25 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: "400",
     lineHeight: 20,
     flexShrink: 1,
+  },
+  rowTextColumn: {
+    flex: 1,
+    flexShrink: 1,
+  },
+  rowSubText: {
+    fontSize: theme.fontSize.xs,
+    lineHeight: 16,
+  },
+  section: {
+    paddingBottom: theme.spacing[2],
+  },
+  sectionHeader: {
+    paddingHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[2],
+    paddingBottom: theme.spacing[1],
+    fontSize: theme.fontSize.xs,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
   emptyText: {
     paddingHorizontal: theme.spacing[4],

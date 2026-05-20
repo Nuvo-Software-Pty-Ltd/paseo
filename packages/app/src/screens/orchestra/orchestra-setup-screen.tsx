@@ -1,9 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { useRouter } from "expo-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowLeft, Check } from "lucide-react-native";
+import { CLOUD_WORKSPACES_QUERY_KEY } from "@/hooks/use-cloud-workspaces";
 import { AdaptiveTextInput } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import {
@@ -141,6 +143,7 @@ export function OrchestraSetupScreen() {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const [step, setStep] = useState<SetupStep>("workspace");
   const [repoUrl, setRepoUrl] = useState("");
@@ -241,6 +244,10 @@ export function OrchestraSetupScreen() {
 
       void client.close();
 
+      // Refresh the cached cloud workspaces so the project picker on the
+      // host screen reflects the just-created workspace immediately.
+      void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
+
       setStep("done");
       router.replace(`/h/${serverId}`);
     } catch (err) {
@@ -249,7 +256,7 @@ export function OrchestraSetupScreen() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, workspace, apiKey, router]);
+  }, [isBusy, workspace, apiKey, router, queryClient]);
 
   const scrollContentStyle = useMemo(
     () => [styles.container, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }],
