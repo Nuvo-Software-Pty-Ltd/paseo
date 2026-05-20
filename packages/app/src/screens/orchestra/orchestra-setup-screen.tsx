@@ -159,10 +159,34 @@ export function OrchestraSetupScreen() {
       void clearSession();
       router.replace("/welcome");
     } else if (step === "credential") {
+      // Clear cached workspace/apiKey so the next forward press re-fetches
+      // from listWorkspaces() — if a deletion happened out-of-band while the
+      // user was on the credential step, we don't carry a dead workspaceId.
       setStep("workspace");
+      setWorkspace(null);
+      setApiKey("");
       setError("");
     }
   }, [step, router]);
+
+  const reconcileCachedWorkspace = useCallback(async (): Promise<WorkspaceRecord | null> => {
+    const list = await listWorkspaces();
+    const cachedId = workspace?.workspaceId;
+    if (cachedId) {
+      const stillExists = list.find((entry) => entry.workspaceId === cachedId);
+      if (stillExists) {
+        setWorkspace(stillExists);
+        return stillExists;
+      }
+    }
+    // Cache miss — workspace was deleted out-of-band, or the list is empty.
+    // Reset the wizard to the workspace step with an inline explanation.
+    setWorkspace(null);
+    setApiKey("");
+    setStep("workspace");
+    setError("Your workspace is no longer available. Create a new one.");
+    return null;
+  }, [workspace]);
 
   const handleCreateWorkspace = useCallback(async () => {
     if (isBusy) return;
@@ -208,10 +232,19 @@ export function OrchestraSetupScreen() {
     setError("");
 
     try {
-      await setAnthropicCredential(workspace.workspaceId, trimmedKey);
+      // Re-derive the workspace from the auth service before any mutation —
+      // the cached record could be stale if the workspace was deleted while
+      // the user was on this step.
+      const fresh = await reconcileCachedWorkspace();
+      if (!fresh) {
+        // reconcileCachedWorkspace already reset the wizard + set error.
+        return;
+      }
+
+      await setAnthropicCredential(fresh.workspaceId, trimmedKey);
       setStep("connecting");
 
-      const { token } = await mintWorkspaceToken(workspace.workspaceId);
+      const { token } = await mintWorkspaceToken(fresh.workspaceId);
       const wsUrl = getOrchestraDaemonWsUrl();
       const clientId = await getOrCreateClientId();
       const transportFactory = createWorkspaceTokenTransportFactory(token);
@@ -238,8 +271,8 @@ export function OrchestraSetupScreen() {
         serverId,
         endpoint: wsEndpoint,
         useTls: wsUrl.startsWith("wss"),
-        workspaceId: workspace.workspaceId,
-        label: workspace.displayName ?? workspace.workspaceId,
+        workspaceId: fresh.workspaceId,
+        label: fresh.displayName ?? fresh.workspaceId,
       });
 
       void client.close();
@@ -256,7 +289,7 @@ export function OrchestraSetupScreen() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, workspace, apiKey, router, queryClient]);
+  }, [isBusy, workspace, apiKey, router, queryClient, reconcileCachedWorkspace]);
 
   const scrollContentStyle = useMemo(
     () => [styles.container, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }],
