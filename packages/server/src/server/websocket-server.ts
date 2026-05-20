@@ -80,6 +80,10 @@ interface PendingConnection {
   // Cloud-mode only: workspace claims captured at upgrade time. Propagate
   // onto the SessionConnection once the hello arrives.
   workspaceAuth?: WorkspaceAuthClaims;
+  // Cloud-mode only: raw workspace JWT captured at upgrade time. Forwarded
+  // to the Session so the per-session MCP HTTP transport can re-present it
+  // as Bearer when calling the daemon's own /mcp/agents endpoint.
+  workspaceToken?: string;
 }
 
 interface WebSocketServerConfig {
@@ -629,6 +633,7 @@ export class VoiceAssistantWebSocketServer {
     password: string | undefined,
   ): Promise<void> {
     let workspaceClaims: WorkspaceAuthClaims | undefined;
+    let workspaceTokenRaw: string | undefined;
     if (this.workspaceAuth) {
       const requestMetadata = extractSocketRequestMetadata(request);
       const protocol = extractWsWorkspaceProtocol(request.headers["sec-websocket-protocol"]);
@@ -651,6 +656,11 @@ export class VoiceAssistantWebSocketServer {
         return;
       }
       workspaceClaims = claims;
+      // Preserve the raw token alongside the claims so the per-session MCP
+      // HTTP transport (session.ts initializeAgentMcp) can re-present it as
+      // Bearer to /mcp/agents. The token is daemon-internal state — it must
+      // never travel through any RPC payload (F3 design-out).
+      workspaceTokenRaw = token;
     } else if (password) {
       const requestMetadata = extractSocketRequestMetadata(request);
       const protocol = extractWsBearerProtocol(request.headers["sec-websocket-protocol"]);
@@ -667,7 +677,7 @@ export class VoiceAssistantWebSocketServer {
       }
     }
 
-    await this.attachSocket(ws, request, undefined, workspaceClaims);
+    await this.attachSocket(ws, request, undefined, workspaceClaims, workspaceTokenRaw);
   }
 
   public broadcast(message: WSOutboundMessage): void {
@@ -828,6 +838,7 @@ export class VoiceAssistantWebSocketServer {
     request?: unknown,
     metadata?: ExternalSocketMetadata,
     workspaceAuth?: WorkspaceAuthClaims,
+    workspaceToken?: string,
   ): Promise<void> {
     const requestMetadata = extractSocketRequestMetadata(request);
     const connectionLoggerFields: Record<string, string> = {
@@ -851,6 +862,7 @@ export class VoiceAssistantWebSocketServer {
       connectionLogger,
       helloTimeout: null,
       ...(workspaceAuth ? { workspaceAuth } : {}),
+      ...(workspaceToken ? { workspaceToken } : {}),
     };
     const timeout = setTimeout(() => {
       if (this.pendingConnections.get(ws) !== pending) {
@@ -890,9 +902,17 @@ export class VoiceAssistantWebSocketServer {
     clientCapabilities: Record<string, unknown> | null;
     connectionLogger: pino.Logger;
     workspaceAuth?: WorkspaceAuthClaims;
+    workspaceToken?: string;
   }): SessionConnection {
-    const { ws, clientId, appVersion, clientCapabilities, connectionLogger, workspaceAuth } =
-      params;
+    const {
+      ws,
+      clientId,
+      appVersion,
+      clientCapabilities,
+      connectionLogger,
+      workspaceAuth,
+      workspaceToken,
+    } = params;
     let connection: SessionConnection | null = null;
 
     const session = new Session({
@@ -930,6 +950,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceGitService: this.workspaceGitService,
       daemonConfigStore: this.daemonConfigStore,
       mcpBaseUrl: this.mcpBaseUrl,
+      workspaceToken: workspaceToken ?? null,
       stt: () => this.speech?.resolveStt() ?? null,
       tts: () => this.speech?.resolveTts() ?? null,
       terminalManager: this.terminalManager,
@@ -1077,6 +1098,7 @@ export class VoiceAssistantWebSocketServer {
       clientCapabilities: message.capabilities ?? null,
       connectionLogger,
       workspaceAuth: pending.workspaceAuth,
+      workspaceToken: pending.workspaceToken,
     });
     this.sessions.set(ws, connection);
     this.externalSessionsByKey.set(clientId, connection);

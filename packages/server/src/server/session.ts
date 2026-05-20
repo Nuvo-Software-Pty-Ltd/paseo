@@ -540,6 +540,17 @@ export interface SessionOptions {
   workspaceGitService: WorkspaceGitService;
   daemonConfigStore: DaemonConfigStore;
   mcpBaseUrl?: string | null;
+  // Raw workspace JWT captured at WS upgrade in cloud mode. Plumbed into the
+  // per-session MCP HTTP transport so loopback requests to /mcp/agents (which
+  // sits behind the cloud-mode workspace-token middleware) carry a valid
+  // Authorization header. Undefined / null on the on-host bcrypt-Bearer path.
+  // The token is daemon-internal state — it never travels through any RPC
+  // payload (F3 design-out: workspace identity is JWT-claim-only on the wire).
+  // COMPAT(mcpHttpWorkspaceToken): added in v0.1.X for D-1.5 — the upgrade-time
+  // JWT expires when the captured exp passes; MCP transport then starts
+  // returning 401 while the WS stays open. Day-1 accepts this degradation
+  // (see 70-security/saas-auth.md § "Workspace token TTL — observed binding").
+  workspaceToken?: string | null;
   stt: Resolvable<SpeechToTextProvider | null>;
   tts: Resolvable<TextToSpeechProvider | null>;
   terminalManager: TerminalManager | null;
@@ -723,6 +734,7 @@ export class Session {
   private readonly workspaceGitService: WorkspaceGitService;
   private readonly daemonConfigStore: DaemonConfigStore;
   private readonly mcpBaseUrl: string | null;
+  private readonly workspaceToken: string | null;
   private readonly downloadTokenStore: DownloadTokenStore;
   private readonly pushTokenStore: PushTokenStore;
   private unsubscribeAgentEvents: (() => void) | null = null;
@@ -808,6 +820,7 @@ export class Session {
       workspaceGitService,
       daemonConfigStore,
       mcpBaseUrl,
+      workspaceToken,
       stt,
       tts,
       terminalManager,
@@ -853,6 +866,7 @@ export class Session {
     this.workspaceGitService = workspaceGitService;
     this.daemonConfigStore = daemonConfigStore;
     this.mcpBaseUrl = mcpBaseUrl ?? null;
+    this.workspaceToken = workspaceToken ?? null;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1123,7 +1137,17 @@ export class Session {
         );
         return;
       }
-      const transport = new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl));
+      // Cloud mode: forward the workspace JWT captured at WS upgrade so the
+      // loopback request to /mcp/agents passes through the require-workspace
+      // middleware. On-host: omit requestInit so the transport behaves
+      // identically to its pre-D-1.5 construction (zero-arg, no headers).
+      const transport = this.workspaceToken
+        ? new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl), {
+            requestInit: {
+              headers: { Authorization: `Bearer ${this.workspaceToken}` },
+            },
+          })
+        : new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl));
 
       this.agentMcpClient = await experimental_createMCPClient({
         transport,

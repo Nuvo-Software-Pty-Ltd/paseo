@@ -783,6 +783,23 @@ export async function createPaseoDaemon(
           "Agent MCP request",
         );
       }
+      // Defense-in-depth: the global require-workspace middleware (mounted
+      // above) already rejects MCP requests without a valid JWT in cloud
+      // mode. This in-handler gate guards against a future on-host-path bug
+      // letting an unauthenticated request reach the MCP endpoint. F3: we
+      // never look at a workspaceId on the wire — only the JWT-derived
+      // claim attached by the middleware.
+      if (isPaseoCloudMode() && !req.workspaceAuth?.workspaceId) {
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: "workspace token required",
+          },
+          id: null,
+        });
+        return;
+      }
       try {
         const sessionId = req.header("mcp-session-id");
         let transport = sessionId ? agentMcpTransports.get(sessionId) : undefined;
