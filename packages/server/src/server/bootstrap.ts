@@ -409,8 +409,16 @@ export async function createPaseoDaemon(
           "(workspace-token validation cannot start without the auth service's JWKS).",
       );
     }
-    workspaceAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    const jwksAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    workspaceAuthCallback = jwksAuthCallback;
     logger.info({ jwksUrl }, "Cloud-mode workspace-token auth enabled");
+    // Fire-and-forget JWKS pre-warm: triggers the outbound JWKS fetch now so
+    // the first user-driven WS upgrade doesn't pay JWKS cold-start latency
+    // (which previously caused a one-time WS probe timeout on fresh daemon
+    // tasks). Failures are logged but non-fatal — a transient auth-service
+    // outage at boot must not kill the daemon container.
+    void jwksAuthCallback.prewarm();
+    logger.info("JWKS pre-warm scheduled");
     app.use(
       createRequireWorkspaceMiddleware(workspaceAuthCallback, (context) => {
         logger.warn(context, "Rejected HTTP request with invalid workspace token");
