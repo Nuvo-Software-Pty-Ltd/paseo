@@ -7,8 +7,12 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import * as executableUtils from "../../../../utils/executable.js";
 import {
+  assertClaudeCliVersionCoherence,
   ClaudeAgentClient,
+  ClaudeCliVersionMismatchError,
   convertClaudeHistoryEntry,
+  extractClaudeCliVersion,
+  getExpectedClaudeCliVersion,
   normalizeClaudeAskUserQuestionUpdatedInput,
 } from "./agent.js";
 import type { AgentTimelineItem, AgentUsage, AgentStreamEvent } from "../../agent-sdk-types.js";
@@ -427,6 +431,44 @@ describe("ClaudeAgentClient binary resolution", () => {
     );
 
     await session.close();
+  });
+});
+
+describe("assertClaudeCliVersionCoherence", () => {
+  test("throws when actual major.minor diverges from expected", () => {
+    expect(() => assertClaudeCliVersionCoherence("2.0.99 (Claude Code)", "2.1.133")).toThrow(
+      ClaudeCliVersionMismatchError,
+    );
+    expect(() => assertClaudeCliVersionCoherence("3.1.0", "2.1.133")).toThrow(
+      ClaudeCliVersionMismatchError,
+    );
+  });
+
+  test("accepts matching major.minor across differing patch versions", () => {
+    expect(() => assertClaudeCliVersionCoherence("2.1.145 (Claude Code)", "2.1.133")).not.toThrow();
+  });
+
+  test("no-ops when expected is null (SDK pin unreadable)", () => {
+    expect(() => assertClaudeCliVersionCoherence("2.1.145", null)).not.toThrow();
+  });
+
+  test("throws when actual version is unparseable but expected is known", () => {
+    expect(() => assertClaudeCliVersionCoherence("garbage", "2.1.133")).toThrow(
+      ClaudeCliVersionMismatchError,
+    );
+  });
+
+  test("extractClaudeCliVersion pulls the semver triple from free-form output", () => {
+    expect(extractClaudeCliVersion("2.1.145 (Claude Code)")).toBe("2.1.145");
+    expect(extractClaudeCliVersion("v2.1.145")).toBe("2.1.145");
+    expect(extractClaudeCliVersion(null)).toBeNull();
+    expect(extractClaudeCliVersion("")).toBeNull();
+  });
+
+  test("getExpectedClaudeCliVersion reads claudeCodeVersion from the installed SDK", () => {
+    // The SDK is a real dependency in node_modules; the field must be readable
+    // off disk despite the SDK's exports field blocking direct subpath require.
+    expect(getExpectedClaudeCliVersion()).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
 
