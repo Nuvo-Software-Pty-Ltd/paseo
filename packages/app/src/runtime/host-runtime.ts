@@ -2069,6 +2069,23 @@ export function useHosts(): HostProfile[] {
   );
 }
 
+export function useIsCloudHost(serverId: string | null | undefined): boolean {
+  const hosts = useHosts();
+  return useMemo(() => {
+    if (!serverId) return false;
+    const host = hosts.find((entry) => entry.serverId === serverId);
+    if (!host) return false;
+    const preferred = host.connections.find(
+      (connection) => connection.id === host.preferredConnectionId,
+    );
+    return (
+      preferred?.type === "directTcp" &&
+      typeof preferred.workspaceId === "string" &&
+      preferred.workspaceId.length > 0
+    );
+  }, [hosts, serverId]);
+}
+
 export interface HostMutations {
   upsertDirectConnection: (input: {
     serverId: string;
