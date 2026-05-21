@@ -10,4 +10,8 @@ Filed during D-1.5 execution; explicitly NOT in scope per PLAN-daemon.md last se
 
 ## Daemon-side follow-ups discovered during D-1.5
 
-(empty so far; add as discovered)
+- **Plumb `PASEO_DAEMON_IMAGE_TAG` into the Dockerfile / ECS task definition.**
+  Item 7's `fireDaemonVersionBeacon` reads `PASEO_DAEMON_IMAGE_TAG` and reports the value to the auth service's `versions#daemon` record. The env var is not yet wired anywhere — the Dockerfile bakes no `ENV PASEO_DAEMON_IMAGE_TAG`, and the ECS task definition does not inject one. Until that lands, every beacon reports `daemonImageTag: "unknown"`. Suggested wiring: a build arg in `Dockerfile` that captures the git short SHA at image build, then a corresponding `--build-arg` in `scripts/build-daemon-image.sh` (or whatever wraps the CI build). When the operator-triage `GET /api/v1/cloud/_meta/daemon-versions` route (PLAN-auth § Item 7 step 5) lands, this becomes the user-visible value, so it should be plumbed before that route ships.
+
+- **Open-core duplication anti-drift guard for `cloud-version-beacon` body shape.**
+  `cloud-version-beacon.ts` mirrors `@orchestra/cloud-shared`'s `DaemonVersionsBody` Zod schema (`{ cliVersion, sdkVersion, daemonImageTag }`, each `userString({ maxLength: 64 })`). Today there is no automation that catches a one-sided edit. Same pattern as the `cloud-clone.ts:buildGithubTokenSecretId` ↔ `keys.accountGithubToken()` duplication called out in PLAN-auth § "Deferred follow-ups" row 4 — fold into that same anti-drift item rather than filing twice.
