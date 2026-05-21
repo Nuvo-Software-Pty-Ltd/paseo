@@ -149,6 +149,7 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
+import { fireDaemonVersionBeacon } from "./cloud-version-beacon.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -419,6 +420,12 @@ export async function createPaseoDaemon(
     // outage at boot must not kill the daemon container.
     void jwksAuthCallback.prewarm();
     logger.info("JWKS pre-warm scheduled");
+    // Daemon-version beacon: fire-and-forget POST to the auth service with
+    // the CLI + SDK + image-tag triple this container is running. Operators
+    // query the auth service record (versions#daemon) when triaging which
+    // daemon is on the wire. Failure to deliver is logged but non-fatal —
+    // a transient auth-service outage at boot must not kill the daemon.
+    fireDaemonVersionBeacon({ logger });
     app.use(
       createRequireWorkspaceMiddleware(workspaceAuthCallback, (context) => {
         logger.warn(context, "Rejected HTTP request with invalid workspace token");
