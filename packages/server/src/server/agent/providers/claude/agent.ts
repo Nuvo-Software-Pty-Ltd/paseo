@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { promises } from "node:fs";
+import { promises, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -1301,6 +1302,75 @@ export class ClaudeAgentClient implements AgentClient {
   }
 }
 
+const moduleRequire = createRequire(import.meta.url);
+
+// Pulls a semver triple (e.g. "2.1.145") out of free-form version output
+// like "2.1.145 (Claude Code)" or a plain semver string.
+export function extractClaudeCliVersion(versionOutput: string | null): string | null {
+  if (!versionOutput) return null;
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(versionOutput);
+  return m ? `${m[1]}.${m[2]}.${m[3]}` : null;
+}
+
+// The SDK ships a `claudeCodeVersion` field in its package.json that names
+// the CLI version it was built against. We read it as the source of truth
+// for the expected-CLI pin; if the field disappears in a future SDK release,
+// the runtime check no-ops rather than false-failing.
+//
+// The SDK's exports field blocks `require("…/package.json")` outright, so
+// we resolve the SDK's main entrypoint and read the sibling package.json
+// off disk.
+export function getExpectedClaudeCliVersion(): string | null {
+  try {
+    const mainPath = moduleRequire.resolve("@anthropic-ai/claude-agent-sdk");
+    const pkgPath = path.join(path.dirname(mainPath), "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { claudeCodeVersion?: unknown };
+    return typeof pkg.claudeCodeVersion === "string"
+      ? extractClaudeCliVersion(pkg.claudeCodeVersion)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function majorMinor(version: string): string | null {
+  const m = /^(\d+)\.(\d+)/.exec(version);
+  return m ? `${m[1]}.${m[2]}` : null;
+}
+
+export class ClaudeCliVersionMismatchError extends Error {
+  constructor(
+    public readonly actual: string,
+    public readonly expected: string,
+  ) {
+    super(
+      `Claude Code CLI version mismatch: PATH has ${actual}, paseo expects ${expected} ` +
+        `(major.minor must match @anthropic-ai/claude-agent-sdk's claudeCodeVersion pin). ` +
+        `Reinstall the runtime image or override the binary via ?command=replace.`,
+    );
+    this.name = "ClaudeCliVersionMismatchError";
+  }
+}
+
+// Fail-loud on CLI↔SDK drift in the resolve-binary path. Replace-mode
+// bypasses the check on purpose so operators can hot-swap a custom binary
+// for local dev; the default PATH path enforces.
+export function assertClaudeCliVersionCoherence(
+  actualVersionRaw: string | null,
+  expectedVersion: string | null,
+): void {
+  if (!expectedVersion) return;
+  const actual = extractClaudeCliVersion(actualVersionRaw);
+  if (!actual) {
+    throw new ClaudeCliVersionMismatchError("unknown", expectedVersion);
+  }
+  const actualMM = majorMinor(actual);
+  const expectedMM = majorMinor(expectedVersion);
+  if (!actualMM || !expectedMM || actualMM !== expectedMM) {
+    throw new ClaudeCliVersionMismatchError(actual, expectedVersion);
+  }
+}
+
 async function resolveClaudeBinary(runtimeSettings?: ProviderRuntimeSettings): Promise<string> {
   const command = runtimeSettings?.command;
   if (command?.mode === "replace") {
@@ -1312,6 +1382,11 @@ async function resolveClaudeBinary(runtimeSettings?: ProviderRuntimeSettings): P
 
   const found = await findExecutable("claude");
   if (found) {
+    const expected = getExpectedClaudeCliVersion();
+    if (expected) {
+      const versionRaw = await resolveClaudeVersion(runtimeSettings);
+      assertClaudeCliVersionCoherence(versionRaw, expected);
+    }
     return found;
   }
   throw new Error(

@@ -1,22 +1,9 @@
 import { Router, json } from "express";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
 import { z } from "zod";
-import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Logger } from "pino";
-
-// Secrets Manager path template for the account's GitHub OAuth token.
-// Mirrors `@orchestra/cloud-shared`'s `keys.accountGithubToken()` —
-// duplicated by design to keep the AGPL / proprietary open-core boundary
-// clean. If the template changes in cloud-shared/keys.ts, update here too.
-function buildGithubTokenSecretId(stage: string, accountId: string): string {
-  return `orchestra/${stage}/account/${accountId}/github-token`;
-}
-
-function resolveStage(): string {
-  const stage = process.env.ORCHESTRA_STAGE?.trim();
-  return stage && stage.length > 0 ? stage : "dev";
-}
+import { cloneWorkspaceRepo, resolveStage } from "./cloud-clone.js";
 
 const CloneRepoBody = z.object({
   accountId: z.string().min(1),
@@ -34,21 +21,6 @@ function verifyHmac(body: string, hmacHeader: string | undefined, key: string): 
   if (!hmacHeader) return false;
   const expected = crypto.createHmac("sha256", key).update(body).digest("hex");
   return crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(hmacHeader, "hex"));
-}
-
-function parseGitHubRepoUrl(repoUrl: string): { owner: string; repo: string } | null {
-  try {
-    const url = new URL(repoUrl);
-    if (url.hostname !== "github.com") return null;
-    const parts = url.pathname
-      .replace(/^\//, "")
-      .replace(/\.git$/, "")
-      .split("/");
-    if (parts.length < 2) return null;
-    return { owner: parts[0], repo: parts[1] };
-  } catch {
-    return null;
-  }
 }
 
 export function createInternalRoutes(options: InternalRoutesOptions): Router {
@@ -86,53 +58,39 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
       const { accountId, workspaceId, repoUrl } = parsed.data;
       logger.info({ accountId, workspaceId, repoUrl }, "Processing internal clone-repo request");
 
-      const ghParsed = parseGitHubRepoUrl(repoUrl);
-      if (!ghParsed) {
-        logger.error({ repoUrl }, "Invalid GitHub repo URL");
-        res.status(400).json({ error: "Invalid GitHub repository URL" });
-        return;
-      }
-
-      let ghToken: string;
-      const ghTokenSecretId = buildGithubTokenSecretId(stage, accountId);
+      let workspacePath: string;
       try {
-        const result = await smClient.send(
-          new GetSecretValueCommand({ SecretId: ghTokenSecretId }),
-        );
-        if (!result.SecretString) {
-          throw new Error("Secret is empty");
+        const result = await cloneWorkspaceRepo({
+          accountId,
+          workspaceId,
+          repoUrl,
+          smClient,
+          logger,
+          stage,
+        });
+        workspacePath = result.workspacePath;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/Invalid GitHub repository URL/.test(message)) {
+          logger.error({ repoUrl }, "Invalid GitHub repo URL");
+          res.status(400).json({ error: "Invalid GitHub repository URL" });
+          return;
         }
-        ghToken = result.SecretString;
-      } catch (err) {
-        logger.error(
-          { err, accountId, secretId: ghTokenSecretId },
-          "Failed to fetch GitHub token from Secrets Manager",
-        );
-        res.status(500).json({ error: "Failed to retrieve GitHub credentials" });
-        return;
-      }
-
-      const cloneUrl = `https://x-access-token:${ghToken}@github.com/${ghParsed.owner}/${ghParsed.repo}.git`;
-      const destPath = `/workspace/${workspaceId}/.git-canonical/`;
-
-      logger.info(
-        { workspaceId, owner: ghParsed.owner, repo: ghParsed.repo, destPath },
-        "Starting git clone",
-      );
-
-      try {
-        await runGitClone(cloneUrl, destPath);
-      } catch (err) {
+        if (/Secret is empty|Secret not found|SecretsManager/.test(message)) {
+          // Credential-fetch failure: surface as auth/credentials issue, not
+          // a generic 500. Matches prior shape so the auth-service caller's
+          // error handling stays unchanged.
+          res.status(500).json({ error: "Failed to retrieve GitHub credentials" });
+          return;
+        }
         logger.error({ err, workspaceId }, "git clone failed");
         res.status(500).json({
           error: "git clone failed",
-          message: err instanceof Error ? err.message : String(err),
+          message,
         });
         return;
       }
 
-      const workspacePath = `/workspace/${workspaceId}`;
-      logger.info({ workspaceId, workspacePath }, "Clone completed successfully");
       res.status(200).json({ workspacePath });
     } catch (err) {
       logger.error({ err }, "Unhandled error in clone-repo handler");
@@ -147,29 +105,4 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
   });
 
   return router;
-}
-
-function runGitClone(url: string, dest: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("git", ["clone", "--depth=1", url, dest], {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stderr = "";
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`git clone exited with code ${code}: ${stderr.trim()}`));
-      }
-    });
-
-    proc.on("error", (err) => {
-      reject(new Error(`Failed to spawn git: ${err.message}`));
-    });
-  });
 }

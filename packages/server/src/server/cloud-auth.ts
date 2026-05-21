@@ -27,9 +27,18 @@ export interface CreateJwksWorkspaceAuthCallbackOptions {
   getKey?: JWTVerifyGetKey;
 }
 
+export type JwksWorkspaceAuthCallback = WorkspaceAuthCallback & {
+  /**
+   * Fire-and-forget hint to trigger the JWKS fetch before the first inbound
+   * WS upgrade. Logs and swallows any error — pre-warm is best-effort and
+   * must never block daemon startup or fail the container.
+   */
+  prewarm(): Promise<void>;
+};
+
 export function createJwksWorkspaceAuthCallback(
   options: CreateJwksWorkspaceAuthCallbackOptions,
-): WorkspaceAuthCallback {
+): JwksWorkspaceAuthCallback {
   const logger = options.logger.child({ component: "cloud-auth" });
   const getKey =
     options.getKey ??
@@ -58,6 +67,18 @@ export function createJwksWorkspaceAuthCallback(
         workspaceId: payload.workspace_id,
         expiresAt: payload.exp,
       };
+    },
+    async prewarm(): Promise<void> {
+      try {
+        // Invoke the key resolver once with a minimal RS256 header. For the
+        // `createRemoteJWKSet` resolver, this triggers the JWKS HTTP fetch
+        // and populates the in-memory cache; subsequent `jwtVerify` calls
+        // hit the cache and pay no network latency. Result is discarded.
+        await getKey({ alg: "RS256" }, { payload: "", signature: "" } as never);
+        logger.info("JWKS pre-warm completed");
+      } catch (error) {
+        logger.warn({ err: error }, "JWKS pre-warm failed");
+      }
     },
   };
 }

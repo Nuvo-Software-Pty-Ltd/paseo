@@ -106,4 +106,30 @@ describe("createJwksWorkspaceAuthCallback", () => {
     expect(await callback.validateWorkspaceToken("")).toBeNull();
     expect(await callback.validateWorkspaceToken("not-a-jwt")).toBeNull();
   });
+
+  test("prewarm invokes the key resolver once and swallows errors", async () => {
+    const { publicKey } = await makeKeypair();
+    let getKeyCalls = 0;
+    const callback = createJwksWorkspaceAuthCallback({
+      jwksUrl: "http://unused.example/jwks",
+      logger: silentLogger,
+      getKey: async () => {
+        getKeyCalls += 1;
+        return publicKey;
+      },
+    });
+
+    await callback.prewarm();
+    expect(getKeyCalls).toBe(1);
+
+    // Failure path: a throwing resolver must not propagate.
+    const failingCallback = createJwksWorkspaceAuthCallback({
+      jwksUrl: "http://unused.example/jwks",
+      logger: silentLogger,
+      getKey: async () => {
+        throw new Error("simulated JWKS fetch failure");
+      },
+    });
+    await expect(failingCallback.prewarm()).resolves.toBeUndefined();
+  });
 });

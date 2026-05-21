@@ -2,7 +2,7 @@ import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
 import { TTLCache } from "@isaacs/ttlcache";
 import pMemoize from "p-memoize";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { basename, resolve, sep } from "path";
 import { homedir } from "node:os";
@@ -80,6 +80,9 @@ import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
 import type { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import type { DaemonConfigStore } from "./daemon-config-store.js";
 import { applyMutableProviderConfigToOverrides } from "./daemon-config-store.js";
+import { isPaseoCloudMode } from "./paseo-env.js";
+import { cloneWorkspaceRepo, fetchWorkspaceRepoUrl } from "./cloud-clone.js";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { getErrorMessage, getErrorMessageOr } from "../shared/error-utils.js";
 import { getAgentStatusPriority } from "../shared/agent-state-bucket.js";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
@@ -540,6 +543,17 @@ export interface SessionOptions {
   workspaceGitService: WorkspaceGitService;
   daemonConfigStore: DaemonConfigStore;
   mcpBaseUrl?: string | null;
+  // Raw workspace JWT captured at WS upgrade in cloud mode. Plumbed into the
+  // per-session MCP HTTP transport so loopback requests to /mcp/agents (which
+  // sits behind the cloud-mode workspace-token middleware) carry a valid
+  // Authorization header. Undefined / null on the on-host bcrypt-Bearer path.
+  // The token is daemon-internal state — it never travels through any RPC
+  // payload (F3 design-out: workspace identity is JWT-claim-only on the wire).
+  // COMPAT(mcpHttpWorkspaceToken): added in v0.1.X for D-1.5 — the upgrade-time
+  // JWT expires when the captured exp passes; MCP transport then starts
+  // returning 401 while the WS stays open. Day-1 accepts this degradation
+  // (see 70-security/saas-auth.md § "Workspace token TTL — observed binding").
+  workspaceToken?: string | null;
   stt: Resolvable<SpeechToTextProvider | null>;
   tts: Resolvable<TextToSpeechProvider | null>;
   terminalManager: TerminalManager | null;
@@ -723,6 +737,7 @@ export class Session {
   private readonly workspaceGitService: WorkspaceGitService;
   private readonly daemonConfigStore: DaemonConfigStore;
   private readonly mcpBaseUrl: string | null;
+  private readonly workspaceToken: string | null;
   private readonly downloadTokenStore: DownloadTokenStore;
   private readonly pushTokenStore: PushTokenStore;
   private unsubscribeAgentEvents: (() => void) | null = null;
@@ -808,6 +823,7 @@ export class Session {
       workspaceGitService,
       daemonConfigStore,
       mcpBaseUrl,
+      workspaceToken,
       stt,
       tts,
       terminalManager,
@@ -853,6 +869,7 @@ export class Session {
     this.workspaceGitService = workspaceGitService;
     this.daemonConfigStore = daemonConfigStore;
     this.mcpBaseUrl = mcpBaseUrl ?? null;
+    this.workspaceToken = workspaceToken ?? null;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1123,7 +1140,17 @@ export class Session {
         );
         return;
       }
-      const transport = new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl));
+      // Cloud mode: forward the workspace JWT captured at WS upgrade so the
+      // loopback request to /mcp/agents passes through the require-workspace
+      // middleware. On-host: omit requestInit so the transport behaves
+      // identically to its pre-D-1.5 construction (zero-arg, no headers).
+      const transport = this.workspaceToken
+        ? new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl), {
+            requestInit: {
+              headers: { Authorization: `Bearer ${this.workspaceToken}` },
+            },
+          })
+        : new StreamableHTTPClientTransport(new URL(this.mcpBaseUrl));
 
       this.agentMcpClient = await experimental_createMCPClient({
         transport,
@@ -2907,6 +2934,12 @@ export class Session {
     );
 
     try {
+      // Repair-on-missing for cloud mode: a session may invoke create_agent
+      // against a /workspace/<id>/... cwd without first opening the project.
+      // ensureCloudWorkspacePathExists is a no-op on-host and when the path
+      // exists; otherwise it re-clones via the auth-service describe + git.
+      await this.ensureCloudWorkspacePathExists(config.cwd);
+
       const trimmedPrompt = initialPrompt?.trim();
       const { explicitTitle, provisionalTitle } = resolveCreateAgentTitles({
         configTitle: config.title,
@@ -6600,10 +6633,103 @@ export class Session {
     }
   }
 
+  // COMPAT(workspaceRepairOnMissing): added in v0.1.X for D-1.5; D-2's EFS
+  // per-workspace access points lands the durable fix. The container-local
+  // /workspace/<id> path is wiped on every ECS roll, so this repair hook
+  // re-clones from the user's GitHub repo using the cloud auth-service's
+  // describe-workspace lookup. Delete once /workspace is durable storage.
+  private async ensureCloudWorkspacePathExists(cwd: string): Promise<void> {
+    if (!isPaseoCloudMode()) {
+      return;
+    }
+    const match = /^\/workspace\/(ws_[A-Za-z0-9_-]+)(\/|$)/.exec(cwd);
+    if (!match) {
+      return;
+    }
+    if (existsSync(cwd)) {
+      return;
+    }
+    const workspaceId = match[1];
+    const authServiceBaseUrl = process.env.ORCHESTRA_AUTH_INTERNAL_URL;
+    const hmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY;
+    if (!authServiceBaseUrl || !hmacKey) {
+      throw new Error(
+        "Cloud workspace repair requires ORCHESTRA_AUTH_INTERNAL_URL and " +
+          "ORCHESTRA_INTERNAL_HMAC_KEY to be set",
+      );
+    }
+
+    const synthDetail = (status: "running" | "completed" | "failed") => ({
+      type: "worktree_setup" as const,
+      worktreePath: `/workspace/${workspaceId}`,
+      branchName: "",
+      log: "",
+      commands: [
+        {
+          index: 1,
+          command: "git clone --depth=1 <repo>",
+          cwd: `/workspace/${workspaceId}`,
+          log: "",
+          status,
+          exitCode: null,
+        },
+      ],
+    });
+
+    this.emit({
+      type: "workspace_setup_progress",
+      payload: {
+        workspaceId,
+        status: "running",
+        detail: synthDetail("running"),
+        error: null,
+      },
+    });
+
+    try {
+      const { accountId, repoUrl } = await fetchWorkspaceRepoUrl({
+        authServiceBaseUrl,
+        hmacKey,
+        workspaceId,
+        logger: this.sessionLogger,
+      });
+      await cloneWorkspaceRepo({
+        accountId,
+        workspaceId,
+        repoUrl,
+        smClient: new SecretsManagerClient({}),
+        logger: this.sessionLogger,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.emit({
+        type: "workspace_setup_progress",
+        payload: {
+          workspaceId,
+          status: "failed",
+          detail: synthDetail("failed"),
+          error: message,
+        },
+      });
+      throw error instanceof Error ? error : new Error(message);
+    }
+
+    this.emit({
+      type: "workspace_setup_progress",
+      payload: {
+        workspaceId,
+        status: "completed",
+        detail: synthDetail("completed"),
+        error: null,
+      },
+    });
+  }
+
   private async handleOpenProjectRequest(
     request: Extract<SessionInboundMessage, { type: "open_project_request" }>,
   ): Promise<void> {
     try {
+      await this.ensureCloudWorkspacePathExists(request.cwd);
       const workspace = await this.findOrCreateWorkspaceForDirectory(request.cwd);
       await this.syncWorkspaceGitObserverForWorkspace(workspace);
       const descriptor = await this.describeWorkspaceRecord(workspace);

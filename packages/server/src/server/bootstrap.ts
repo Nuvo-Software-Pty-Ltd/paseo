@@ -149,6 +149,7 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
+import { fireDaemonVersionBeacon } from "./cloud-version-beacon.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -409,8 +410,22 @@ export async function createPaseoDaemon(
           "(workspace-token validation cannot start without the auth service's JWKS).",
       );
     }
-    workspaceAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    const jwksAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    workspaceAuthCallback = jwksAuthCallback;
     logger.info({ jwksUrl }, "Cloud-mode workspace-token auth enabled");
+    // Fire-and-forget JWKS pre-warm: triggers the outbound JWKS fetch now so
+    // the first user-driven WS upgrade doesn't pay JWKS cold-start latency
+    // (which previously caused a one-time WS probe timeout on fresh daemon
+    // tasks). Failures are logged but non-fatal — a transient auth-service
+    // outage at boot must not kill the daemon container.
+    void jwksAuthCallback.prewarm();
+    logger.info("JWKS pre-warm scheduled");
+    // Daemon-version beacon: fire-and-forget POST to the auth service with
+    // the CLI + SDK + image-tag triple this container is running. Operators
+    // query the auth service record (versions#daemon) when triaging which
+    // daemon is on the wire. Failure to deliver is logged but non-fatal —
+    // a transient auth-service outage at boot must not kill the daemon.
+    fireDaemonVersionBeacon({ logger });
     app.use(
       createRequireWorkspaceMiddleware(workspaceAuthCallback, (context) => {
         logger.warn(context, "Rejected HTTP request with invalid workspace token");
@@ -774,6 +789,23 @@ export async function createPaseoDaemon(
           },
           "Agent MCP request",
         );
+      }
+      // Defense-in-depth: the global require-workspace middleware (mounted
+      // above) already rejects MCP requests without a valid JWT in cloud
+      // mode. This in-handler gate guards against a future on-host-path bug
+      // letting an unauthenticated request reach the MCP endpoint. F3: we
+      // never look at a workspaceId on the wire — only the JWT-derived
+      // claim attached by the middleware.
+      if (isPaseoCloudMode() && !req.workspaceAuth?.workspaceId) {
+        res.status(401).json({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: "workspace token required",
+          },
+          id: null,
+        });
+        return;
       }
       try {
         const sessionId = req.header("mcp-session-id");

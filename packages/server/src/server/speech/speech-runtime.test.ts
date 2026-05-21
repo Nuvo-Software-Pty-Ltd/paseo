@@ -152,4 +152,48 @@ describe("createSpeechService readiness", () => {
 
     runtime.stop();
   });
+
+  it("returns a fully-disabled stub in cloud mode and never initializes local speech", async () => {
+    const originalCloudMode = process.env.PASEO_CLOUD_MODE;
+    process.env.PASEO_CLOUD_MODE = "1";
+    try {
+      const runtime = createSpeechService({
+        logger: pino({ level: "silent" }),
+        speechConfig: createSpeechConfig({
+          dictationStt: { provider: "local", enabled: true, explicit: false },
+          voiceTurnDetection: { provider: "local", enabled: true, explicit: false },
+          voiceStt: { provider: "local", enabled: true, explicit: false },
+          voiceTts: { provider: "local", enabled: true, explicit: false },
+        }),
+      });
+
+      // Stub must not perform any local-speech initialization side effects.
+      expect(initializeLocalSpeechServicesMock).not.toHaveBeenCalled();
+
+      runtime.start();
+      await runtime.ready;
+
+      const readiness = runtime.getReadiness();
+      expect(readiness.voiceFeature.enabled).toBe(false);
+      expect(readiness.voiceFeature.available).toBe(false);
+      expect(readiness.voiceFeature.reasonCode).toBe("disabled");
+      expect(readiness.voiceFeature.message).toBe("Voice features are disabled in cloud mode.");
+      expect(readiness.dictation.reasonCode).toBe("disabled");
+      expect(readiness.realtimeVoice.reasonCode).toBe("disabled");
+      expect(readiness.requiredLocalModelIds).toEqual([]);
+      expect(readiness.missingLocalModelIds).toEqual([]);
+      expect(runtime.resolveStt()).toBeNull();
+      expect(runtime.resolveTts()).toBeNull();
+      expect(runtime.resolveTurnDetection()).toBeNull();
+      expect(runtime.resolveDictationStt()).toBeNull();
+
+      runtime.stop();
+    } finally {
+      if (originalCloudMode === undefined) {
+        delete process.env.PASEO_CLOUD_MODE;
+      } else {
+        process.env.PASEO_CLOUD_MODE = originalCloudMode;
+      }
+    }
+  });
 });

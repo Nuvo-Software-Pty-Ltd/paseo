@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Logger } from "pino";
 
 import type { PaseoOpenAIConfig, PaseoSpeechConfig } from "../bootstrap.js";
+import { isPaseoCloudMode } from "../paseo-env.js";
 import type { LocalSpeechModelId } from "./providers/local/config.js";
 import {
   ensureLocalSpeechModels,
@@ -352,12 +353,59 @@ export interface SpeechService {
   ready: Promise<void>;
 }
 
+function createDisabledStateSnapshot(message: string): SpeechReadinessState {
+  return {
+    enabled: false,
+    available: false,
+    reasonCode: "disabled",
+    message,
+    retryable: false,
+    missingModelIds: [],
+  };
+}
+
+// COMPAT(speechDisabledCloudMode): added in v0.1.X for D-1.5 — in cloud mode
+// the daemon must never attempt to download local speech models (lbzip2 is
+// not in the runtime image and the speech feature isn't supported in cloud
+// Day-1). Drop this branch when the daemon image either ships sherpa models
+// or the speech runtime gains a graceful "no local providers available"
+// path that doesn't pollute logs with download failures.
+function createDisabledSpeechService(logger: Logger): SpeechService {
+  const disabledMessage = "Voice features are disabled in cloud mode.";
+  const snapshot: SpeechReadinessSnapshot = {
+    generatedAt: new Date().toISOString(),
+    requiredLocalModelIds: [],
+    missingLocalModelIds: [],
+    download: { inProgress: false, error: null },
+    realtimeVoice: createDisabledStateSnapshot(disabledMessage),
+    dictation: createDisabledStateSnapshot(disabledMessage),
+    voiceFeature: createDisabledStateSnapshot(disabledMessage),
+  };
+  logger.info("Speech service disabled (cloud mode)");
+  return {
+    resolveStt: () => null,
+    resolveTts: () => null,
+    resolveTurnDetection: () => null,
+    resolveDictationStt: () => null,
+    getReadiness: () => snapshot,
+    onReadinessChange: () => () => {},
+    start: () => {},
+    stop: () => {},
+    ready: Promise.resolve(),
+  };
+}
+
 export function createSpeechService(params: {
   logger: Logger;
   openaiConfig?: PaseoOpenAIConfig;
   speechConfig?: PaseoSpeechConfig;
 }): SpeechService {
   const logger = params.logger.child({ module: "speech-runtime" });
+
+  if (isPaseoCloudMode()) {
+    return createDisabledSpeechService(logger);
+  }
+
   const speechConfig = params.speechConfig ?? null;
   const openaiConfig = params.openaiConfig;
   const providers = resolveRequestedSpeechProviders(speechConfig);
