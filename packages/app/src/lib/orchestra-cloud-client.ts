@@ -33,6 +33,29 @@ export class OrchestraSessionExpiredError extends Error {
   }
 }
 
+type SessionExpiredListener = () => void;
+const sessionExpiredListeners = new Set<SessionExpiredListener>();
+
+export function onOrchestraSessionExpired(listener: SessionExpiredListener): () => void {
+  sessionExpiredListeners.add(listener);
+  return () => {
+    sessionExpiredListeners.delete(listener);
+  };
+}
+
+function signalSessionExpired(): void {
+  // Fan out synchronously so the centralized provider can debounce concurrent
+  // 401s into a single bounce. Listeners must be cheap and side-effect-free
+  // beyond enqueueing the bounce.
+  for (const listener of sessionExpiredListeners) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn("[Orchestra] session-expired listener threw", error);
+    }
+  }
+}
+
 async function getSessionToken(): Promise<string | null> {
   return AsyncStorage.getItem(SESSION_TOKEN_KEY);
 }
@@ -40,6 +63,7 @@ async function getSessionToken(): Promise<string | null> {
 async function requireSessionToken(): Promise<string> {
   const token = await getSessionToken();
   if (!token) {
+    signalSessionExpired();
     throw new OrchestraSessionExpiredError();
   }
   return token;
@@ -57,6 +81,7 @@ async function authedFetch(path: string, init?: RequestInit): Promise<Response> 
     },
   });
   if (res.status === 401) {
+    signalSessionExpired();
     throw new OrchestraSessionExpiredError();
   }
   return res;

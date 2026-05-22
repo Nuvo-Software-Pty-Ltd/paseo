@@ -36,6 +36,7 @@ import {
   HorizontalScrollProvider,
   useHorizontalScrollOptional,
 } from "@/contexts/horizontal-scroll-context";
+import { OrchestraSessionProvider } from "@/contexts/orchestra-session-context";
 import { SessionProvider } from "@/contexts/session-context";
 import {
   SidebarAnimationProvider,
@@ -863,7 +864,9 @@ function RuntimeProviders({ children }: { children: ReactNode }) {
       <PushNotificationRouter />
       <SidebarCalloutProvider>
         <ToastProvider>
-          <ProvidersWrapper>{children}</ProvidersWrapper>
+          <OrchestraSessionProvider>
+            <ProvidersWrapper>{children}</ProvidersWrapper>
+          </OrchestraSessionProvider>
         </ToastProvider>
       </SidebarCalloutProvider>
     </HostRuntimeBootstrapProvider>

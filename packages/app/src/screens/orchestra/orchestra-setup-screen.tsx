@@ -15,6 +15,7 @@ import {
   listWorkspaces,
   clearSession,
   getOrchestraDaemonWsUrl,
+  OrchestraSessionExpiredError,
   type WorkspaceRecord,
 } from "@/lib/orchestra-cloud-client";
 import { createWorkspaceTokenTransportFactory } from "@/lib/orchestra-cloud-transport";
@@ -214,6 +215,11 @@ export function OrchestraSetupScreen() {
       setWorkspace(ws);
       setStep("credential");
     } catch (err) {
+      // Session-expired bounces via OrchestraSessionProvider — don't render an
+      // inline string the user would see for a single frame before the route swap.
+      if (err instanceof OrchestraSessionExpiredError) {
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsBusy(false);
@@ -285,6 +291,11 @@ export function OrchestraSetupScreen() {
       router.replace(`/h/${serverId}`);
     } catch (err) {
       setStep("credential");
+      if (err instanceof OrchestraSessionExpiredError) {
+        // Same as handleCreateWorkspace: defer to the global session-expired
+        // bounce; don't paint an inline error the user would see one-frame.
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsBusy(false);
