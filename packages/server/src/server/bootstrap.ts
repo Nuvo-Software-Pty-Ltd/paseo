@@ -149,7 +149,12 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
-import { fireDaemonVersionBeacon } from "./cloud-version-beacon.js";
+import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
+import {
+  startHeartbeatLoop,
+  type HeartbeatLoopController,
+  type HeartbeatSessionRegistry,
+} from "./cloud-heartbeat.js";
 
 type AgentMcpTransportMap = Map<string, StreamableHTTPServerTransport>;
 
@@ -298,6 +303,7 @@ export async function createPaseoDaemon(
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
   let relayTransport: RelayTransportController | null = null;
+  let heartbeatController: HeartbeatLoopController | null = null;
 
   const staticDir = config.staticDir;
   const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
@@ -1002,6 +1008,18 @@ export async function createPaseoDaemon(
               daemonKeyPair: daemonKeyPair.keyPair,
             });
           }
+
+          // Cloud-mode workspace heartbeat (T-4). Started after wsServer is
+          // constructed so the session registry can observe live state.
+          // Extracted out to keep logAndResolve under the per-function
+          // complexity ceiling.
+          if (wsServer) {
+            heartbeatController = maybeStartCloudHeartbeat({
+              wsServer,
+              agentManager,
+              logger,
+            });
+          }
         };
 
         logAndResolve().then(resolve, reject);
@@ -1027,6 +1045,11 @@ export async function createPaseoDaemon(
 
   const stop = async () => {
     scriptHealthMonitor.stop();
+    // Halt the heartbeat loop BEFORE closing agents/sessions — the loop
+    // observes session-registry state, and closing first would log
+    // misleading "0 active" heartbeats on the way out.
+    heartbeatController?.stop();
+    heartbeatController = null;
     await closeAllAgents(logger, agentManager);
     await agentManager.flush().catch(() => undefined);
     detachAgentStoragePersistence();
@@ -1083,4 +1106,49 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
       }
     }),
   );
+}
+
+// On-host mode skips this entirely — heartbeat is cloud-mode-only. Returns
+// null when cloud-mode is off, when required env vars are missing, or when
+// the wsServer is not ready (the caller already gates on the last).
+//
+// PLAN-cdk-infra sets PASEO_WORKSPACE_ID in the per-workspace ECS task
+// definition; without it the daemon does not know which workspace's
+// heartbeat to write, so we warn-and-skip rather than write a wrong row.
+function maybeStartCloudHeartbeat(deps: {
+  wsServer: VoiceAssistantWebSocketServer;
+  agentManager: AgentManager;
+  logger: Logger;
+}): HeartbeatLoopController | null {
+  if (!isPaseoCloudMode()) return null;
+  const heartbeatWorkspaceId = process.env.PASEO_WORKSPACE_ID?.trim();
+  const heartbeatAuthUrl = process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim();
+  const heartbeatHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim();
+  if (!heartbeatWorkspaceId || !heartbeatAuthUrl || !heartbeatHmacKey) {
+    deps.logger.warn(
+      {
+        hasWorkspaceId: !!heartbeatWorkspaceId,
+        hasAuthUrl: !!heartbeatAuthUrl,
+        hasHmacKey: !!heartbeatHmacKey,
+      },
+      "Heartbeat skipped: missing PASEO_WORKSPACE_ID / ORCHESTRA_AUTH_INTERNAL_URL / ORCHESTRA_INTERNAL_HMAC_KEY",
+    );
+    return null;
+  }
+  const { wsServer, agentManager, logger } = deps;
+  const sessionRegistry: HeartbeatSessionRegistry = {
+    countConnectedClients: () => wsServer.listActiveSessions().length,
+    countActiveAgents: () =>
+      agentManager.listAgents().filter((a) => a.lifecycle === "running").length,
+  };
+  const controller = startHeartbeatLoop({
+    authServiceBaseUrl: heartbeatAuthUrl,
+    hmacKey: heartbeatHmacKey,
+    workspaceId: heartbeatWorkspaceId,
+    daemonImageTag: resolveDaemonImageTag(),
+    sessionRegistry,
+    logger,
+  });
+  logger.info({ workspaceId: heartbeatWorkspaceId }, "Heartbeat loop started");
+  return controller;
 }

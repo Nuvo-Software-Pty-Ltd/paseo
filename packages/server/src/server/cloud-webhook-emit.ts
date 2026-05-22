@@ -1,5 +1,5 @@
-import { createHmac } from "node:crypto";
 import type { Logger } from "pino";
+import { cloudHmacFetch, type CloudHmacFetchResult } from "./cloud-hmac-fetch.js";
 import {
   toWireWorkspaceHardDeleteImminentEvent,
   WorkspaceHardDeleteImminentEventSchema,
@@ -7,12 +7,10 @@ import {
 } from "./cloud-webhook-events.js";
 
 // Outbound webhook delivery primitive for the AGPL-core's webhook event
-// catalogue. Single-purpose: validate → HMAC sign → POST → log.
+// catalogue. Single-purpose: validate → wire-shape → HMAC POST → log.
 //
-// Mirrors cloud-version-beacon.ts's HMAC envelope (createHmac sha256 over
-// the JSON body, X-Orchestra-Internal-HMAC header). The two could share a
-// helper, but the call-site count is still small (2) and the inputs/outputs
-// differ enough that premature extraction would obscure each call.
+// HMAC envelope is shared via cloudHmacFetch (cloud-hmac-fetch.ts); see
+// that module for the wire-level convention (header name, algorithm).
 //
 // Retry policy Day-1: NONE. workspace-lifecycle.md § Forward-compatibility
 // hooks: "EventBridge Scheduler retries failed subscriber deliveries with
@@ -31,10 +29,7 @@ import {
 // (cloud-webhook-events.ts) and is duplicated against the worker side via
 // the deferred anti-drift guard.
 
-export interface WebhookEmitResult {
-  ok: boolean;
-  status?: number;
-}
+export type WebhookEmitResult = CloudHmacFetchResult;
 
 export interface EmitWebhookEventParams {
   subscriberUrl: string;
@@ -48,7 +43,6 @@ export interface EmitWebhookEventParams {
 
 export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<WebhookEmitResult> {
   const { subscriberUrl, hmacKey, event, logger } = params;
-  const doFetch = params.fetchImpl ?? fetch;
 
   // Re-validate before sending — the caller is in another package
   // (proprietary worker) and may have built the payload manually. Catching
@@ -56,49 +50,27 @@ export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<
   const parsed = WorkspaceHardDeleteImminentEventSchema.parse(event);
   const wire = toWireWorkspaceHardDeleteImminentEvent(parsed);
   const bodyString = JSON.stringify(wire);
-  const hmac = createHmac("sha256", hmacKey).update(bodyString).digest("hex");
 
-  let response: Response;
-  try {
-    response = await doFetch(subscriberUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Orchestra-Internal-HMAC": hmac,
-      },
-      body: bodyString,
-    });
-  } catch (err) {
-    logger.warn(
-      { err, subscriberUrl, eventType: parsed.eventType, workspaceId: parsed.workspaceId },
-      "Webhook emit network failure",
-    );
-    return { ok: false };
-  }
+  const result = await cloudHmacFetch({
+    url: subscriberUrl,
+    hmacKey,
+    body: bodyString,
+    logger,
+    ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
+    logContext: { eventType: parsed.eventType, workspaceId: parsed.workspaceId },
+    failureLogLabel: "Webhook emit",
+  });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    logger.warn(
+  if (result.ok) {
+    logger.info(
       {
-        status: response.status,
-        responseBody: text,
+        status: result.status,
         subscriberUrl,
         eventType: parsed.eventType,
         workspaceId: parsed.workspaceId,
       },
-      "Webhook emit returned non-2xx",
+      "Webhook emit delivered",
     );
-    return { ok: false, status: response.status };
   }
-
-  logger.info(
-    {
-      status: response.status,
-      subscriberUrl,
-      eventType: parsed.eventType,
-      workspaceId: parsed.workspaceId,
-    },
-    "Webhook emit delivered",
-  );
-  return { ok: true, status: response.status };
+  return result;
 }
