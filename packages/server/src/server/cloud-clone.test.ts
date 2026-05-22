@@ -69,7 +69,7 @@ describe("resolveStage", () => {
 });
 
 describe("fetchWorkspaceRepoUrl", () => {
-  it("POSTs to /api/internal/describe-workspace with HMAC", async () => {
+  it("POSTs to /api/auth-internal/describe-workspace with HMAC", async () => {
     let capturedUrl = "";
     let capturedInit: RequestInit | undefined;
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
@@ -90,7 +90,7 @@ describe("fetchWorkspaceRepoUrl", () => {
     });
 
     expect(result).toEqual({ accountId: "acct_1", repoUrl: "https://github.com/u/r" });
-    expect(capturedUrl).toBe("https://auth.example.com/api/internal/describe-workspace");
+    expect(capturedUrl).toBe("https://auth.example.com/api/auth-internal/describe-workspace");
     expect(capturedInit?.method).toBe("POST");
     expect(JSON.parse(String(capturedInit?.body))).toEqual({ workspaceId: "ws_42" });
     const headers = capturedInit?.headers as Record<string, string>;
@@ -114,7 +114,7 @@ describe("fetchWorkspaceRepoUrl", () => {
       logger,
       fetchImpl,
     });
-    expect(capturedUrl).toBe("https://auth.example.com/api/internal/describe-workspace");
+    expect(capturedUrl).toBe("https://auth.example.com/api/auth-internal/describe-workspace");
   });
 
   it("throws when the auth service returns non-2xx", async () => {

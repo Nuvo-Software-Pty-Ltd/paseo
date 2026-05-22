@@ -65,5 +65,11 @@ jobs:
           tags: |
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.version.outputs.tag }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:dev-latest
+          # Bake the same tag the image is pushed under into PASEO_DAEMON_IMAGE_TAG
+          # so the daemon's version-beacon + heartbeat report the real value
+          # (instead of "unknown") even before the ECS task definition layers
+          # its own runtime override.
+          build-args: |
+            PASEO_DAEMON_IMAGE_TAG=${{ steps.version.outputs.tag }}
           cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache
           cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:buildcache,mode=max

@@ -104,7 +104,7 @@ export async function sendDaemonVersionBeacon(
 
   const bodyString = JSON.stringify(body);
   const hmac = createHmac("sha256", hmacKey).update(bodyString).digest("hex");
-  const url = `${authServiceBaseUrl.replace(/\/$/, "")}/api/internal/daemon-versions`;
+  const url = `${authServiceBaseUrl.replace(/\/$/, "")}/api/auth-internal/daemon-versions`;
 
   let response: Response;
   try {
