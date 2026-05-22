@@ -96,6 +96,7 @@ import type { CheckoutStatusPayload } from "@/git/use-status-query";
 import { checkoutStatusQueryKey } from "@/git/query-keys";
 import { confirmDialog } from "@/utils/confirm-dialog";
 import { useArchiveAgent } from "@/hooks/use-archive-agent";
+import { useCloudHostWorkspaceState } from "@/hooks/use-cloud-host-workspace-state";
 import { useStableEvent } from "@/hooks/use-stable-event";
 import { createWorkspaceBrowser, useBrowserStore } from "@/stores/browser-store";
 import { getDesktopHost } from "@/desktop/host";
@@ -1187,6 +1188,7 @@ function useWorkspaceRouteActions(normalizedServerId: string): {
   handleRetryHost: () => void;
   handleManageHost: () => void;
   handleDismissMissingWorkspace: () => void;
+  handleManagePlan: () => void;
 } {
   const router = useRouter();
   const handleRetryHost = useCallback(() => {
@@ -1212,11 +1214,18 @@ function useWorkspaceRouteActions(normalizedServerId: string): {
     }
     router.replace("/" as Href);
   }, [normalizedServerId, router]);
+  // COMPAT(billing_locked): D-2 ships the UX; D-4 wires the actual billing
+  // module. /settings/billing 404s gracefully Day-1 — that's the contract.
+  // When D-4 closes, drop this comment + remove any "Coming soon" fallback.
+  const handleManagePlan = useCallback(() => {
+    router.push("/settings/billing" as Href);
+  }, [router]);
 
   return {
     handleRetryHost,
     handleManageHost,
     handleDismissMissingWorkspace,
+    handleManagePlan,
   };
 }
 
@@ -1232,6 +1241,7 @@ function useResolvedWorkspaceRouteState(input: {
   );
   const hostSnapshot = useHostRuntimeSnapshot(input.serverId);
   const hostName = useMemo(() => getHostDisplayName(host, input.serverId), [host, input.serverId]);
+  const cloudWorkspaceState = useCloudHostWorkspaceState(input.serverId);
 
   return useMemo(
     () =>
@@ -1241,6 +1251,7 @@ function useResolvedWorkspaceRouteState(input: {
         lastError: hostSnapshot?.lastError ?? null,
         workspace: input.workspace,
         hasHydratedWorkspaces: input.hasHydratedWorkspaces,
+        cloudWorkspaceState,
       }),
     [
       hostName,
@@ -1248,6 +1259,7 @@ function useResolvedWorkspaceRouteState(input: {
       hostSnapshot?.lastError,
       input.workspace,
       input.hasHydratedWorkspaces,
+      cloudWorkspaceState,
     ],
   );
 }
@@ -1450,7 +1462,7 @@ function WorkspaceScreenContent({
     [workspaceId],
   );
   const workspaceDescriptor = useWorkspace(normalizedServerId, normalizedWorkspaceId);
-  const { handleRetryHost, handleManageHost, handleDismissMissingWorkspace } =
+  const { handleRetryHost, handleManageHost, handleDismissMissingWorkspace, handleManagePlan } =
     useWorkspaceRouteActions(normalizedServerId);
 
   const workspaceTerminalScopeKey = useMemo(
@@ -2873,6 +2885,7 @@ function WorkspaceScreenContent({
       onRetryHost: handleRetryHost,
       onManageHost: handleManageHost,
       onDismissMissingWorkspace: handleDismissMissingWorkspace,
+      onManagePlan: handleManagePlan,
     },
   });
   const gatedWorkspaceScreen = renderWorkspaceScreenGateShell({
