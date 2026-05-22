@@ -30,6 +30,8 @@ import {
   setAnthropicCredential,
   mintWorkspaceToken,
   listGithubRepos,
+  archiveCloudWorkspace,
+  unarchiveCloudWorkspace,
   OrchestraSessionExpiredError,
 } from "./orchestra-cloud-client";
 
@@ -208,6 +210,64 @@ describe("mintWorkspaceToken", () => {
     ];
     expect(url).toContain("/api/v1/cloud/workspaces/ws_002/token");
     expect(init.method).toBe("POST");
+  });
+});
+
+describe("archiveCloudWorkspace", () => {
+  it("calls POST /api/v1/cloud/workspaces/:id/archive and normalizes the response", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaceId: "ws_007",
+      state: "archived",
+      archivedAt: "2026-05-22T01:00:00.000Z",
+    });
+
+    const result = await archiveCloudWorkspace("ws_007");
+
+    expect(result.state).toBe("archived");
+    expect(result.archivedAt).toBe("2026-05-22T01:00:00.000Z");
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain("/api/v1/cloud/workspaces/ws_007/archive");
+    expect(init.method).toBe("POST");
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(archiveCloudWorkspace("ws_007")).rejects.toThrow(OrchestraSessionExpiredError);
+  });
+
+  it("throws with body details on server error", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(500, "boom");
+    await expect(archiveCloudWorkspace("ws_007")).rejects.toThrow(/500/);
+  });
+});
+
+describe("unarchiveCloudWorkspace", () => {
+  it("calls POST /api/v1/cloud/workspaces/:id/unarchive and normalizes the response", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { workspaceId: "ws_007", state: "active", archivedAt: null });
+
+    const result = await unarchiveCloudWorkspace("ws_007");
+
+    expect(result.state).toBe("active");
+    expect(result.archivedAt).toBeNull();
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain("/api/v1/cloud/workspaces/ws_007/unarchive");
+    expect(init.method).toBe("POST");
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(unarchiveCloudWorkspace("ws_007")).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });
 

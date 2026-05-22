@@ -24,7 +24,9 @@ import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
-import { ARCHIVE_30_DAY_NOTICE } from "@/lib/cloud-workspace-copy";
+import { useUnarchiveWorkspace } from "@/hooks/use-unarchive-workspace";
+import { useToast } from "@/contexts/toast-context";
+import { ARCHIVE_30_DAY_NOTICE, UNARCHIVE_TOAST_COPY } from "@/lib/cloud-workspace-copy";
 import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { partitionCloudWorkspaces } from "@/utils/cloud-workspace-sections";
 import { formatTimeAgo } from "@/utils/time";
@@ -43,14 +45,23 @@ interface CloudWorkspaceRowProps {
 interface ArchivedWorkspaceRowProps {
   workspace: WorkspaceRecord;
   onSelect: (workspace: WorkspaceRecord) => void;
+  onUnarchive: (workspace: WorkspaceRecord) => void;
+  isUnarchiving: boolean;
 }
 
 interface ArchivedSectionProps {
   workspaces: WorkspaceRecord[];
   onSelect: (workspace: WorkspaceRecord) => void;
+  onUnarchive: (workspace: WorkspaceRecord) => void;
+  unarchivingWorkspaceId: string | null;
 }
 
-function ArchivedSection({ workspaces, onSelect }: ArchivedSectionProps) {
+function ArchivedSection({
+  workspaces,
+  onSelect,
+  onUnarchive,
+  unarchivingWorkspaceId,
+}: ArchivedSectionProps) {
   const { theme } = useUnistyles();
   const sectionHeaderStyle = useMemo(
     () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
@@ -71,6 +82,8 @@ function ArchivedSection({ workspaces, onSelect }: ArchivedSectionProps) {
           key={workspace.workspaceId}
           workspace={workspace}
           onSelect={onSelect}
+          onUnarchive={onUnarchive}
+          isUnarchiving={unarchivingWorkspaceId === workspace.workspaceId}
         />
       ))}
       <Text style={footerStyle}>{ARCHIVE_30_DAY_NOTICE}</Text>
@@ -78,11 +91,23 @@ function ArchivedSection({ workspaces, onSelect }: ArchivedSectionProps) {
   );
 }
 
-function ArchivedWorkspaceRow({ workspace, onSelect }: ArchivedWorkspaceRowProps) {
+function ArchivedWorkspaceRow({
+  workspace,
+  onSelect,
+  onUnarchive,
+  isUnarchiving,
+}: ArchivedWorkspaceRowProps) {
   const { theme } = useUnistyles();
   const handlePress = useCallback(() => {
     onSelect(workspace);
   }, [onSelect, workspace]);
+  const handleUnarchive = useCallback(
+    (event: { stopPropagation?: () => void }) => {
+      event.stopPropagation?.();
+      onUnarchive(workspace);
+    },
+    [onUnarchive, workspace],
+  );
   const pressableStyle = useCallback(
     ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.row,
@@ -99,6 +124,21 @@ function ArchivedWorkspaceRow({ workspace, onSelect }: ArchivedWorkspaceRowProps
   const subTextStyle = useMemo(
     () => [styles.rowSubText, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
+  );
+  const unarchiveButtonStyle = useCallback(
+    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.unarchiveButton,
+      {
+        borderColor: theme.colors.border,
+        backgroundColor:
+          Boolean(hovered) || pressed ? theme.colors.surface2 : theme.colors.surface1,
+      },
+    ],
+    [theme.colors.border, theme.colors.surface1, theme.colors.surface2],
+  );
+  const unarchiveButtonTextStyle = useMemo(
+    () => [styles.unarchiveButtonText, { color: theme.colors.foreground }],
+    [theme.colors.foreground],
   );
   const displayLabel =
     workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
@@ -126,6 +166,17 @@ function ArchivedWorkspaceRow({ workspace, onSelect }: ArchivedWorkspaceRowProps
             {archivedLabel}
           </Text>
         </View>
+        <Pressable
+          accessibilityLabel="Unarchive workspace"
+          testID="picker-archived-unarchive"
+          onPress={handleUnarchive}
+          disabled={isUnarchiving}
+          style={unarchiveButtonStyle}
+        >
+          <Text style={unarchiveButtonTextStyle}>
+            {isUnarchiving ? "Unarchiving…" : "Unarchive"}
+          </Text>
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -208,6 +259,18 @@ function PathRow({ path, active, onSelect }: PathRowProps) {
   );
 }
 
+function usePickerUnarchiveBinding() {
+  const unarchive = useUnarchiveWorkspace();
+  const unarchivingWorkspaceId = unarchive.isPending
+    ? (unarchive.variables?.workspaceId ?? null)
+    : null;
+  return {
+    unarchiveMutate: unarchive.mutate,
+    unarchiveMutateAsync: unarchive.mutateAsync,
+    unarchivingWorkspaceId,
+  };
+}
+
 export function ProjectPickerModal() {
   const { theme } = useUnistyles();
   const serverId = useActiveServerId();
@@ -234,6 +297,9 @@ export function ProjectPickerModal() {
     () => partitionCloudWorkspaces(cloudWorkspacesData ?? []),
     [cloudWorkspacesData],
   );
+  const { unarchiveMutateAsync, unarchiveMutate, unarchivingWorkspaceId } =
+    usePickerUnarchiveBinding();
+  const toast = useToast();
 
   const directorySuggestionsQuery = useQuery({
     queryKey: ["project-picker-directory-suggestions", serverId, query],
@@ -303,6 +369,37 @@ export function ProjectPickerModal() {
       void handleSelectPath(path);
     },
     [handleSelectPath],
+  );
+
+  const handleUnarchiveOnly = useCallback(
+    (workspace: WorkspaceRecord) => {
+      // Explicit [Unarchive] button — flips DDB state, leaves picker open so
+      // the user can decide what to open next. Cache invalidate moves the
+      // row to the active section after the mutation.
+      unarchiveMutate({ workspaceId: workspace.workspaceId });
+    },
+    [unarchiveMutate],
+  );
+
+  const handleOpenArchivedWorkspace = useCallback(
+    (workspace: WorkspaceRecord) => {
+      // Row body press on an archived workspace: unarchive first (parity with
+      // on-host's cwd-reopen behavior), then open. The toast banner with the
+      // locked copy renders on success so the user knows the side effect
+      // happened.
+      void (async () => {
+        try {
+          await unarchiveMutateAsync({ workspaceId: workspace.workspaceId });
+        } catch {
+          // useUnarchiveWorkspace toasts the failure; don't open a workspace
+          // that's still in the archived state on the server.
+          return;
+        }
+        toast.show(UNARCHIVE_TOAST_COPY, { durationMs: 5000 });
+        handleSelectCloudWorkspace(workspace);
+      })();
+    },
+    [handleSelectCloudWorkspace, toast, unarchiveMutateAsync],
   );
 
   const handleChangeQuery = useCallback((text: string) => {
@@ -458,7 +555,9 @@ export function ProjectPickerModal() {
             {!isSubmitting && isCloudHost ? (
               <ArchivedSection
                 workspaces={archivedCloudWorkspaces}
-                onSelect={handleSelectCloudWorkspace}
+                onSelect={handleOpenArchivedWorkspace}
+                onUnarchive={handleUnarchiveOnly}
+                unarchivingWorkspaceId={unarchivingWorkspaceId}
               />
             ) : null}
           </ScrollView>
@@ -554,5 +653,15 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[2],
     paddingBottom: theme.spacing[2],
     fontSize: theme.fontSize.xs,
+  },
+  unarchiveButton: {
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+  },
+  unarchiveButtonText: {
+    fontSize: theme.fontSize.xs,
+    fontWeight: theme.fontWeight.medium,
   },
 }));

@@ -214,6 +214,35 @@ export function getCloudWorkspaceState(workspace: WorkspaceRecord): CloudWorkspa
   return workspace.state;
 }
 
+// NOTE: distinct from the on-host WS RPC client.archiveWorkspace (worktree
+// "hide from sidebar"). This is the cloud-tenancy archive: flips DDB
+// state="archived", schedules the EventBridge T-24h/T-0 GC, and StopTasks
+// the per-workspace daemon container asynchronously via the lifecycle
+// worker. See workspace-lifecycle.md § "States".
+export async function archiveCloudWorkspace(workspaceId: string): Promise<WorkspaceRecord> {
+  const res = await authedFetch(`/api/v1/cloud/workspaces/${workspaceId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to archive workspace: ${res.status} — ${body}`);
+  }
+  return normalizeWorkspaceRecord(await res.json());
+}
+
+export async function unarchiveCloudWorkspace(workspaceId: string): Promise<WorkspaceRecord> {
+  const res = await authedFetch(`/api/v1/cloud/workspaces/${workspaceId}/unarchive`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to unarchive workspace: ${res.status} — ${body}`);
+  }
+  return normalizeWorkspaceRecord(await res.json());
+}
+
 export async function setAnthropicCredential(
   workspaceId: string,
   apiKey: string,
