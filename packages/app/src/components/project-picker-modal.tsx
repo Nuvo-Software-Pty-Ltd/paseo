@@ -23,11 +23,16 @@ import { useOpenProject } from "@/hooks/use-open-project";
 import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
+import { useRouter, type Href } from "expo-router";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
 import { useArchiveCloudWorkspace } from "@/hooks/use-archive-cloud-workspace";
 import { useUnarchiveWorkspace } from "@/hooks/use-unarchive-workspace";
 import { useToast } from "@/contexts/toast-context";
-import { ARCHIVE_30_DAY_NOTICE, UNARCHIVE_TOAST_COPY } from "@/lib/cloud-workspace-copy";
+import {
+  ARCHIVE_30_DAY_NOTICE,
+  BILLING_LOCKED_PLAN_INACTIVE_BADGE,
+  UNARCHIVE_TOAST_COPY,
+} from "@/lib/cloud-workspace-copy";
 import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { partitionCloudWorkspaces } from "@/utils/cloud-workspace-sections";
 import { formatTimeAgo } from "@/utils/time";
@@ -220,6 +225,10 @@ function CloudWorkspaceRow({
     () => [styles.rowSubText, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
   );
+  const planInactiveBadgeStyle = useMemo(
+    () => [styles.rowSubText, { color: theme.colors.destructive }],
+    [theme.colors.destructive],
+  );
   const archiveButtonStyle = useCallback(
     ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.unarchiveButton,
@@ -237,6 +246,20 @@ function CloudWorkspaceRow({
   );
   const displayLabel =
     workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
+  let subRow: React.ReactNode = null;
+  if (workspace.state === "billing_locked") {
+    subRow = (
+      <Text style={planInactiveBadgeStyle} numberOfLines={1}>
+        {BILLING_LOCKED_PLAN_INACTIVE_BADGE}
+      </Text>
+    );
+  } else if (workspace.repoUrl) {
+    subRow = (
+      <Text style={subTextStyle} numberOfLines={1}>
+        {workspace.repoUrl}
+      </Text>
+    );
+  }
   return (
     <Pressable style={pressableStyle} onPress={handlePress}>
       <View style={styles.rowContent}>
@@ -247,11 +270,7 @@ function CloudWorkspaceRow({
           <Text style={rowTextStyle} numberOfLines={1}>
             {displayLabel}
           </Text>
-          {workspace.repoUrl ? (
-            <Text style={subTextStyle} numberOfLines={1}>
-              {workspace.repoUrl}
-            </Text>
-          ) : null}
+          {subRow}
         </View>
         <Pressable
           accessibilityLabel="Archive workspace"
@@ -350,6 +369,7 @@ export function ProjectPickerModal() {
     usePickerUnarchiveBinding();
   const { archiveMutate, archivingWorkspaceId } = usePickerArchiveBinding();
   const toast = useToast();
+  const router = useRouter();
 
   const directorySuggestionsQuery = useQuery({
     queryKey: ["project-picker-directory-suggestions", serverId, query],
@@ -413,12 +433,22 @@ export function ProjectPickerModal() {
 
   const handleSelectCloudWorkspace = useCallback(
     (workspace: WorkspaceRecord) => {
+      // billing_locked workspaces never attempt a WS upgrade — the lifecycle
+      // worker has stopped the daemon container. Route to the plan management
+      // page (the same target the workspace-route gate's "Manage plan" button
+      // uses). COMPAT(billing_locked): /settings/billing 404s gracefully
+      // Day-1; D-4 lights up the route.
+      if (workspace.state === "billing_locked") {
+        setOpen(false);
+        router.push("/settings/billing" as Href);
+        return;
+      }
       // The daemon's container exposes each cloud workspace at this canonical
       // mount; openProject clones-on-miss, so we never client-side-precheck.
       const path = `/workspace/${workspace.workspaceId}/.git-canonical`;
       void handleSelectPath(path);
     },
-    [handleSelectPath],
+    [handleSelectPath, router, setOpen],
   );
 
   const handleArchiveCloudWorkspace = useCallback(
