@@ -8,7 +8,7 @@ import {
   View,
   type PressableStateCallbackType,
 } from "react-native";
-import { Cloud, Folder } from "lucide-react-native";
+import { Archive, Cloud, Folder } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useQuery } from "@tanstack/react-query";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
@@ -24,7 +24,10 @@ import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
+import { ARCHIVE_30_DAY_NOTICE } from "@/lib/cloud-workspace-copy";
 import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
+import { partitionCloudWorkspaces } from "@/utils/cloud-workspace-sections";
+import { formatTimeAgo } from "@/utils/time";
 
 interface PathRowProps {
   path: string;
@@ -35,6 +38,97 @@ interface PathRowProps {
 interface CloudWorkspaceRowProps {
   workspace: WorkspaceRecord;
   onSelect: (workspace: WorkspaceRecord) => void;
+}
+
+interface ArchivedWorkspaceRowProps {
+  workspace: WorkspaceRecord;
+  onSelect: (workspace: WorkspaceRecord) => void;
+}
+
+interface ArchivedSectionProps {
+  workspaces: WorkspaceRecord[];
+  onSelect: (workspace: WorkspaceRecord) => void;
+}
+
+function ArchivedSection({ workspaces, onSelect }: ArchivedSectionProps) {
+  const { theme } = useUnistyles();
+  const sectionHeaderStyle = useMemo(
+    () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const footerStyle = useMemo(
+    () => [styles.archivedFooter, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  if (workspaces.length === 0) {
+    return null;
+  }
+  return (
+    <View style={styles.section}>
+      <Text style={sectionHeaderStyle}>Archived</Text>
+      {workspaces.map((workspace) => (
+        <ArchivedWorkspaceRow
+          key={workspace.workspaceId}
+          workspace={workspace}
+          onSelect={onSelect}
+        />
+      ))}
+      <Text style={footerStyle}>{ARCHIVE_30_DAY_NOTICE}</Text>
+    </View>
+  );
+}
+
+function ArchivedWorkspaceRow({ workspace, onSelect }: ArchivedWorkspaceRowProps) {
+  const { theme } = useUnistyles();
+  const handlePress = useCallback(() => {
+    onSelect(workspace);
+  }, [onSelect, workspace]);
+  const pressableStyle = useCallback(
+    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.row,
+      (Boolean(hovered) || pressed) && {
+        backgroundColor: theme.colors.surface1,
+      },
+    ],
+    [theme.colors.surface1],
+  );
+  const rowTextStyle = useMemo(
+    () => [styles.rowText, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const subTextStyle = useMemo(
+    () => [styles.rowSubText, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const displayLabel =
+    workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
+  const archivedLabel = useMemo(() => {
+    if (!workspace.archivedAt) {
+      return "Archived";
+    }
+    const parsed = new Date(workspace.archivedAt);
+    if (Number.isNaN(parsed.getTime())) {
+      return "Archived";
+    }
+    return `Archived ${formatTimeAgo(parsed)}`;
+  }, [workspace.archivedAt]);
+  return (
+    <Pressable style={pressableStyle} onPress={handlePress} testID="picker-archived-row">
+      <View style={styles.rowContent}>
+        <View style={styles.iconSlot}>
+          <Archive size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />
+        </View>
+        <View style={styles.rowTextColumn}>
+          <Text style={rowTextStyle} numberOfLines={1}>
+            {displayLabel}
+          </Text>
+          <Text style={subTextStyle} numberOfLines={1}>
+            {archivedLabel}
+          </Text>
+        </View>
+      </View>
+    </Pressable>
+  );
 }
 
 function CloudWorkspaceRow({ workspace, onSelect }: CloudWorkspaceRowProps) {
@@ -135,7 +229,11 @@ export function ProjectPickerModal() {
   const cloudWorkspacesQuery = useCloudWorkspaces(serverId, {
     enabled: isCloudHost && open,
   });
-  const cloudWorkspaces = cloudWorkspacesQuery.data ?? [];
+  const cloudWorkspacesData = cloudWorkspacesQuery.data;
+  const { activeCloudWorkspaces, archivedCloudWorkspaces } = useMemo(
+    () => partitionCloudWorkspaces(cloudWorkspacesData ?? []),
+    [cloudWorkspacesData],
+  );
 
   const directorySuggestionsQuery = useQuery({
     queryKey: ["project-picker-directory-suggestions", serverId, query],
@@ -333,10 +431,10 @@ export function ProjectPickerModal() {
             {!isSubmitting && options.length === 0 && !query.trim() ? (
               <Text style={emptyTextStyle}>Start typing a path</Text>
             ) : null}
-            {!isSubmitting && isCloudHost && cloudWorkspaces.length > 0 ? (
+            {!isSubmitting && isCloudHost && activeCloudWorkspaces.length > 0 ? (
               <View style={styles.section}>
                 <Text style={sectionHeaderStyle}>Cloud workspaces</Text>
-                {cloudWorkspaces.map((workspace) => (
+                {activeCloudWorkspaces.map((workspace) => (
                   <CloudWorkspaceRow
                     key={workspace.workspaceId}
                     workspace={workspace}
@@ -356,6 +454,12 @@ export function ProjectPickerModal() {
                   />
                 ))}
               </>
+            ) : null}
+            {!isSubmitting && isCloudHost ? (
+              <ArchivedSection
+                workspaces={archivedCloudWorkspaces}
+                onSelect={handleSelectCloudWorkspace}
+              />
             ) : null}
           </ScrollView>
         </View>
@@ -444,5 +548,11 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[4],
     fontSize: theme.fontSize.base,
+  },
+  archivedFooter: {
+    paddingHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[2],
+    paddingBottom: theme.spacing[2],
+    fontSize: theme.fontSize.xs,
   },
 }));
