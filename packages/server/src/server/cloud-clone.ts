@@ -164,7 +164,7 @@ export async function fetchWorkspaceRepoUrl(
   const doFetch = params.fetchImpl ?? fetch;
   const bodyString = JSON.stringify({ workspaceId });
   const hmac = crypto.createHmac("sha256", hmacKey).update(bodyString).digest("hex");
-  const url = `${authServiceBaseUrl.replace(/\/$/, "")}/api/internal/describe-workspace`;
+  const url = `${authServiceBaseUrl.replace(/\/$/, "")}/api/auth-internal/describe-workspace`;
 
   let response: Response;
   try {
