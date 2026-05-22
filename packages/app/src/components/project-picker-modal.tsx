@@ -24,12 +24,14 @@ import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
 import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
+import { useArchiveCloudWorkspace } from "@/hooks/use-archive-cloud-workspace";
 import { useUnarchiveWorkspace } from "@/hooks/use-unarchive-workspace";
 import { useToast } from "@/contexts/toast-context";
 import { ARCHIVE_30_DAY_NOTICE, UNARCHIVE_TOAST_COPY } from "@/lib/cloud-workspace-copy";
 import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { partitionCloudWorkspaces } from "@/utils/cloud-workspace-sections";
 import { formatTimeAgo } from "@/utils/time";
+import { showCloudWorkspaceArchiveDialog } from "@/components/cloud-workspace-archive-dialog";
 
 interface PathRowProps {
   path: string;
@@ -40,6 +42,8 @@ interface PathRowProps {
 interface CloudWorkspaceRowProps {
   workspace: WorkspaceRecord;
   onSelect: (workspace: WorkspaceRecord) => void;
+  onArchive: (workspace: WorkspaceRecord) => void;
+  isArchiving: boolean;
 }
 
 interface ArchivedWorkspaceRowProps {
@@ -182,11 +186,23 @@ function ArchivedWorkspaceRow({
   );
 }
 
-function CloudWorkspaceRow({ workspace, onSelect }: CloudWorkspaceRowProps) {
+function CloudWorkspaceRow({
+  workspace,
+  onSelect,
+  onArchive,
+  isArchiving,
+}: CloudWorkspaceRowProps) {
   const { theme } = useUnistyles();
   const handlePress = useCallback(() => {
     onSelect(workspace);
   }, [onSelect, workspace]);
+  const handleArchive = useCallback(
+    (event: { stopPropagation?: () => void }) => {
+      event.stopPropagation?.();
+      onArchive(workspace);
+    },
+    [onArchive, workspace],
+  );
   const pressableStyle = useCallback(
     ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
       styles.row,
@@ -203,6 +219,21 @@ function CloudWorkspaceRow({ workspace, onSelect }: CloudWorkspaceRowProps) {
   const subTextStyle = useMemo(
     () => [styles.rowSubText, { color: theme.colors.foregroundMuted }],
     [theme.colors.foregroundMuted],
+  );
+  const archiveButtonStyle = useCallback(
+    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.unarchiveButton,
+      {
+        borderColor: theme.colors.border,
+        backgroundColor:
+          Boolean(hovered) || pressed ? theme.colors.surface2 : theme.colors.surface1,
+      },
+    ],
+    [theme.colors.border, theme.colors.surface1, theme.colors.surface2],
+  );
+  const archiveButtonTextStyle = useMemo(
+    () => [styles.unarchiveButtonText, { color: theme.colors.foreground }],
+    [theme.colors.foreground],
   );
   const displayLabel =
     workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
@@ -222,6 +253,15 @@ function CloudWorkspaceRow({ workspace, onSelect }: CloudWorkspaceRowProps) {
             </Text>
           ) : null}
         </View>
+        <Pressable
+          accessibilityLabel="Archive workspace"
+          testID="picker-cloud-archive"
+          onPress={handleArchive}
+          disabled={isArchiving}
+          style={archiveButtonStyle}
+        >
+          <Text style={archiveButtonTextStyle}>{isArchiving ? "Archiving…" : "Archive"}</Text>
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -271,6 +311,15 @@ function usePickerUnarchiveBinding() {
   };
 }
 
+function usePickerArchiveBinding() {
+  const archive = useArchiveCloudWorkspace();
+  const archivingWorkspaceId = archive.isPending ? (archive.variables?.workspaceId ?? null) : null;
+  return {
+    archiveMutate: archive.mutate,
+    archivingWorkspaceId,
+  };
+}
+
 export function ProjectPickerModal() {
   const { theme } = useUnistyles();
   const serverId = useActiveServerId();
@@ -299,6 +348,7 @@ export function ProjectPickerModal() {
   );
   const { unarchiveMutateAsync, unarchiveMutate, unarchivingWorkspaceId } =
     usePickerUnarchiveBinding();
+  const { archiveMutate, archivingWorkspaceId } = usePickerArchiveBinding();
   const toast = useToast();
 
   const directorySuggestionsQuery = useQuery({
@@ -369,6 +419,22 @@ export function ProjectPickerModal() {
       void handleSelectPath(path);
     },
     [handleSelectPath],
+  );
+
+  const handleArchiveCloudWorkspace = useCallback(
+    (workspace: WorkspaceRecord) => {
+      if (!serverId) {
+        return;
+      }
+      void (async () => {
+        const confirmed = await showCloudWorkspaceArchiveDialog();
+        if (!confirmed) {
+          return;
+        }
+        archiveMutate({ serverId, workspaceId: workspace.workspaceId });
+      })();
+    },
+    [archiveMutate, serverId],
   );
 
   const handleUnarchiveOnly = useCallback(
@@ -536,6 +602,8 @@ export function ProjectPickerModal() {
                     key={workspace.workspaceId}
                     workspace={workspace}
                     onSelect={handleSelectCloudWorkspace}
+                    onArchive={handleArchiveCloudWorkspace}
+                    isArchiving={archivingWorkspaceId === workspace.workspaceId}
                   />
                 ))}
               </View>
