@@ -1,8 +1,9 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { CLOUD_WORKSPACES_QUERY_KEY_INNER } from "@/hooks/cloud-workspaces-cache";
 import { listWorkspaces, type WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { useIsCloudHost } from "@/runtime/host-runtime";
 
-export const CLOUD_WORKSPACES_QUERY_KEY = ["cloud-workspaces"] as const;
+export const CLOUD_WORKSPACES_QUERY_KEY = CLOUD_WORKSPACES_QUERY_KEY_INNER;
 
 // Cache lifecycle: list cached for 15s; invalidate via CLOUD_WORKSPACES_QUERY_KEY
 // from any mutation (archive / unarchive / create). OrchestraSessionExpiredError

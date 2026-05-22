@@ -5,7 +5,7 @@ import {
   OrchestraSessionExpiredError,
   type WorkspaceRecord,
 } from "@/lib/orchestra-cloud-client";
-import { CLOUD_WORKSPACES_QUERY_KEY } from "@/hooks/use-cloud-workspaces";
+import { invalidateCloudWorkspacesCache } from "@/hooks/cloud-workspaces-cache";
 
 // Single writer per side effect (F9): the only place that calls
 // unarchiveCloudWorkspace lives here. Both the explicit [Unarchive] button
@@ -21,7 +21,7 @@ export function useUnarchiveWorkspace(): UseMutationResult<
   return useMutation<WorkspaceRecord, Error, { workspaceId: string }>({
     mutationFn: ({ workspaceId }) => unarchiveCloudWorkspace(workspaceId),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
+      invalidateCloudWorkspacesCache(queryClient);
     },
     onError: (error) => {
       // Session-expired bounces via OrchestraSessionProvider; don't toast on

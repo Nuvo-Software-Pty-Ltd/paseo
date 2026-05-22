@@ -5,7 +5,7 @@ import {
   OrchestraSessionExpiredError,
   type WorkspaceRecord,
 } from "@/lib/orchestra-cloud-client";
-import { CLOUD_WORKSPACES_QUERY_KEY } from "@/hooks/use-cloud-workspaces";
+import { invalidateCloudWorkspacesCache } from "@/hooks/cloud-workspaces-cache";
 import { purgeLocalStateForArchivedWorkspace } from "@/workspace/cloud-workspace-gc";
 
 export interface ArchiveCloudWorkspaceInput {
@@ -32,7 +32,7 @@ export function useArchiveCloudWorkspace(): UseMutationResult<
         serverId,
         cloudWorkspaceId: workspaceId,
       });
-      void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
+      invalidateCloudWorkspacesCache(queryClient);
     },
     onError: (error) => {
       if (error instanceof OrchestraSessionExpiredError) {
