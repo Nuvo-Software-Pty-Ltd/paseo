@@ -114,6 +114,16 @@ COPY --from=builder /app/packages/highlight/dist ./packages/highlight/dist
 ENV PASEO_HOME=/var/lib/paseo
 RUN mkdir -p "$PASEO_HOME" /workspace && chown -R node:node "$PASEO_HOME" /workspace /app
 
+# Image tag propagated from CI (--build-arg PASEO_DAEMON_IMAGE_TAG=…).
+# The daemon's version-beacon + heartbeat report this value so operators
+# can answer "which image is on the wire" without an EC2 shell. Defaults
+# to "unknown" so a bare `docker build .` from a workstation succeeds.
+# PLAN-cdk-infra ALSO injects this at the ECS task-definition level
+# (runtime override of the build-time bake), so a redeploy with a freshly
+# tagged image surfaces the new tag without rebuilding.
+ARG PASEO_DAEMON_IMAGE_TAG="unknown"
+ENV PASEO_DAEMON_IMAGE_TAG=${PASEO_DAEMON_IMAGE_TAG}
+
 # Cloud-mode flag is baked in. Override with -e PASEO_CLOUD_MODE= (empty) for
 # on-host smoke tests.
 ENV PASEO_CLOUD_MODE=1
