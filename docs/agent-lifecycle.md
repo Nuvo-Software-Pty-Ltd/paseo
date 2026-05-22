@@ -89,6 +89,19 @@ A parent that spawns many subagents will see the track grow. There's no automati
 
 Closing a subagent's tab on one client doesn't affect other clients' layouts. This is the expected behavior of decoupled tabs and is consistent with how layouts have always worked. Archive remains the global gesture for cross-client cleanup.
 
+## Cloud workspace lifecycle (D-2)
+
+When running against Orchestra Cloud, each `WorkspaceRecord` carries a `state` field that the picker, route gate, and setup wizard branch on:
+
+| State            | User-visible artifact                                                                  |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `active`         | Default — picker row + workspace screen render normally.                               |
+| `suspended`      | Cold-resume splash ("Resuming workspace…") on the workspace route until WS reconnects. |
+| `billing_locked` | "Plan inactive" badge in the picker; opening surfaces the Manage-plan prompt.          |
+| `archived`       | Hidden from the active picker section; appears in the "Archived" section.              |
+
+Source of truth for the state machine + UX copy is `paseo-cloud-daemon/90-cloud-considerations/workspace-lifecycle.md`. The locked user-visible strings live in `packages/app/src/lib/cloud-workspace-copy.ts` — treat them as binding.
+
 ## Storage
 
 ```
