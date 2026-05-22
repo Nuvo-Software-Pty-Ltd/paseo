@@ -1,12 +1,13 @@
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import {
-  listWorkspaces,
-  OrchestraSessionExpiredError,
-  type WorkspaceRecord,
-} from "@/lib/orchestra-cloud-client";
+import { CLOUD_WORKSPACES_QUERY_KEY_INNER } from "@/hooks/cloud-workspaces-cache";
+import { listWorkspaces, type WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { useIsCloudHost } from "@/runtime/host-runtime";
 
-export const CLOUD_WORKSPACES_QUERY_KEY = ["cloud-workspaces"] as const;
+export const CLOUD_WORKSPACES_QUERY_KEY = CLOUD_WORKSPACES_QUERY_KEY_INNER;
+
+// Cache lifecycle: list cached for 15s; invalidate via CLOUD_WORKSPACES_QUERY_KEY
+// from any mutation (archive / unarchive / create). OrchestraSessionExpiredError
+// propagates — the global OrchestraSessionProvider handles the bounce.
 
 interface UseCloudWorkspacesOptions {
   enabled?: boolean;
@@ -21,18 +22,7 @@ export function useCloudWorkspaces(
 
   return useQuery<WorkspaceRecord[], Error>({
     queryKey: CLOUD_WORKSPACES_QUERY_KEY,
-    queryFn: async () => {
-      try {
-        return await listWorkspaces();
-      } catch (error) {
-        // Expired session is treated the same as "no cloud host" — the picker
-        // simply hides the section. Redirect-to-welcome is the auth store's job.
-        if (error instanceof OrchestraSessionExpiredError) {
-          return [];
-        }
-        throw error;
-      }
-    },
+    queryFn: () => listWorkspaces(),
     enabled,
     staleTime: 15_000,
     retry: false,

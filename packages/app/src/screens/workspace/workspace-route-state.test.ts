@@ -106,4 +106,77 @@ describe("resolveWorkspaceRouteState", () => {
       }),
     ).toEqual({ kind: "ready" });
   });
+
+  describe("cloud workspace state branches", () => {
+    it("returns cold-resume when cloud state is 'suspended' and not yet online", () => {
+      expect(
+        resolveWorkspaceRouteState({
+          hostName: "Cloud",
+          connectionStatus: "connecting",
+          lastError: null,
+          workspace: null,
+          hasHydratedWorkspaces: false,
+          cloudWorkspaceState: "suspended",
+        }),
+      ).toEqual({ kind: "cold-resume", hostName: "Cloud" });
+    });
+
+    it("ends the cold-resume splash when connectionStatus reaches 'online' (suspended still cached)", () => {
+      // Defensive: even if the suspended→active state flip hasn't refreshed
+      // the local cache yet, the WS upgrade going online dismisses the splash.
+      expect(
+        resolveWorkspaceRouteState({
+          hostName: "Cloud",
+          connectionStatus: "online",
+          lastError: null,
+          workspace: createWorkspaceDescriptor(),
+          hasHydratedWorkspaces: true,
+          cloudWorkspaceState: "suspended",
+        }),
+      ).toEqual({ kind: "ready" });
+    });
+
+    it("ends the cold-resume splash when state flips to 'active' (even mid-connect)", () => {
+      expect(
+        resolveWorkspaceRouteState({
+          hostName: "Cloud",
+          connectionStatus: "connecting",
+          lastError: null,
+          workspace: null,
+          hasHydratedWorkspaces: false,
+          cloudWorkspaceState: "active",
+        }),
+      ).toEqual({
+        kind: "unreachable",
+        hostName: "Cloud",
+        connectionStatus: "connecting",
+        lastError: null,
+      });
+    });
+
+    it("returns billing-locked when cloud state is 'billing_locked' regardless of connection status", () => {
+      expect(
+        resolveWorkspaceRouteState({
+          hostName: "Cloud",
+          connectionStatus: "online",
+          lastError: null,
+          workspace: createWorkspaceDescriptor(),
+          hasHydratedWorkspaces: true,
+          cloudWorkspaceState: "billing_locked",
+        }),
+      ).toEqual({ kind: "billing-locked", hostName: "Cloud" });
+    });
+
+    it("does not regress on-host happy path (cloudWorkspaceState omitted)", () => {
+      expect(
+        resolveWorkspaceRouteState({
+          hostName: "Laptop",
+          connectionStatus: "online",
+          lastError: null,
+          workspace: createWorkspaceDescriptor(),
+          hasHydratedWorkspaces: true,
+        }),
+      ).toEqual({ kind: "ready" });
+    });
+  });
 });

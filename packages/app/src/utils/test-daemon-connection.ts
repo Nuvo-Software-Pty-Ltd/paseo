@@ -134,10 +134,17 @@ export async function buildClientConfig(
       // the `paseo.workspace.<jwt>` subprotocol, matching the runtime active
       // path. The on-host bcrypt-Bearer path is mutually exclusive with this.
       const workspaceId = connection.workspaceId;
+      // PLAN-auth-and-shared Task 16: /token can return five non-active
+      // variants. The probe path needs a string; non-active surfaces as a
+      // probe failure so the caller treats it the same as any other
+      // unreachable-host outcome.
       const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
         tokenProvider: async () => {
-          const { token } = await mintWorkspaceToken(workspaceId);
-          return token;
+          const result = await mintWorkspaceToken(workspaceId);
+          if (result.status !== "active") {
+            throw new Error(`Workspace token unavailable: status=${result.status}`);
+          }
+          return result.token;
         },
       });
       return {

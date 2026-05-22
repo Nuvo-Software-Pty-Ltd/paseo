@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { useRouter } from "expo-router";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ArrowLeft, Check } from "lucide-react-native";
@@ -15,6 +16,7 @@ import {
   listWorkspaces,
   clearSession,
   getOrchestraDaemonWsUrl,
+  OrchestraSessionExpiredError,
   type WorkspaceRecord,
 } from "@/lib/orchestra-cloud-client";
 import { createWorkspaceTokenTransportFactory } from "@/lib/orchestra-cloud-transport";
@@ -24,7 +26,15 @@ import { resolveAppVersion } from "@/utils/app-version";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { extractHostPortFromWebSocketUrl } from "@server/shared/daemon-endpoints";
 
-type SetupStep = "workspace" | "credential" | "connecting" | "done";
+import {
+  filterChoosableWorkspaces,
+  setupHeaderTitle,
+  setupMintErrorMessage,
+  shouldShowWorkspaceChooser,
+  workspaceStateBadge,
+  type SetupStep,
+  type WorkspaceStepView,
+} from "./orchestra-setup-helpers";
 
 const styles = StyleSheet.create((theme) => ({
   root: {
@@ -135,6 +145,22 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.xs,
   },
+  chooserCreateCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[3],
+    padding: theme.spacing[4],
+    borderRadius: theme.borderRadius.lg,
+    backgroundColor: theme.colors.surface0,
+    borderWidth: 1,
+    borderColor: theme.colors.accent,
+    borderStyle: "dashed",
+  },
+  chooserCreateLabel: {
+    color: theme.colors.accent,
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.medium,
+  },
 }));
 
 const FLEX_ONE_STYLE = { flex: 1 } as const;
@@ -146,6 +172,7 @@ export function OrchestraSetupScreen() {
   const queryClient = useQueryClient();
 
   const [step, setStep] = useState<SetupStep>("workspace");
+  const [workspaceStepView, setWorkspaceStepView] = useState<WorkspaceStepView>("auto");
   const [repoUrl, setRepoUrl] = useState("");
   const [repoLess, setRepoLess] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -154,8 +181,38 @@ export function OrchestraSetupScreen() {
   const [error, setError] = useState("");
   const [isBusy, setIsBusy] = useState(false);
 
+  // Single query keyed on the same key the post-setup picker uses so the
+  // chooser and the picker stay in sync after createWorkspace invalidates.
+  const workspacesQuery = useQuery<WorkspaceRecord[], Error>({
+    queryKey: CLOUD_WORKSPACES_QUERY_KEY,
+    queryFn: () => listWorkspaces(),
+    enabled: step === "workspace",
+    staleTime: 15_000,
+    retry: false,
+  });
+  const choosableWorkspaces = useMemo(
+    () => filterChoosableWorkspaces(workspacesQuery.data ?? []),
+    [workspacesQuery.data],
+  );
+  const shouldShowChooser = shouldShowWorkspaceChooser(
+    step,
+    workspaceStepView,
+    choosableWorkspaces,
+  );
+
   const handleBack = useCallback(() => {
     if (step === "workspace") {
+      // Workspace step has two sub-views: the create form may be reached
+      // EITHER as the auto-render-because-zero-workspaces path (no chooser to
+      // return to) OR as the explicit "Create new" pick from the chooser.
+      // In the latter case, Back lands on the chooser; in the former, Back
+      // returns to /welcome. Preserve any typed form values across the chooser
+      // round-trip per the plan.
+      if (workspaceStepView === "create") {
+        setWorkspaceStepView("auto");
+        setError("");
+        return;
+      }
       void clearSession();
       router.replace("/welcome");
     } else if (step === "credential") {
@@ -167,7 +224,7 @@ export function OrchestraSetupScreen() {
       setApiKey("");
       setError("");
     }
-  }, [step, router]);
+  }, [step, workspaceStepView, router]);
 
   const reconcileCachedWorkspace = useCallback(async (): Promise<WorkspaceRecord | null> => {
     const list = await listWorkspaces();
@@ -194,13 +251,6 @@ export function OrchestraSetupScreen() {
     setError("");
 
     try {
-      const existing = await listWorkspaces();
-      if (existing.length > 0) {
-        setWorkspace(existing[0]);
-        setStep("credential");
-        return;
-      }
-
       const url = repoLess ? null : repoUrl.trim() || null;
       if (!repoLess && !url) {
         setError("Enter a repo URL or check repo-less.");
@@ -211,14 +261,33 @@ export function OrchestraSetupScreen() {
         repoUrl: url,
         displayName: displayName.trim() || undefined,
       });
+      // Refresh the cached list so the chooser/picker reflects the new row
+      // immediately on a future re-visit.
+      void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
       setWorkspace(ws);
       setStep("credential");
     } catch (err) {
+      // Session-expired bounces via OrchestraSessionProvider — don't render an
+      // inline string the user would see for a single frame before the route swap.
+      if (err instanceof OrchestraSessionExpiredError) {
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, repoLess, repoUrl, displayName]);
+  }, [isBusy, repoLess, repoUrl, displayName, queryClient]);
+
+  const handlePickExistingWorkspace = useCallback((picked: WorkspaceRecord) => {
+    setWorkspace(picked);
+    setStep("credential");
+    setError("");
+  }, []);
+
+  const handleSwitchToCreate = useCallback(() => {
+    setWorkspaceStepView("create");
+    setError("");
+  }, []);
 
   const handleSetCredential = useCallback(async () => {
     if (isBusy || !workspace) return;
@@ -244,7 +313,17 @@ export function OrchestraSetupScreen() {
       await setAnthropicCredential(fresh.workspaceId, trimmedKey);
       setStep("connecting");
 
-      const { token } = await mintWorkspaceToken(fresh.workspaceId);
+      const mintResult = await mintWorkspaceToken(fresh.workspaceId);
+      if (mintResult.status !== "active") {
+        // The workspace was created moments ago in this same flow, so any
+        // non-active state here is unexpected (the lifecycle worker hasn't
+        // had time to suspend / archive / lock anything yet). Surface a
+        // friendly inline error and bounce back to the credential step.
+        setStep("credential");
+        setError(setupMintErrorMessage(mintResult));
+        return;
+      }
+      const token = mintResult.token;
       const wsUrl = getOrchestraDaemonWsUrl();
       const clientId = await getOrCreateClientId();
       const transportFactory = createWorkspaceTokenTransportFactory(token);
@@ -285,6 +364,11 @@ export function OrchestraSetupScreen() {
       router.replace(`/h/${serverId}`);
     } catch (err) {
       setStep("credential");
+      if (err instanceof OrchestraSessionExpiredError) {
+        // Same as handleCreateWorkspace: defer to the global session-expired
+        // bounce; don't paint an inline error the user would see one-frame.
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsBusy(false);
@@ -306,15 +390,19 @@ export function OrchestraSetupScreen() {
                 <ArrowLeft size={20} color={theme.colors.foreground} />
               </Pressable>
             ) : null}
-            <Text style={styles.title}>
-              {step === "workspace" && "Create workspace"}
-              {step === "credential" && "Anthropic API key"}
-              {step === "connecting" && "Connecting..."}
-              {step === "done" && "Connected"}
-            </Text>
+            <Text style={styles.title}>{setupHeaderTitle(step, shouldShowChooser)}</Text>
           </View>
 
-          {step === "workspace" && (
+          {step === "workspace" && shouldShowChooser && (
+            <WorkspaceChooser
+              workspaces={choosableWorkspaces}
+              isLoading={workspacesQuery.isLoading}
+              onPick={handlePickExistingWorkspace}
+              onCreateNew={handleSwitchToCreate}
+            />
+          )}
+
+          {step === "workspace" && !shouldShowChooser && (
             <WorkspaceStep
               repoUrl={repoUrl}
               setRepoUrl={setRepoUrl}
@@ -354,6 +442,88 @@ export function OrchestraSetupScreen() {
         </View>
       </ScrollView>
     </View>
+  );
+}
+
+function WorkspaceChooser({
+  workspaces,
+  isLoading,
+  onPick,
+  onCreateNew,
+}: {
+  workspaces: WorkspaceRecord[];
+  isLoading: boolean;
+  onPick: (workspace: WorkspaceRecord) => void;
+  onCreateNew: () => void;
+}) {
+  const { theme } = useUnistyles();
+  if (isLoading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="small" color={theme.colors.accent} />
+      </View>
+    );
+  }
+  return (
+    <>
+      <Text style={styles.subtitle}>
+        Pick a workspace to set credentials on, or create a new one.
+      </Text>
+      {workspaces.map((entry) => (
+        <ChooserExistingWorkspaceCard key={entry.workspaceId} workspace={entry} onPick={onPick} />
+      ))}
+      <Pressable
+        style={styles.chooserCreateCard}
+        onPress={onCreateNew}
+        accessibilityRole="button"
+        accessibilityLabel="Create a new workspace"
+        testID="orchestra-create-new-workspace"
+      >
+        <Plus size={18} color={theme.colors.accent} />
+        <Text style={styles.chooserCreateLabel}>Create a new workspace</Text>
+      </Pressable>
+    </>
+  );
+}
+
+function ChooserExistingWorkspaceCard({
+  workspace,
+  onPick,
+}: {
+  workspace: WorkspaceRecord;
+  onPick: (workspace: WorkspaceRecord) => void;
+}) {
+  const { theme } = useUnistyles();
+  const handlePress = useCallback(() => {
+    onPick(workspace);
+  }, [onPick, workspace]);
+  const label =
+    workspace.displayName.trim().length > 0 ? workspace.displayName : workspace.workspaceId;
+  const badge = workspaceStateBadge(workspace.state);
+  const badgeStyle = useMemo(
+    () => [styles.workspaceCardSub, { color: theme.colors.destructive }],
+    [theme.colors.destructive],
+  );
+  return (
+    <Pressable
+      style={styles.workspaceCard}
+      onPress={handlePress}
+      accessibilityRole="button"
+      accessibilityLabel={`Use workspace ${label}`}
+      testID={`orchestra-pick-workspace-${workspace.workspaceId}`}
+    >
+      <View style={FLEX_ONE_STYLE}>
+        <Text style={styles.workspaceCardText} numberOfLines={1}>
+          {label}
+        </Text>
+        {workspace.repoUrl ? (
+          <Text style={styles.workspaceCardSub} numberOfLines={1}>
+            {workspace.repoUrl}
+          </Text>
+        ) : null}
+        {badge ? <Text style={badgeStyle}>{badge}</Text> : null}
+      </View>
+    </Pressable>
   );
 }
 
