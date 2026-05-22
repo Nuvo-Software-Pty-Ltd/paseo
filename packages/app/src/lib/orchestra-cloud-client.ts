@@ -16,6 +16,15 @@ function getDaemonWsUrl(): string {
   return `${wsScheme}://${httpStripped}/ws`;
 }
 
+export type CloudWorkspaceState = "active" | "suspended" | "billing_locked" | "archived";
+
+const CLOUD_WORKSPACE_STATES: ReadonlySet<CloudWorkspaceState> = new Set([
+  "active",
+  "suspended",
+  "billing_locked",
+  "archived",
+]);
+
 export interface WorkspaceRecord {
   workspaceId: string;
   accountId: string;
@@ -24,6 +33,34 @@ export interface WorkspaceRecord {
   status: string;
   createdAt: string;
   updatedAt: string;
+  // COMPAT(workspaceState): added in v0.1.X (D-2). Both fields are tolerant —
+  // the wire shape may omit them on old daemons; the normalizer defaults state
+  // to "active" and archivedAt to null. Drop the defaults when daemon floor
+  // >= the version that always sends state + archivedAt.
+  state: CloudWorkspaceState;
+  archivedAt: string | null;
+}
+
+function normalizeWorkspaceRecord(raw: unknown): WorkspaceRecord {
+  const record = raw as Partial<WorkspaceRecord> & Record<string, unknown>;
+  const rawState = record.state;
+  const state: CloudWorkspaceState =
+    typeof rawState === "string" && CLOUD_WORKSPACE_STATES.has(rawState as CloudWorkspaceState)
+      ? (rawState as CloudWorkspaceState)
+      : "active";
+  const rawArchivedAt = record.archivedAt;
+  const archivedAt = typeof rawArchivedAt === "string" ? rawArchivedAt : null;
+  return {
+    workspaceId: String(record.workspaceId ?? ""),
+    accountId: String(record.accountId ?? ""),
+    repoUrl: (record.repoUrl as string | null | undefined) ?? null,
+    displayName: String(record.displayName ?? ""),
+    status: String(record.status ?? ""),
+    createdAt: String(record.createdAt ?? ""),
+    updatedAt: String(record.updatedAt ?? ""),
+    state,
+    archivedAt,
+  };
 }
 
 export class OrchestraSessionExpiredError extends Error {
@@ -151,8 +188,8 @@ export async function listWorkspaces(): Promise<WorkspaceRecord[]> {
   if (!res.ok) {
     throw new Error(`Failed to list workspaces: ${res.status}`);
   }
-  const body = (await res.json()) as { workspaces: WorkspaceRecord[] };
-  return body.workspaces;
+  const body = (await res.json()) as { workspaces: unknown[] };
+  return (body.workspaces ?? []).map(normalizeWorkspaceRecord);
 }
 
 export async function createWorkspace(input: {
@@ -167,7 +204,14 @@ export async function createWorkspace(input: {
     const body = await res.text().catch(() => "unknown error");
     throw new Error(`Failed to create workspace: ${res.status} — ${body}`);
   }
-  return (await res.json()) as WorkspaceRecord;
+  return normalizeWorkspaceRecord(await res.json());
+}
+
+// Single-discriminator helper (F11 design-out): route every consumer through
+// here so a future "billing_locked" / new-state addition doesn't need a grep
+// across the codebase. Use this instead of comparing workspace.state inline.
+export function getCloudWorkspaceState(workspace: WorkspaceRecord): CloudWorkspaceState {
+  return workspace.state;
 }
 
 export async function setAnthropicCredential(

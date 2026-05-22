@@ -76,7 +76,8 @@ describe("listWorkspaces", () => {
 
     const result = await listWorkspaces();
 
-    expect(result).toEqual(workspaces);
+    expect(result).toHaveLength(1);
+    expect(result[0].workspaceId).toBe("ws_001");
     expect(global.fetch).toHaveBeenCalledOnce();
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
@@ -96,6 +97,55 @@ describe("listWorkspaces", () => {
   it("throws when no session token is stored", async () => {
     await expect(listWorkspaces()).rejects.toThrow(OrchestraSessionExpiredError);
   });
+
+  it("defaults state to 'active' and archivedAt to null when the wire omits them", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [{ workspaceId: "ws_legacy" }],
+    });
+
+    const [row] = await listWorkspaces();
+    expect(row.state).toBe("active");
+    expect(row.archivedAt).toBeNull();
+  });
+
+  it("parses every cloud workspace state plus archivedAt", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [
+        { workspaceId: "ws_a", state: "active", archivedAt: null },
+        { workspaceId: "ws_s", state: "suspended", archivedAt: null },
+        {
+          workspaceId: "ws_b",
+          state: "billing_locked",
+          archivedAt: null,
+        },
+        {
+          workspaceId: "ws_x",
+          state: "archived",
+          archivedAt: "2026-05-20T12:00:00.000Z",
+        },
+      ],
+    });
+
+    const rows = await listWorkspaces();
+    expect(rows.map((row) => row.state)).toEqual([
+      "active",
+      "suspended",
+      "billing_locked",
+      "archived",
+    ]);
+    expect(rows[3].archivedAt).toBe("2026-05-20T12:00:00.000Z");
+  });
+
+  it("falls back to 'active' when state is an unrecognized value (forward-compat)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [{ workspaceId: "ws_future", state: "exploding" }],
+    });
+    const [row] = await listWorkspaces();
+    expect(row.state).toBe("active");
+  });
 });
 
 describe("createWorkspace", () => {
@@ -109,7 +159,9 @@ describe("createWorkspace", () => {
       displayName: "My Repo",
     });
 
-    expect(result).toEqual(workspace);
+    expect(result.workspaceId).toBe("ws_002");
+    expect(result.state).toBe("active");
+    expect(result.archivedAt).toBeNull();
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       RequestInit,
