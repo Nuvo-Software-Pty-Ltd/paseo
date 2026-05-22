@@ -474,10 +474,21 @@ export function createDefaultDeps(): HostRuntimeControllerDeps {
         if (workspaceId) {
           // Cloud-mode: mint a fresh short-lived workspace token per WS connect.
           // Token lives only in the transport closure, never persisted.
+          //
+          // PLAN-auth-and-shared Task 16: the /token endpoint may return five
+          // non-active variants (resuming / archived / billing_locked /
+          // provisioning / provisioning_failed). The WS transport needs a
+          // string token, so for every non-active variant we throw — the
+          // host-runtime's existing reconnect cycle handles the retry, and
+          // the cold-resume splash (Task 6) reads workspace state from the
+          // /workspaces list directly, not from this throw.
           const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
             tokenProvider: async () => {
-              const { token } = await mintWorkspaceToken(workspaceId);
-              return token;
+              const result = await mintWorkspaceToken(workspaceId);
+              if (result.status !== "active") {
+                throw new Error(`Workspace token unavailable: status=${result.status}`);
+              }
+              return result.token;
             },
           });
           return new DaemonClient({

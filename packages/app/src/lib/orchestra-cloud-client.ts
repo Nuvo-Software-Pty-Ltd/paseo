@@ -258,16 +258,89 @@ export async function setAnthropicCredential(
   return (await res.json()) as { status: "ok" };
 }
 
-export async function mintWorkspaceToken(
-  workspaceId: string,
-): Promise<{ token: string; expiresAt: number }> {
+// Discriminated result of POST /api/v1/cloud/workspaces/:id/token. Mirrors the
+// status-code matrix PLAN-auth-and-shared Task 16 defined: a single endpoint
+// returning one of six shapes depending on the workspace's lifecycle state.
+// Treating any 2xx as `{token, expiresAt}` (the pre-D-2 behavior) silently
+// breaks on the 202 "resuming" shape, so every caller must dispatch on
+// `.status`.
+export type MintWorkspaceTokenResult =
+  | { status: "active"; token: string; expiresAt: number }
+  | { status: "resuming"; retryAfterMs: number }
+  | { status: "archived"; canUnarchive: boolean }
+  | { status: "billing_locked"; reactivateUrl: string | null }
+  | { status: "provisioning"; retryAfterMs: number }
+  | { status: "provisioning_failed"; retryable: boolean };
+
+async function readJsonOrEmpty(res: Response): Promise<Record<string, unknown>> {
+  try {
+    const body = (await res.json()) as unknown;
+    return body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function asNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function asStringOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+export async function mintWorkspaceToken(workspaceId: string): Promise<MintWorkspaceTokenResult> {
   const res = await authedFetch(`/api/v1/cloud/workspaces/${workspaceId}/token`, {
     method: "POST",
   });
-  if (!res.ok) {
-    throw new Error(`Failed to mint workspace token: ${res.status}`);
+
+  if (res.status === 200) {
+    const body = await readJsonOrEmpty(res);
+    const token = typeof body.token === "string" ? body.token : "";
+    const expiresAt = asNumber(body.expiresAt, 0);
+    if (!token) {
+      throw new Error("Failed to mint workspace token: 200 response missing token");
+    }
+    return { status: "active", token, expiresAt };
   }
-  return (await res.json()) as { token: string; expiresAt: number };
+
+  if (res.status === 202) {
+    const body = await readJsonOrEmpty(res);
+    return { status: "resuming", retryAfterMs: asNumber(body.retryAfterMs, 1500) };
+  }
+
+  if (res.status === 402) {
+    const body = await readJsonOrEmpty(res);
+    return { status: "billing_locked", reactivateUrl: asStringOrNull(body.reactivateUrl) };
+  }
+
+  if (res.status === 503) {
+    const body = await readJsonOrEmpty(res);
+    return { status: "provisioning", retryAfterMs: asNumber(body.retryAfterMs, 2000) };
+  }
+
+  if (res.status === 409) {
+    // Two shapes share 409: archived (carries `canUnarchive`) vs
+    // provisioning_failed (carries `retryable`). Disambiguate by which key is
+    // present in the body. If neither is present (e.g. a future variant) fall
+    // through to the generic throw so it can't masquerade as either.
+    const body = await readJsonOrEmpty(res);
+    if ("canUnarchive" in body) {
+      return { status: "archived", canUnarchive: asBoolean(body.canUnarchive, true) };
+    }
+    if ("retryable" in body) {
+      return { status: "provisioning_failed", retryable: asBoolean(body.retryable, false) };
+    }
+  }
+
+  // Preserve the pre-D-2 throw shape for everything else (genuinely
+  // unexpected status codes) so the caller's catch logs include the code.
+  const body = await res.text().catch(() => "unknown error");
+  throw new Error(`Failed to mint workspace token: ${res.status} — ${body}`);
 }
 
 // NOTE: GET /api/v1/cloud/github/repos does not exist yet in Phase 3.

@@ -196,20 +196,108 @@ describe("setAnthropicCredential", () => {
 });
 
 describe("mintWorkspaceToken", () => {
-  it("calls POST and returns token + expiresAt", async () => {
+  it("200 → active variant with token + expiresAt", async () => {
     await storeSessionToken(TOKEN);
-    const payload = { token: "ws-jwt", expiresAt: 1234567890 };
-    mockFetch(200, payload);
+    mockFetch(200, { token: "ws-jwt", expiresAt: 1234567890 });
 
     const result = await mintWorkspaceToken("ws_002");
 
-    expect(result).toEqual(payload);
+    expect(result).toEqual({ status: "active", token: "ws-jwt", expiresAt: 1234567890 });
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       RequestInit,
     ];
     expect(url).toContain("/api/v1/cloud/workspaces/ws_002/token");
     expect(init.method).toBe("POST");
+  });
+
+  it("200 with missing token throws (defensive — the server contract guarantees it)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { expiresAt: 1 });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(/missing token/);
+  });
+
+  it("202 → resuming variant with retryAfterMs (lifecycle worker signaled to wake the daemon)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(202, { resuming: true, retryAfterMs: 1500 });
+
+    expect(await mintWorkspaceToken("ws_002")).toEqual({ status: "resuming", retryAfterMs: 1500 });
+  });
+
+  it("202 with no retryAfterMs falls back to 1500 ms default", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(202, { resuming: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({ status: "resuming", retryAfterMs: 1500 });
+  });
+
+  it("402 → billing_locked variant with reactivateUrl", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(402, {
+      error: "Plan inactive",
+      reactivateUrl: "https://orchestra.example/billing",
+    });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "billing_locked",
+      reactivateUrl: "https://orchestra.example/billing",
+    });
+  });
+
+  it("402 with null reactivateUrl is preserved as null", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(402, { error: "Plan inactive", reactivateUrl: null });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "billing_locked",
+      reactivateUrl: null,
+    });
+  });
+
+  it("503 → provisioning variant with retryAfterMs (Day-0 first-connect path)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(503, { error: "Workspace still provisioning", retryAfterMs: 2000 });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "provisioning",
+      retryAfterMs: 2000,
+    });
+  });
+
+  it("409 with canUnarchive disambiguates to archived", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Workspace is archived", canUnarchive: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "archived",
+      canUnarchive: true,
+    });
+  });
+
+  it("409 with retryable disambiguates to provisioning_failed", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Workspace failed to start", retryable: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "provisioning_failed",
+      retryable: true,
+    });
+  });
+
+  it("409 with neither disambiguating key throws (unknown 409 shape)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Some new conflict shape" });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(
+      /Failed to mint workspace token: 409/,
+    );
+  });
+
+  it("401 throws OrchestraSessionExpiredError (auth seam unchanged)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(OrchestraSessionExpiredError);
+  });
+
+  it("500 (and other unexpected codes) throws with the status code", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(500, "internal error");
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(
+      /Failed to mint workspace token: 500/,
+    );
   });
 });
 

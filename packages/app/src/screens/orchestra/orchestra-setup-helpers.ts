@@ -1,4 +1,4 @@
-import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
+import type { MintWorkspaceTokenResult, WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 
 export type SetupStep = "workspace" | "credential" | "connecting" | "done";
 
@@ -36,6 +36,29 @@ export function setupHeaderTitle(step: SetupStep, shouldShowChooser: boolean): s
   if (step === "credential") return "Anthropic API key";
   if (step === "connecting") return "Connecting...";
   return "Connected";
+}
+
+// Friendly inline-error copy for the create-flow's mint step. The setup
+// wizard treats every non-active mint result as exceptional (we just created
+// the workspace; lifecycle states should be active for the next few
+// seconds), so this maps the discriminated result to a single sentence.
+export function setupMintErrorMessage(result: MintWorkspaceTokenResult): string {
+  switch (result.status) {
+    case "active":
+      return "";
+    case "resuming":
+      return "Your workspace is resuming — try again in a moment.";
+    case "archived":
+      return "This workspace is archived. Unarchive it from the picker before connecting.";
+    case "billing_locked":
+      return "Your plan is inactive. Reactivate it to use this workspace.";
+    case "provisioning":
+      return "Your workspace is still provisioning — try again in a moment.";
+    case "provisioning_failed":
+      return result.retryable
+        ? "Workspace failed to start. Try again."
+        : "Workspace failed to start. Contact support if this keeps happening.";
+  }
 }
 
 export function workspaceStateBadge(state: WorkspaceRecord["state"]): string | null {

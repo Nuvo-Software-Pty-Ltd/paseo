@@ -29,6 +29,7 @@ import { extractHostPortFromWebSocketUrl } from "@server/shared/daemon-endpoints
 import {
   filterChoosableWorkspaces,
   setupHeaderTitle,
+  setupMintErrorMessage,
   shouldShowWorkspaceChooser,
   workspaceStateBadge,
   type SetupStep,
@@ -312,7 +313,17 @@ export function OrchestraSetupScreen() {
       await setAnthropicCredential(fresh.workspaceId, trimmedKey);
       setStep("connecting");
 
-      const { token } = await mintWorkspaceToken(fresh.workspaceId);
+      const mintResult = await mintWorkspaceToken(fresh.workspaceId);
+      if (mintResult.status !== "active") {
+        // The workspace was created moments ago in this same flow, so any
+        // non-active state here is unexpected (the lifecycle worker hasn't
+        // had time to suspend / archive / lock anything yet). Surface a
+        // friendly inline error and bounce back to the credential step.
+        setStep("credential");
+        setError(setupMintErrorMessage(mintResult));
+        return;
+      }
+      const token = mintResult.token;
       const wsUrl = getOrchestraDaemonWsUrl();
       const clientId = await getOrCreateClientId();
       const transportFactory = createWorkspaceTokenTransportFactory(token);

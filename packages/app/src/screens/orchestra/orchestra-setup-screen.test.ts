@@ -3,6 +3,7 @@ import type { CloudWorkspaceState, WorkspaceRecord } from "@/lib/orchestra-cloud
 import {
   filterChoosableWorkspaces,
   setupHeaderTitle,
+  setupMintErrorMessage,
   shouldShowWorkspaceChooser,
 } from "./orchestra-setup-helpers";
 
@@ -66,5 +67,31 @@ describe("setupHeaderTitle", () => {
     expect(setupHeaderTitle("credential", true)).toBe("Anthropic API key");
     expect(setupHeaderTitle("connecting", false)).toBe("Connecting...");
     expect(setupHeaderTitle("done", false)).toBe("Connected");
+  });
+});
+
+describe("setupMintErrorMessage", () => {
+  it("returns empty string for the active variant (no error to show)", () => {
+    expect(setupMintErrorMessage({ status: "active", token: "t", expiresAt: 1 })).toBe("");
+  });
+
+  it("maps each non-active variant to a sentence-length user-friendly message", () => {
+    expect(setupMintErrorMessage({ status: "resuming", retryAfterMs: 1500 })).toMatch(/resuming/i);
+    expect(setupMintErrorMessage({ status: "archived", canUnarchive: true })).toMatch(/archived/i);
+    expect(setupMintErrorMessage({ status: "billing_locked", reactivateUrl: null })).toMatch(
+      /plan/i,
+    );
+    expect(setupMintErrorMessage({ status: "provisioning", retryAfterMs: 2000 })).toMatch(
+      /provisioning/i,
+    );
+  });
+
+  it("distinguishes retryable vs non-retryable provisioning_failed", () => {
+    expect(setupMintErrorMessage({ status: "provisioning_failed", retryable: true })).toMatch(
+      /Try again/,
+    );
+    expect(setupMintErrorMessage({ status: "provisioning_failed", retryable: false })).toMatch(
+      /Contact support/,
+    );
   });
 });
