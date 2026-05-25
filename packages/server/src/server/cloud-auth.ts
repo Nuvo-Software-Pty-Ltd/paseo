@@ -21,16 +21,6 @@ type WorkspaceTokenClaims = z.infer<typeof WorkspaceTokenClaimsSchema>;
 export interface CreateJwksWorkspaceAuthCallbackOptions {
   jwksUrl: string;
   logger: pino.Logger;
-  // Workspace identity this daemon is bound to. Sourced from the per-task
-  // env vars the cloud control plane injects at boot. After signature
-  // verification we assert the token's claims match BOTH of these — the
-  // signature alone is not sufficient because every workspace's token is
-  // signed by the same auth-service keypair, so without claim binding a
-  // valid token from workspace A would be accepted by workspace B's daemon.
-  // We check account_id AND workspace_id (not just workspace_id) so that a
-  // future workspace_id collision across accounts cannot defeat the binding.
-  expectedWorkspaceId: string;
-  expectedAccountId: string;
   // Test seam: inject a key-resolver function instead of fetching JWKS over
   // the network. Production callers omit this; tests pass a key resolved from
   // a locally-generated keypair.
@@ -70,26 +60,6 @@ export function createJwksWorkspaceAuthCallback(
         payload = WorkspaceTokenClaimsSchema.parse(verified.payload);
       } catch (error) {
         logger.warn({ err: error }, "Rejected workspace token");
-        return null;
-      }
-      if (payload.workspace_id !== options.expectedWorkspaceId) {
-        logger.warn(
-          {
-            expectedWorkspaceId: options.expectedWorkspaceId,
-            receivedWorkspaceId: payload.workspace_id,
-          },
-          "workspace token mismatched daemon binding",
-        );
-        return null;
-      }
-      if (payload.account_id !== options.expectedAccountId) {
-        logger.warn(
-          {
-            expectedAccountId: options.expectedAccountId,
-            receivedAccountId: payload.account_id,
-          },
-          "workspace token mismatched daemon binding",
-        );
         return null;
       }
       return {

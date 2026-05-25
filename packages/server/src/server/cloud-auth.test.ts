@@ -30,8 +30,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "acc_alpha",
-      expectedWorkspaceId: "ws_beta",
       getKey: async () => publicKey,
     });
     const token = await signWorkspaceJwt(privateKey, {
@@ -51,8 +49,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "a",
-      expectedWorkspaceId: "w",
       getKey: async () => publicKey,
     });
     // Negative TTL → exp in the past. jose treats expired as invalid.
@@ -71,8 +67,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "acc",
-      expectedWorkspaceId: "ws",
       getKey: async () => verifier.publicKey,
     });
     const token = await signWorkspaceJwt(signer.privateKey, {
@@ -88,8 +82,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "a",
-      expectedWorkspaceId: "w",
       getKey: async () => publicKey,
     });
     // No workspace_id — the schema check rejects this even though the
@@ -108,122 +100,11 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "a",
-      expectedWorkspaceId: "w",
       getKey: async () => publicKey,
     });
 
     expect(await callback.validateWorkspaceToken("")).toBeNull();
     expect(await callback.validateWorkspaceToken("not-a-jwt")).toBeNull();
-  });
-
-  test("accepts a token whose account_id and workspace_id match the daemon binding", async () => {
-    const { privateKey, publicKey } = await makeKeypair();
-    const callback = createJwksWorkspaceAuthCallback({
-      jwksUrl: "http://unused.example/jwks",
-      logger: silentLogger,
-      expectedAccountId: "acc_self",
-      expectedWorkspaceId: "ws_self",
-      getKey: async () => publicKey,
-    });
-    const token = await signWorkspaceJwt(privateKey, {
-      account_id: "acc_self",
-      workspace_id: "ws_self",
-    });
-
-    const result = await callback.validateWorkspaceToken(token);
-    expect(result).not.toBeNull();
-    expect(result?.accountId).toBe("acc_self");
-    expect(result?.workspaceId).toBe("ws_self");
-  });
-
-  test("rejects a validly-signed token whose workspace_id does not match the daemon binding", async () => {
-    const { privateKey, publicKey } = await makeKeypair();
-    const logs: Array<{ obj: Record<string, unknown>; msg: string }> = [];
-    const captureLogger = pino(
-      { level: "warn" },
-      {
-        write(chunk: string) {
-          const parsed = JSON.parse(chunk) as Record<string, unknown>;
-          const { msg, ...rest } = parsed;
-          logs.push({ obj: rest, msg: String(msg) });
-        },
-      },
-    );
-    const callback = createJwksWorkspaceAuthCallback({
-      jwksUrl: "http://unused.example/jwks",
-      logger: captureLogger,
-      expectedAccountId: "acc_self",
-      expectedWorkspaceId: "ws_self",
-      getKey: async () => publicKey,
-    });
-    // Token signed by the same auth-service keypair but issued for a
-    // different workspace — the live D-2 probe 7 scenario.
-    const crossTenant = await signWorkspaceJwt(privateKey, {
-      account_id: "acc_self",
-      workspace_id: "ws_other",
-    });
-
-    expect(await callback.validateWorkspaceToken(crossTenant)).toBeNull();
-    const mismatchLog = logs.find(
-      (entry) => entry.msg === "workspace token mismatched daemon binding",
-    );
-    expect(mismatchLog).toBeDefined();
-    expect(mismatchLog?.obj.expectedWorkspaceId).toBe("ws_self");
-    expect(mismatchLog?.obj.receivedWorkspaceId).toBe("ws_other");
-  });
-
-  test("rejects a validly-signed token whose account_id does not match the daemon binding", async () => {
-    const { privateKey, publicKey } = await makeKeypair();
-    const logs: Array<{ obj: Record<string, unknown>; msg: string }> = [];
-    const captureLogger = pino(
-      { level: "warn" },
-      {
-        write(chunk: string) {
-          const parsed = JSON.parse(chunk) as Record<string, unknown>;
-          const { msg, ...rest } = parsed;
-          logs.push({ obj: rest, msg: String(msg) });
-        },
-      },
-    );
-    const callback = createJwksWorkspaceAuthCallback({
-      jwksUrl: "http://unused.example/jwks",
-      logger: captureLogger,
-      expectedAccountId: "acc_self",
-      expectedWorkspaceId: "ws_self",
-      getKey: async () => publicKey,
-    });
-    // workspace_id matches but account_id does not — guards against a future
-    // workspace_id collision across accounts defeating the binding.
-    const wrongAccount = await signWorkspaceJwt(privateKey, {
-      account_id: "acc_other",
-      workspace_id: "ws_self",
-    });
-
-    expect(await callback.validateWorkspaceToken(wrongAccount)).toBeNull();
-    const mismatchLog = logs.find(
-      (entry) => entry.msg === "workspace token mismatched daemon binding",
-    );
-    expect(mismatchLog).toBeDefined();
-    expect(mismatchLog?.obj.expectedAccountId).toBe("acc_self");
-    expect(mismatchLog?.obj.receivedAccountId).toBe("acc_other");
-  });
-
-  test("rejects a validly-signed token when both account_id and workspace_id mismatch", async () => {
-    const { privateKey, publicKey } = await makeKeypair();
-    const callback = createJwksWorkspaceAuthCallback({
-      jwksUrl: "http://unused.example/jwks",
-      logger: silentLogger,
-      expectedAccountId: "acc_self",
-      expectedWorkspaceId: "ws_self",
-      getKey: async () => publicKey,
-    });
-    const bothWrong = await signWorkspaceJwt(privateKey, {
-      account_id: "acc_other",
-      workspace_id: "ws_other",
-    });
-
-    expect(await callback.validateWorkspaceToken(bothWrong)).toBeNull();
   });
 
   test("prewarm invokes the key resolver once and swallows errors", async () => {
@@ -232,8 +113,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const callback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "a",
-      expectedWorkspaceId: "w",
       getKey: async () => {
         getKeyCalls += 1;
         return publicKey;
@@ -247,8 +126,6 @@ describe("createJwksWorkspaceAuthCallback", () => {
     const failingCallback = createJwksWorkspaceAuthCallback({
       jwksUrl: "http://unused.example/jwks",
       logger: silentLogger,
-      expectedAccountId: "a",
-      expectedWorkspaceId: "w",
       getKey: async () => {
         throw new Error("simulated JWKS fetch failure");
       },
