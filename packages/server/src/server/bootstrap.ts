@@ -410,7 +410,26 @@ export async function createPaseoDaemon(
           "(workspace-token validation cannot start without the auth service's JWKS).",
       );
     }
-    const jwksAuthCallback = createJwksWorkspaceAuthCallback({ jwksUrl, logger });
+    const expectedWorkspaceId = process.env.PASEO_WORKSPACE_ID?.trim();
+    const expectedAccountId = process.env.PASEO_ACCOUNT_ID?.trim();
+    if (!expectedWorkspaceId) {
+      throw new Error(
+        "PASEO_CLOUD_MODE=1 requires PASEO_WORKSPACE_ID to be set " +
+          "(daemon must know its own workspace to reject cross-tenant tokens).",
+      );
+    }
+    if (!expectedAccountId) {
+      throw new Error(
+        "PASEO_CLOUD_MODE=1 requires PASEO_ACCOUNT_ID to be set " +
+          "(daemon must know its own account to reject cross-tenant tokens).",
+      );
+    }
+    const jwksAuthCallback = createJwksWorkspaceAuthCallback({
+      jwksUrl,
+      logger,
+      expectedWorkspaceId,
+      expectedAccountId,
+    });
     workspaceAuthCallback = jwksAuthCallback;
     logger.info({ jwksUrl }, "Cloud-mode workspace-token auth enabled");
     // Fire-and-forget JWKS pre-warm: triggers the outbound JWKS fetch now so
