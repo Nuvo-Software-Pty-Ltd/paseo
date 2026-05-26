@@ -2,7 +2,12 @@ import { createHmac } from "node:crypto";
 import pino from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { emitWebhookEvent } from "./cloud-webhook-emit.js";
-import type { WorkspaceHardDeleteImminentEvent } from "./cloud-webhook-events.js";
+import type {
+  AgentTurnCompletedEvent,
+  AgentTurnFailedEvent,
+  WorkspaceCreatedEvent,
+  WorkspaceHardDeleteImminentEvent,
+} from "./cloud-webhook-events.js";
 
 const logger = pino({ level: "silent" });
 
@@ -98,6 +103,151 @@ describe("emitWebhookEvent", () => {
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     // Type-cast to bypass TS — the worker side may construct from JSON.
     const badEvent = { ...VALID_EVENT, workspaceId: "" } as WorkspaceHardDeleteImminentEvent;
+    await expect(
+      emitWebhookEvent({
+        subscriberUrl: "https://subscriber.example.com/hook",
+        hmacKey: "k",
+        event: badEvent,
+        logger,
+        fetchImpl,
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  // ---- T-8 (synthesis A5 / OQ7 / A8) — three new event types ---------------
+
+  it("serializes workspace.created with the snake_case wire body", async () => {
+    let captured: { url: string; body: string } | null = null;
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      captured = { url, body: String(init?.body) };
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const event: WorkspaceCreatedEvent = {
+      eventType: "workspace.created",
+      workspaceId: "ws_new",
+      accountId: "acc_1",
+      createdAt: "2026-05-26T00:00:00.000Z",
+      repoUrl: "https://github.com/example/repo",
+      displayName: "example",
+    };
+    const result = await emitWebhookEvent({
+      subscriberUrl: "https://subscriber.example.com/hook",
+      hmacKey: "k",
+      event,
+      logger,
+      fetchImpl,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(captured).not.toBeNull();
+    expect(JSON.parse(captured!.body)).toEqual({
+      event_type: "workspace.created",
+      workspace_id: "ws_new",
+      account_id: "acc_1",
+      created_at: "2026-05-26T00:00:00.000Z",
+      repo_url: "https://github.com/example/repo",
+      display_name: "example",
+    });
+  });
+
+  it("serializes agent.turn_completed with token usage in snake_case", async () => {
+    let captured: { body: string } | null = null;
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      captured = { body: String(init?.body) };
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const event: AgentTurnCompletedEvent = {
+      eventType: "agent.turn_completed",
+      workspaceId: "ws_x",
+      accountId: "acc_1",
+      agentId: "agent_uuid",
+      provider: "claude",
+      model: "claude-sonnet-4-6",
+      completedAt: "2026-05-26T01:00:00.000Z",
+      usage: {
+        inputTokens: 1200,
+        cachedInputTokens: 800,
+        outputTokens: 350,
+        totalCostUsd: 0.012,
+      },
+    };
+    await emitWebhookEvent({
+      subscriberUrl: "https://subscriber.example.com/hook",
+      hmacKey: "k",
+      event,
+      logger,
+      fetchImpl,
+    });
+
+    expect(JSON.parse(captured!.body)).toEqual({
+      event_type: "agent.turn_completed",
+      workspace_id: "ws_x",
+      account_id: "acc_1",
+      agent_id: "agent_uuid",
+      provider: "claude",
+      model: "claude-sonnet-4-6",
+      completed_at: "2026-05-26T01:00:00.000Z",
+      usage: {
+        input_tokens: 1200,
+        cached_input_tokens: 800,
+        output_tokens: 350,
+        total_cost_usd: 0.012,
+      },
+    });
+  });
+
+  it("serializes agent.turn_failed with nullable usage", async () => {
+    let captured: { body: string } | null = null;
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      captured = { body: String(init?.body) };
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const event: AgentTurnFailedEvent = {
+      eventType: "agent.turn_failed",
+      workspaceId: "ws_y",
+      accountId: "acc_1",
+      agentId: "agent_uuid",
+      provider: "claude",
+      model: null,
+      failedAt: "2026-05-26T02:00:00.000Z",
+      error: "Provider returned 500",
+      usage: null,
+    };
+    await emitWebhookEvent({
+      subscriberUrl: "https://subscriber.example.com/hook",
+      hmacKey: "k",
+      event,
+      logger,
+      fetchImpl,
+    });
+
+    expect(JSON.parse(captured!.body)).toEqual({
+      event_type: "agent.turn_failed",
+      workspace_id: "ws_y",
+      account_id: "acc_1",
+      agent_id: "agent_uuid",
+      provider: "claude",
+      model: null,
+      failed_at: "2026-05-26T02:00:00.000Z",
+      error: "Provider returned 500",
+      usage: null,
+    });
+  });
+
+  it("refuses to send a workspace.created with an empty workspaceId", async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const badEvent = {
+      eventType: "workspace.created",
+      workspaceId: "",
+      accountId: "acc_1",
+      createdAt: "2026-05-26T00:00:00.000Z",
+      repoUrl: null,
+      displayName: null,
+    } as unknown as WorkspaceCreatedEvent;
     await expect(
       emitWebhookEvent({
         subscriberUrl: "https://subscriber.example.com/hook",

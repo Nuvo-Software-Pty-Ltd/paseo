@@ -1,9 +1,15 @@
 import type { Logger } from "pino";
 import { cloudHmacFetch, type CloudHmacFetchResult } from "./cloud-hmac-fetch.js";
 import {
+  AgentTurnCompletedEventSchema,
+  AgentTurnFailedEventSchema,
+  toWireAgentTurnCompletedEvent,
+  toWireAgentTurnFailedEvent,
+  toWireWorkspaceCreatedEvent,
   toWireWorkspaceHardDeleteImminentEvent,
+  WorkspaceCreatedEventSchema,
   WorkspaceHardDeleteImminentEventSchema,
-  type WorkspaceHardDeleteImminentEvent,
+  type CloudWebhookEvent,
 } from "./cloud-webhook-events.js";
 
 // Outbound webhook delivery primitive for the AGPL-core's webhook event
@@ -19,45 +25,91 @@ import {
 // from the proprietary lifecycle worker (O-1 → Architecture B). When a
 // real subscriber lands (per-account long-term agent memory feature),
 // revisit this — at-most-once semantics may need an at-least-once layer.
+// For agent.turn_completed (T-8, fired directly from the daemon's turn-
+// end hook), the loss-on-subscriber-down posture is the Day-1 default
+// (per O-5 in PLAN-daemon — billing module is the layer that cares
+// about exactly-once and lands at D-4).
 //
 // F3 design-out: the caller passes a fully-formed event; this primitive
 // derives nothing from request context (no ALS, no JWT, no workspace
-// lookup). The proprietary worker is the single physical caller (O-1
-// resolution) and constructs the payload from DDB before invoking.
+// lookup). The proprietary worker is the single physical caller for
+// workspace.hard_delete_imminent; the AGPL daemon is the caller for
+// agent.turn_completed / agent.turn_failed; the auth service is the
+// caller for workspace.created (synthesis A5 / OQ7 — operator decision
+// B; the daemon does NOT emit workspace.created).
 //
-// Open-core boundary: no @orchestra/* imports; the schema lives next door
-// (cloud-webhook-events.ts) and is duplicated against the worker side via
-// the deferred anti-drift guard.
+// Open-core boundary: no @orchestra/* imports; the schemas live next
+// door (cloud-webhook-events.ts) and are duplicated against the worker
+// + auth sides via the deferred anti-drift guard.
 
 export type WebhookEmitResult = CloudHmacFetchResult;
 
 export interface EmitWebhookEventParams {
   subscriberUrl: string;
   hmacKey: string;
-  event: WorkspaceHardDeleteImminentEvent;
+  event: CloudWebhookEvent;
   logger: Logger;
   // Test seam: inject a fetch impl instead of using the global. Production
   // callers omit; tests pass a vi.fn().
   fetchImpl?: typeof fetch;
 }
 
+function validateAndSerialize(event: CloudWebhookEvent): {
+  body: string;
+  eventType: string;
+  workspaceId: string;
+} {
+  // Re-validate + project to wire shape based on the discriminator. The
+  // caller may have built the payload manually (proprietary worker /
+  // daemon emit site); catching a bad shape here keeps subscribers from
+  // receiving anything off-schema.
+  switch (event.eventType) {
+    case "workspace.hard_delete_imminent": {
+      const parsed = WorkspaceHardDeleteImminentEventSchema.parse(event);
+      return {
+        body: JSON.stringify(toWireWorkspaceHardDeleteImminentEvent(parsed)),
+        eventType: parsed.eventType,
+        workspaceId: parsed.workspaceId,
+      };
+    }
+    case "workspace.created": {
+      const parsed = WorkspaceCreatedEventSchema.parse(event);
+      return {
+        body: JSON.stringify(toWireWorkspaceCreatedEvent(parsed)),
+        eventType: parsed.eventType,
+        workspaceId: parsed.workspaceId,
+      };
+    }
+    case "agent.turn_completed": {
+      const parsed = AgentTurnCompletedEventSchema.parse(event);
+      return {
+        body: JSON.stringify(toWireAgentTurnCompletedEvent(parsed)),
+        eventType: parsed.eventType,
+        workspaceId: parsed.workspaceId,
+      };
+    }
+    case "agent.turn_failed": {
+      const parsed = AgentTurnFailedEventSchema.parse(event);
+      return {
+        body: JSON.stringify(toWireAgentTurnFailedEvent(parsed)),
+        eventType: parsed.eventType,
+        workspaceId: parsed.workspaceId,
+      };
+    }
+  }
+}
+
 export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<WebhookEmitResult> {
   const { subscriberUrl, hmacKey, event, logger } = params;
-
-  // Re-validate before sending — the caller is in another package
-  // (proprietary worker) and may have built the payload manually. Catching
-  // a bad shape here keeps subscribers from receiving anything off-schema.
-  const parsed = WorkspaceHardDeleteImminentEventSchema.parse(event);
-  const wire = toWireWorkspaceHardDeleteImminentEvent(parsed);
-  const bodyString = JSON.stringify(wire);
+  const { body, eventType, workspaceId } = validateAndSerialize(event);
 
   const result = await cloudHmacFetch({
     url: subscriberUrl,
     hmacKey,
-    body: bodyString,
+    body,
     logger,
     ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
-    logContext: { eventType: parsed.eventType, workspaceId: parsed.workspaceId },
+    logContext: { eventType, workspaceId },
     failureLogLabel: "Webhook emit",
   });
 
@@ -66,8 +118,8 @@ export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<
       {
         status: result.status,
         subscriberUrl,
-        eventType: parsed.eventType,
-        workspaceId: parsed.workspaceId,
+        eventType,
+        workspaceId,
       },
       "Webhook emit delivered",
     );

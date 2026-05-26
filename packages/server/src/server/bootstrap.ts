@@ -147,6 +147,7 @@ import {
   type WorkspaceAuthCallback,
 } from "./auth.js";
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
+import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
@@ -596,6 +597,7 @@ export async function createPaseoDaemon(
     },
     providerDefinitions: providerRegistry,
     registry: agentStorage,
+    onAgentTurnEnd: buildCloudTurnEndHook(logger),
     logger,
   });
 
@@ -1136,6 +1138,20 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
 // PLAN-cdk-infra sets PASEO_WORKSPACE_ID in the per-workspace ECS task
 // definition; without it the daemon does not know which workspace's
 // heartbeat to write, so we warn-and-skip rather than write a wrong row.
+// T-8 (synthesis A5 / OQ7 / A8) — cloud-mode turn-end hook. Fires
+// agent.turn_completed / agent.turn_failed webhooks to
+// ORCHESTRA_AUTH_WEBHOOK_SINK_URL. Undefined in on-host mode (AGPL
+// self-host operators get no cloud-side fan-out). Extracted to keep
+// the top-level createPaseoDaemon under the per-function complexity
+// ceiling.
+function buildCloudTurnEndHook(logger: Logger) {
+  return createCloudTurnEndHook({
+    webhookSinkUrl: process.env.ORCHESTRA_AUTH_WEBHOOK_SINK_URL?.trim(),
+    hmacKey: process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim(),
+    logger,
+  });
+}
+
 function maybeStartCloudHeartbeat(deps: {
   wsServer: VoiceAssistantWebSocketServer;
   agentManager: AgentManager;
