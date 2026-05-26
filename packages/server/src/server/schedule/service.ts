@@ -213,6 +213,34 @@ export class ScheduleService {
     return this.store.list();
   }
 
+  /**
+   * Count of schedules whose `nextRunAt` falls within the next
+   * `lookaheadMs` ms (default 30s — one heartbeat window). Consumed by
+   * the cloud-mode heartbeat (T-17, synthesis A6) so the lifecycle
+   * worker's R7 idle-suspend gate does not false-positive on a
+   * workspace whose only activity is a pending schedule that's about
+   * to fire (no agents alive, no WS clients connected).
+   *
+   * Schedules with `status:"paused"` / `"completed"` / `nextRunAt:null`
+   * are excluded. Schedules whose `nextRunAt` has already elapsed are
+   * INCLUDED — they are due to fire and count as "active work".
+   *
+   * The method reads the store directly (no in-memory cache); a cloud
+   * `DynamoScheduleStore` will query DDB per call. The cost is one
+   * partition scan per 30s, acceptable given the per-workspace scope.
+   */
+  async pendingCount(lookaheadMs = 30_000, now: Date = this.now()): Promise<number> {
+    const upperBound = new Date(now.getTime() + lookaheadMs);
+    const schedules = await this.store.list();
+    let count = 0;
+    for (const schedule of schedules) {
+      if (schedule.status !== "active") continue;
+      if (!schedule.nextRunAt) continue;
+      if (new Date(schedule.nextRunAt) <= upperBound) count += 1;
+    }
+    return count;
+  }
+
   async inspect(id: string): Promise<StoredSchedule> {
     const schedule = await this.store.get(id);
     if (!schedule) {

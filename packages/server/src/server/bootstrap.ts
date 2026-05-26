@@ -1036,6 +1036,8 @@ export async function createPaseoDaemon(
             heartbeatController = maybeStartCloudHeartbeat({
               wsServer,
               agentManager,
+              loopService,
+              scheduleService,
               logger,
             });
           }
@@ -1137,6 +1139,8 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
 function maybeStartCloudHeartbeat(deps: {
   wsServer: VoiceAssistantWebSocketServer;
   agentManager: AgentManager;
+  loopService: LoopService;
+  scheduleService: ScheduleService;
   logger: Logger;
 }): HeartbeatLoopController | null {
   if (!isPaseoCloudMode()) return null;
@@ -1154,11 +1158,21 @@ function maybeStartCloudHeartbeat(deps: {
     );
     return null;
   }
-  const { wsServer, agentManager, logger } = deps;
+  const { wsServer, agentManager, loopService, scheduleService, logger } = deps;
+  // T-17 / synthesis A6: activeAgents spans agents + running loops +
+  // pending schedules. Field name is unchanged per the operator's
+  // 2026-05-26 decision (lifecycle-worker's R7 invariant depends on
+  // the count, not the discriminator name).
   const sessionRegistry: HeartbeatSessionRegistry = {
     countConnectedClients: () => wsServer.listActiveSessions().length,
-    countActiveAgents: () =>
-      agentManager.listAgents().filter((a) => a.lifecycle === "running").length,
+    countActiveAgents: async () => {
+      const runningAgents = agentManager
+        .listAgents()
+        .filter((a) => a.lifecycle === "running").length;
+      const runningLoops = loopService.runningCount();
+      const pendingSchedules = await scheduleService.pendingCount();
+      return runningAgents + runningLoops + pendingSchedules;
+    },
   };
   const controller = startHeartbeatLoop({
     authServiceBaseUrl: heartbeatAuthUrl,

@@ -360,6 +360,25 @@ export class LoopService {
       }));
   }
 
+  /**
+   * Count of loops currently in `status:"running"`. Consumed by the
+   * cloud-mode heartbeat (T-17, synthesis A6) so the lifecycle worker's
+   * R7 idle-suspend gate does not false-positive on a workspace whose
+   * only activity is a long-running loop with no connected WS clients.
+   *
+   * Reads in-memory state without `await initialize()` — the heartbeat
+   * loop fires every 30s and must be cheap; if initialize() has not
+   * been called yet (rare; pre-first-mutation boot), the result is 0,
+   * which is correct (no loops have been touched, so none are running).
+   */
+  runningCount(): number {
+    let count = 0;
+    for (const record of this.loops.values()) {
+      if (record.status === "running") count += 1;
+    }
+    return count;
+  }
+
   async inspectLoop(idOrPrefix: string): Promise<LoopRecord> {
     await this.initialize();
     const loop = this.requireLoop(idOrPrefix);
