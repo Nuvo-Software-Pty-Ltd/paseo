@@ -150,6 +150,7 @@ import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
+import { FileBackedPermissionStore } from "./agent/permission-store.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
 import {
   startHeartbeatLoop,
@@ -597,6 +598,16 @@ export async function createPaseoDaemon(
     workspaceGitService,
     isDev: config.isDev === true,
   });
+  // T-4 (D-3) — durable permission queue. On-host gets
+  // FileBackedPermissionStore for parity (new directory under
+  // $PASEO_HOME/permissions/). Cloud-mode (DynamoPermissionStore)
+  // would be wired here once the AWS SDK dep lands; for now the
+  // file-backed store works in both environments and persists
+  // cross-restart.
+  const permissionStore = new FileBackedPermissionStore({
+    paseoHome: config.paseoHome,
+    logger,
+  });
   const agentManager = new AgentManager({
     clients: {
       ...createClientsFromRegistry(providerRegistry, logger),
@@ -605,6 +616,7 @@ export async function createPaseoDaemon(
     providerDefinitions: providerRegistry,
     registry: agentStorage,
     onAgentTurnEnd: buildCloudTurnEndHook(logger),
+    permissionStore,
     logger,
   });
 

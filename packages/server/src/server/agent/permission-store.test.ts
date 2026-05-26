@@ -4,9 +4,11 @@ import { join } from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
+import { InMemoryDynamoClient } from "../cloud-dynamo-client.js";
 import type { AgentPermissionRequest } from "./agent-sdk-types.js";
 import {
   AgentPermissionRequestRecordSchema,
+  DynamoPermissionStore,
   FileBackedPermissionStore,
   InMemoryPermissionStore,
   recordFromRequest,
@@ -45,7 +47,7 @@ const REQUEST_INTERRUPT_OMITTED: AgentPermissionRequest = {
 };
 
 interface StoreFixture {
-  store: InMemoryPermissionStore | FileBackedPermissionStore;
+  store: InMemoryPermissionStore | FileBackedPermissionStore | DynamoPermissionStore;
   cleanup: () => Promise<void>;
 }
 
@@ -58,6 +60,17 @@ async function buildFileBackedFixture(): Promise<StoreFixture> {
   return {
     store: new FileBackedPermissionStore({ paseoHome: dir, logger }),
     cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+async function buildDynamoFixture(): Promise<StoreFixture> {
+  return {
+    store: new DynamoPermissionStore({
+      client: new InMemoryDynamoClient(),
+      workspaceId: "ws_test",
+      logger,
+    }),
+    cleanup: async () => {},
   };
 }
 
@@ -145,6 +158,7 @@ function describePermissionStoreContract(label: string, build: () => Promise<Sto
 describe("PermissionStore — shared contract", () => {
   describePermissionStoreContract("InMemoryPermissionStore", buildInMemoryFixture);
   describePermissionStoreContract("FileBackedPermissionStore", buildFileBackedFixture);
+  describePermissionStoreContract("DynamoPermissionStore", buildDynamoFixture);
 });
 
 describe("AgentPermissionRequestRecordSchema", () => {
