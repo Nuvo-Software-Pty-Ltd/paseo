@@ -57,7 +57,32 @@ What this stream does NOT own (cross-stream — see § "Cross-stream dependencie
 - Quota policy decisions (workspace-create cap, agent-create cap, outbound-spend cap, push-token cap, archived-workspace cap) → PLAN-auth-and-shared enforces; daemon surfaces 429s.
 - Webhook subscriber endpoints (no-op log writer at the proprietary side) → PLAN-auth-and-shared or PLAN-lifecycle-worker.
 - Round-19 UI dispatch for `runs[N].status:"failed"`, `loops[].text` (no top-level `failureReason`), `interrupt:true` vs `interrupt`-omitted deny → PLAN-app.
-- `/api/files/download` cross-instance token store → see § "Cross-stream dependencies" — by Day-1 single-daemon-per-workspace topology, this is effectively in-container; nothing for the daemon to change. PLAN-auth-and-shared owns the token mint if cross-instance is needed Day-N.
+- `/api/files/download` cross-instance token mint + redemption-orchestration → PLAN-auth-and-shared. **However** (post-synthesis amendment C3), the daemon DOES own the per-workspace internal-redemption route `/api/files/download/internal/:tokenId` that auth's 302 redirects into; this is now T-16 below.
+
+---
+
+## Synthesis amendments (2026-05-26)
+
+The operator-led cross-stream synthesis (`orchestra-cloud-private:d-3-plan-synthesis` / `paseo-fork:d-3-plan-synthesis`, **commit `9dc8972`**, `D-3-plans/CROSS-STREAM-SYNTHESIS.md`) was run after the five D-3 parallel planning agents returned. The synthesis surfaced **5 cross-stream contradictions (C1–C5) + 8 ownership ambiguities (A1–A8) + 8 operator open questions (OQ1–OQ8)**. The operator accepted ALL synthesis recommendations and resolved the named OQs as follows. The amendments below are folded into this PLAN in place; the unamended sections (T-1, T-3, T-4, T-5, T-6, T-7, T-10, T-11, T-13, T-14, the CDK/IAM impact row's non-affected lines, etc.) are unchanged.
+
+| Synthesis item                                                | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Delta in this PLAN                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **C1 — Schedule firing path**                                 | Lifecycle-worker owns `scheduler:CreateSchedule\|UpdateSchedule\|DeleteSchedule` on a new `orchestra-<stage>-runtime` schedule group; EventBridge Scheduler target = API destination → HTTP POST to lifecycle-worker's `/api/lifecycle-internal/schedule-fire-callback`; the worker then HMAC-POSTs the daemon. F9 preserved (the EventBridge writer is also the fire consumer).                                                                              | T-2 outbound URLs renamed from `/api/auth-internal/schedule-{registered,deregistered}` → **`/api/lifecycle-internal/{register-schedule,deregister-schedule}`**. T-2 cross-stream pin shifts from PLAN-auth-and-shared to PLAN-lifecycle-worker.                            |
+| **C2 — Provider snapshot source of truth**                    | Auth-and-shared's model wins: `@orchestra/cloud-shared/providers.ts` holds the `PROVIDER_SNAPSHOT` TS constant with `PROVIDER_SNAPSHOT_VERSION`. Daemon imports the constant directly (cloud-shared is already a daemon dep on the proprietary side — but the AGPL fork must NOT import; the daemon's own duplicated source is the AGPL-side mirror with anti-drift CI).                                                                                      | T-9 rewritten: drop `ORCHESTRA_PROVIDER_SNAPSHOT_URL` env var, drop Dockerfile `/paseo/provider-snapshot.json` bake step, drop TTL fetch. Daemon loads from a local module that mirrors the cloud-shared constant (open-core duplication pattern). On-host mode unchanged. |
+| **C3 — Download token: auth mints, daemon redeems**           | Auth owns `<ws>#download-token#<jti>` writes + the public `GET /api/files/download/:tokenId` redirect. Daemon owns the internal-redemption route `/api/files/download/internal/:tokenId` that streams the file from the EBS-mounted workspace root.                                                                                                                                                                                                           | Deferred follow-up #9 (`/api/files/download` "nothing for daemon to do") is **dropped**. NEW task **T-16** added.                                                                                                                                                          |
+| **C4 — Webhook delivery shape**                               | DDB row (auth-and-shared Task 17) + lifecycle-worker's retry SQS (orthogonal). NO Day-1 destination-SQS from cdk-infra.                                                                                                                                                                                                                                                                                                                                       | Affects T-8 only by env var name (see A8 below); architecture unchanged from this stream's POV.                                                                                                                                                                            |
+| **C5 — `provisioning_failed` cap-trap**                       | 4-stream consensus: **(a) make `provisioning_failed → archived` a legal transition + cap exclusion** (PLAN-auth-and-shared owns the transition table edit; PLAN-lifecycle-worker D-3-5 orphan-detect surfaces stale rows).                                                                                                                                                                                                                                    | This stream's O-3 recommendation **changed from (b) to (a) + cap exclusion**. No daemon-side implementation change.                                                                                                                                                        |
+| **A3 — Daemon `/api/internal/schedule-fire` route**           | Daemon owns this HMAC-validated handler that lifecycle-worker calls on every fire. The synthesis verified this verb was unowned.                                                                                                                                                                                                                                                                                                                              | NEW task **T-15** added.                                                                                                                                                                                                                                                   |
+| **A4 — Daemon `/api/files/download/internal/:tokenId` route** | Daemon owns this route. Auth's `GET /api/files/download/:tokenId` 302's into it. Covered by C3 above.                                                                                                                                                                                                                                                                                                                                                         | Covered by T-16 (see C3 row).                                                                                                                                                                                                                                              |
+| **A5 / OQ7 — `workspace.created` event publisher**            | **Operator decision: B — auth emits.** The proprietary auth service fires `workspace.created` after the metadata-and-state DDB write succeeds. The AGPL fork ships the schema (this stream T-8); auth fires it.                                                                                                                                                                                                                                               | T-8 closure criterion #5 updated: AGPL daemon does NOT emit `workspace.created`; only `agent.turn_completed` / `agent.turn_failed` (+ existing D-2 `workspace.hard_delete_imminent` for which the worker is the physical caller). O-1 closed (decision: B).                |
+| **A6 — Heartbeat `activeAgents` counts loops + schedules**    | Daemon extends `cloud-heartbeat.ts` so `activeAgents` includes `loopService.runningCount() + scheduleService.pendingCount()` alongside the current agent-process count. **Field name unchanged** (lifecycle-worker's R7 invariant depends on the count, not the name).                                                                                                                                                                                        | NEW task **T-17** added.                                                                                                                                                                                                                                                   |
+| **A7 — Per-turn spend-row writer**                            | Daemon writes `<ws>#spend#<yyyy-mm-dd>` rows with `{turnCount, spendCents}` from the `agent-manager.ts` turn-end hook. PLAN-auth-and-shared adds the key builder + schema in cloud-shared.                                                                                                                                                                                                                                                                    | NEW task **T-18** added.                                                                                                                                                                                                                                                   |
+| **A8 — Webhook env var name**                                 | **Operator decision: `ORCHESTRA_AUTH_WEBHOOK_SINK_URL`** (clarifies that the sink targets auth's HMAC route, not a generic SQS pipeline).                                                                                                                                                                                                                                                                                                                     | T-8 env var renamed throughout.                                                                                                                                                                                                                                            |
+| **A8 — Quota-error envelope shape**                           | **Operator decision: cloud-shared type `rpc_error{code:"quota_exceeded", quotaClass, current, cap}`.** Auth's `quota/check` 429 carries the same shape (plus `X-RateLimit-*` headers per REST). PLAN-app, PLAN-daemon, PLAN-auth-and-shared all reference the cloud-shared type.                                                                                                                                                                              | T-12 envelope pinned: `{code:"quota_exceeded", quotaClass, current, cap}`. The daemon's outbound 429-handler parses auth's response body, propagates the four fields verbatim.                                                                                             |
+| **OQ1 — Sub-minute `every` cadence**                          | **Operator decision: accept the cloud-vs-on-host parity break.** EventBridge Scheduler's `rate(...)` minimum is 1 min; cloud-mode rejects `every` cadences with `everyMs < 60_000` at register-time via `rpc_error{code:"schedule_request_failed"}` with error string `"Cloud-mode schedules require every >= 60s (EventBridge Scheduler minimum)."`. Lifecycle-worker docs the divergence in `90-cloud-considerations/schedule-cadence-cloud-divergence.md`. | T-2 acceptance criterion added: cloud-mode `DynamoScheduleStore.create` validates `cadence.everyMs >= 60_000` and rejects sub-minute schedules with the typed error before any DDB write.                                                                                  |
+| **OQ2 — Schedule firing on archived workspace**               | Recommendation B (deregister on archive): PLAN-auth-and-shared archive route walks `<ws>#schedule#*` and HMAC-POSTs lifecycle-worker `deregister-schedule` for each.                                                                                                                                                                                                                                                                                          | Cross-stream pin updated below; daemon's O-2 closed (B).                                                                                                                                                                                                                   |
+
+Per the D-2 synthesis pattern (LEARNINGS.md 2026-05-22 § "synthesis amendments must rewrite both sides of the cross-stream contract"), the acceptance criteria of each amended task encode the consumer-side contract verbatim, not just the producer-side. The contradictions that ate D-2's three integration patch PRs (`scheduler:CreateSchedule` Sid; GSI projection; `mintWorkspaceToken` discriminated response) all came from one-sided amendment. D-3's amendments are paired.
 
 ## D-3 closure criteria for this slice
 
@@ -71,17 +96,15 @@ The daemon-side slice closes when:
 2. **The on-host `FileBackedStore` implementations remain unchanged.** D-3 lands only the cloud branch; self-host operators (REPLACEMENT-CHARTER.md § Non-goals — the fork shipping post-D-5) continue to use the file-backed path.
 3. **Container-boot rehydration** is wired into `bootstrap.ts` for cloud mode. On daemon start in cloud mode, the rehydrate pass executes BEFORE `wsServer.start()` accepts connections: read DDB → load chat rooms, schedules (with `runs[]`), loops, agent permission queues → populate in-memory caches → set schedule next-tick timers. Loops with `status:"running"` at restart auto-stop per `loop.md` § "Daemon-restart auto-stop (binding)" — this is preserved in the cloud version too (binding).
 4. **`agent_stream` catchup**: a reconnecting client's `fetch_agent_timeline_request{direction:"after", cursor:{epoch,seq}}` is served from the durable timeline store on container respawn, not from a hot in-memory map that was lost. The cursor + epoch semantics are binding (`agent-stream.md` § "Resumption / reconnection") and preserved unchanged on the wire.
-5. **Webhook event catalogue Day-1**: the AGPL core fires `workspace.created` (on `bootstrap.ts` happy-path completion of cloud workspace-create RPC), `agent.turn_completed` (on `agent-manager.ts` turn-end), and `workspace.hard_delete_imminent` (D-2 schema; physical caller is the lifecycle worker — O-1 → Architecture B from D-2). The subscriber sink is configured per-deployment via env var `ORCHESTRA_WEBHOOK_SINK_URL`; if absent, the emit is a no-op (Day-1 acceptable per ROADMAP § Phase D-3 "Webhook hook for billing").
-6. **Provider snapshot reads from out-of-band source.** The daemon resolves the provider catalog via:
-   - `process.env.ORCHESTRA_PROVIDER_SNAPSHOT_URL` → fetch on boot + every TTL (default 5 min);
-   - Fallback: a bundled `provider-snapshot.json` baked into the daemon image (matches the image's tagged version);
-   - Cache lives in `ProviderSnapshotManager` (`agent/provider-snapshot-manager.ts:33`); on-host mode is unchanged (existing per-CWD inferred path).
+5. **Webhook event catalogue Day-1**: the AGPL daemon fires `agent.turn_completed` and `agent.turn_failed` (on `agent-manager.ts` turn-end). `workspace.hard_delete_imminent` (D-2 schema) is fired physically by the lifecycle worker (Architecture B from D-2 O-1). **`workspace.created` is fired by the auth service**, not the daemon (synthesis A5 / OQ7 → operator decision B; AGPL fork ships the schema, auth emits). Subscriber sink is configured per-deployment via env var `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` (synthesis A8 — env var renamed from `ORCHESTRA_WEBHOOK_SINK_URL`); if absent, the emit is a no-op (Day-1 acceptable per ROADMAP § Phase D-3 "Webhook hook for billing").
+6. **Provider snapshot reads from cloud-shared constant (synthesis C2).** The daemon resolves the provider catalog via a local module (`packages/server/src/server/cloud-provider-snapshot.ts`) that mirrors `@orchestra/cloud-shared/src/providers.ts`'s `PROVIDER_SNAPSHOT` + `PROVIDER_SNAPSHOT_VERSION`. AGPL-fork-side duplication-by-design per the open-core boundary (same pattern as `cloud-clone.ts`, `cloud-version-beacon.ts`); anti-drift CI catches divergence. `ProviderSnapshotManager` (`agent/provider-snapshot-manager.ts:33`) reads this module in cloud mode. No env var, no S3 fetch, no Docker bake step. On-host mode unchanged (existing per-cwd inferred path).
 7. **Per-spawn `~/.claude` works for scheduled / loop / persistent-resume spawns.** The fail-loud branch in `cloud-credentials.ts:170-174` ("scheduled/loop/background runs are not yet supported in cloud mode") is replaced with `workspaceAuthStorage.run(claims, () => spawnFn())`. The schedule + loop records persist the workspaceId + accountId at create-time (alongside the existing fields per the DDB row shapes from T-2/T-3/T-4 below); the fire-time path reads them and binds the ALS context.
 8. **`/mcp/agents/*` enforcement**: an HTTP request to `/mcp/agents/*` with a cross-workspace JWT is 401'd by the daemon's middleware. Regression test added (`bootstrap.workspace-binding.test.ts` — extend the D-2 PR #5 test that covered HTTP `/api/status`; add a `/mcp/agents` case).
 9. **Probe 7 WebSocket variant** has an explicit regression test asserting that a WS upgrade with a cross-workspace JWT is rejected with WS close code `4401` (the cloud-mode upgrade path goes through `createJwksWorkspaceAuthCallback`; the same workspace-id binding applies).
 10. **Quota 429 propagation**: a test asserts that when the auth-service returns 429 to an outbound HMAC POST during workspace-bound flows, the daemon surfaces the 429 as a typed `rpc_error{code:"quota_exceeded"}` to active sessions where applicable (or warns-and-continues for background loops like heartbeat — see T-9 below).
-11. **All D-2 ACCEPTANCE carry-ins** (T-10, T-11, T-12 below) are landed.
-12. **Hands-on gate** (ROADMAP § Phase D-3): operator drives every Day-1 surface by hand — creates a schedule that fires every minute, disconnects, waits 3 min, reconnects, sees three runs in `runs[]`; runs a loop hitting `maxIterations`; agent permission deny with `interrupt:true` aborts the turn; disconnect mid-turn + reconnect catches up the timeline. The wire round-trip for the round-19 captures is identical (BINDING).
+11. **All D-2 ACCEPTANCE carry-ins** (T-10, T-11, T-13 below) are landed.
+12. **Synthesis-mandated new surfaces** (T-15 `/api/internal/schedule-fire`; T-16 `/api/files/download/internal/:tokenId`; T-17 heartbeat extends `activeAgents`; T-18 per-turn spend writer) land per their acceptance criteria below.
+13. **Hands-on gate** (ROADMAP § Phase D-3): operator drives every Day-1 surface by hand — creates a schedule that fires every minute, disconnects, waits 3 min, reconnects, sees three runs in `runs[]`; runs a loop hitting `maxIterations`; agent permission deny with `interrupt:true` aborts the turn; disconnect mid-turn + reconnect catches up the timeline; a download token redeemed against a daemon that has been suspended-and-resumed between mint and redeem succeeds (synthesis C3 cross-instance probe — auth's 302 routes to the new daemon ENI; T-16's handler serves). The wire round-trip for the round-19 captures is identical (BINDING).
 
 ---
 
@@ -145,13 +168,14 @@ The `messageCount` and `lastMessageAt` Derived fields on `ChatRoomDetail` (`chat
 - `packages/server/src/server/schedule/service.store-contract.test.ts` — parametrize over `FileBackedScheduleStore` and `DynamoScheduleStore`.
 - `packages/server/src/server/bootstrap.ts` — schedule-service construction site, switch on `isPaseoCloudMode()` and choose the store.
 
-**EventBridge Scheduler register / deregister hook (cross-stream — owned by PLAN-lifecycle-worker; the daemon emits a notification):**
+**EventBridge Scheduler register / deregister hook (synthesis C1 — owned by PLAN-lifecycle-worker; the daemon emits a notification to the WORKER, not auth):**
 
-- On `create(schedule)`: after the DDB write succeeds, HMAC POST to `${ORCHESTRA_AUTH_INTERNAL_URL}/api/auth-internal/schedule-registered` with `{ workspaceId, scheduleId, nextRunAt, cadence }`. The auth side or lifecycle worker resolves the EventBridge Scheduler call (PLAN-lifecycle-worker owns this).
+- On `create(schedule)`: after the DDB write succeeds, HMAC POST to `${ORCHESTRA_LIFECYCLE_INTERNAL_URL}/api/lifecycle-internal/register-schedule` with `{ workspaceId, scheduleId, nextRunAt, cadence }`. The lifecycle worker calls `scheduler:CreateSchedule` on its own task role's grant (synthesis C1 — the `scheduler:CreateSchedule|UpdateSchedule|DeleteSchedule` grant on the new `orchestra-<stage>-runtime` schedule group lives on the worker role, not the auth role).
 - On `put(schedule)` where `nextRunAt` changed (e.g., post-fire, post-pause, post-resume): same notification with the new `nextRunAt`.
-- On `delete(scheduleId)`: notification `/api/auth-internal/schedule-deregistered` with `{ workspaceId, scheduleId }`.
+- On `delete(scheduleId)`: notification `/api/lifecycle-internal/deregister-schedule` with `{ workspaceId, scheduleId }`.
 - Reuse `cloudHmacFetch` (`cloud-hmac-fetch.ts`) — same primitive as T-4 in D-2.
 - Per F9 (single writer per side effect): the DynamoStore is the ONLY caller of these notifications. The daemon's existing `ScheduleService` does not call EventBridge directly — that's the lifecycle worker's job; the daemon merely tells it the schedule changed.
+- The new env var `ORCHESTRA_LIFECYCLE_INTERNAL_URL` is injected by PLAN-cdk-infra into the per-workspace daemon ECS task definition; cross-stream pin updated below.
 
 **Acceptance criteria:**
 
@@ -162,12 +186,13 @@ The `messageCount` and `lastMessageAt` Derived fields on `ChatRoomDetail` (`chat
   - `examples/schedule-record/fired-cron.json`
   - `examples/schedule-record/fired-expired.json`
   - `examples/schedule-record/round-19-fired-failed-bad-cwd.json` — this is the load-bearing test. The failed-run record's `agentId:null`, `output:null`, `error:<string>`, terminal `status:"completed"` at the top level with `nextRunAt:null` must round-trip.
-- EventBridge Scheduler register/deregister notifications are warn-and-continue on failure (same posture as heartbeat T-4 in D-2) — a transient auth-service outage does NOT block schedule creation in the daemon's local FS. If the notification ever fails, the workspace's eventual transition to `suspended` means schedules fall back to the lifecycle worker's polling fallback (PLAN-lifecycle-worker's scope; out of this stream's hands).
+- **Sub-minute cadence rejection in cloud mode (synthesis OQ1).** When `isPaseoCloudMode()`, `DynamoScheduleStore.create` validates `cadence.type !== "every" || cadence.everyMs >= 60_000` BEFORE any DDB write. Sub-minute schedules are rejected with `rpc_error{code:"schedule_request_failed"}` carrying error string `"Cloud-mode schedules require every >= 60s (EventBridge Scheduler minimum)."` Cron cadences are not subject to this gate (the 5-field-cron grammar rejection from on-host is preserved unchanged — `schedule.md:284`). On-host mode preserves sub-minute support unchanged. The divergence is documented in `90-cloud-considerations/schedule-cadence-cloud-divergence.md` (PLAN-lifecycle-worker owns the doc).
+- EventBridge Scheduler register/deregister notifications are warn-and-continue on failure (same posture as heartbeat T-4 in D-2) — a transient lifecycle-worker outage does NOT block schedule creation in the daemon's local FS. If the notification ever fails, the workspace's eventual transition to `suspended` means schedules fall back to the lifecycle worker's polling fallback (PLAN-lifecycle-worker's scope; out of this stream's hands).
 - The `runOnCreate` semantic (service.ts:192-193) is preserved — `every`-cadence schedules fire immediately on create. The DynamoStore must not block this behavior.
 
-**Size:** L (the cadence + multi-runs partition reads + the register/deregister notification triple).
+**Size:** L (the cadence + multi-runs partition reads + the register/deregister notification triple + the sub-minute gate).
 
-**Depends on:** PLAN-auth-and-shared (DDB row shape pins + `/api/auth-internal/schedule-{registered,deregistered}` routes); PLAN-lifecycle-worker (the EventBridge Scheduler caller on the receiving side).
+**Depends on:** PLAN-auth-and-shared (DDB row shape pins); PLAN-lifecycle-worker (`/api/lifecycle-internal/{register-schedule,deregister-schedule}` routes + EventBridge Scheduler caller).
 
 ---
 
@@ -354,57 +379,65 @@ The wire shape is BINDING (`agent-stream.md` § "fetch_agent_timeline_request"; 
 
 ---
 
-### T-8 — Webhook event catalogue expansion (workspace.created, agent.turn_completed) + sink configuration
+### T-8 — Webhook event catalogue expansion (agent.turn_completed, agent.turn_failed; schema-only workspace.created) + sink configuration
 
-**Why:** D-2 shipped the `workspace.hard_delete_imminent` event schema (`cloud-webhook-events.ts:28-36`) and the emit primitive (`cloud-webhook-emit.ts`). D-3 adds two more events from the open-core-architecture.md:56-60 list:
+**Why:** D-2 shipped the `workspace.hard_delete_imminent` event schema (`cloud-webhook-events.ts:28-36`) and the emit primitive (`cloud-webhook-emit.ts`). D-3 adds two more events that the AGPL daemon physically fires, plus a schema-only event the auth service fires (synthesis A5 / OQ7 → operator decision B):
 
-- `workspace.created` — fires from the AGPL daemon's cloud workspace-create handler, OR from the auth service's workspace-create handler depending on the open-core boundary decision (open question; surfaced below). For Day-1 the AGPL fork's role is "publish the schema; have it ready to fire if the daemon is the originator."
-- `agent.turn_completed` — fires from `agent-manager.ts` at the turn-end hook (search for `turn_completed` in `agent-stream.md` event types). Payload includes token / cost telemetry for billing-module Day-N consumption.
+- `agent.turn_completed` — **fired by the AGPL daemon** from `agent-manager.ts` at the turn-end hook (search for `turn_completed` in `agent-stream.md` event types). Payload includes token / cost telemetry for billing-module Day-N consumption.
+- `agent.turn_failed` — **fired by the AGPL daemon** from the same hook on failed turns. Distinct event per `open-core-architecture.md:59`.
+- `workspace.created` — **schema only; fired by the auth service**, not the daemon (synthesis A5 / OQ7 → operator decision B). The AGPL fork ships the Zod shape so the schema lives where the open-core boundary's event catalogue is documented; the auth service imports (or duplicates with anti-drift) and emits after the metadata-and-state DDB write succeeds. The AGPL daemon does NOT emit `workspace.created` Day-1.
 
 **Files touched (additive):**
 
-- `packages/server/src/server/cloud-webhook-events.ts` — add `WorkspaceCreatedEventSchema` and `AgentTurnCompletedEventSchema` alongside the existing schema. Same dual-shape pattern (camelCase TS / snake_case wire). Same COMPAT comments (cite the open-core-architecture.md event catalogue line numbers).
+- `packages/server/src/server/cloud-webhook-events.ts` — add `WorkspaceCreatedEventSchema`, `AgentTurnCompletedEventSchema`, and `AgentTurnFailedEventSchema` alongside the existing schema. Same dual-shape pattern (camelCase TS / snake_case wire). Same COMPAT comments (cite the open-core-architecture.md event catalogue line numbers).
 - `packages/server/src/server/cloud-webhook-emit.ts` — generalize from single-event `WorkspaceHardDeleteImminentEvent` to a union; the emit primitive validates against the union before sending. The existing API surface stays back-compat (the `event` parameter accepts the union).
-- `packages/server/src/server/cloud-webhook-emit.test.ts` — add tests for the two new events.
-- `packages/server/src/server/agent/agent-manager.ts` — at the turn-end hook (search for `turn_completed` event emission), if `isPaseoCloudMode()` AND `ORCHESTRA_WEBHOOK_SINK_URL` is configured, fire `agent.turn_completed` via the emit primitive. Include token/cost telemetry from the provider session.
-- `packages/server/src/server/bootstrap.ts` — read `ORCHESTRA_WEBHOOK_SINK_URL` once at boot; pass to services that emit webhooks. If unset → all webhook emit sites no-op (Day-1 acceptable; ROADMAP § Phase D-3 — "Webhook sink can be a no-op log writer in this phase").
+- `packages/server/src/server/cloud-webhook-emit.test.ts` — add tests for the three new events.
+- `packages/server/src/server/agent/agent-manager.ts` — at the turn-end hook (search for `turn_completed` event emission), if `isPaseoCloudMode()` AND `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` is configured, fire `agent.turn_completed` or `agent.turn_failed` via the emit primitive. Include token/cost telemetry from the provider session.
+- `packages/server/src/server/bootstrap.ts` — read `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` (synthesis A8 — env var renamed from `ORCHESTRA_WEBHOOK_SINK_URL`) once at boot; pass to services that emit webhooks. If unset → all webhook emit sites no-op (Day-1 acceptable; ROADMAP § Phase D-3 — "Webhook sink can be a no-op log writer in this phase").
 
 **Acceptance criteria:**
 
-- The two new event schemas parse + round-trip via the dual-schema pattern.
-- The `agent.turn_completed` emit fires once per turn end; failed turns surface as `agent.turn_failed` (DIFFERENT event; per `open-core-architecture.md:59`) — schema added too. Warn-and-continue on subscriber failure; the agent's own turn outcome is unaffected.
-- When `ORCHESTRA_WEBHOOK_SINK_URL` is unset, the webhook emit sites log at debug ("Webhook sink not configured, skipping <event-type>") and return; no outbound HTTP.
-- The `workspace.created` schema is shipped but the AGPL daemon does NOT necessarily fire it Day-1 — depending on the open-core boundary call (open question, surfaced below). The schema is ready; the emit site lands when the boundary call is made.
+- The three new event schemas parse + round-trip via the dual-schema pattern.
+- The `agent.turn_completed` emit fires once per turn end; failed turns surface as `agent.turn_failed`. Warn-and-continue on subscriber failure; the agent's own turn outcome is unaffected.
+- When `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` is unset, the webhook emit sites log at debug ("Webhook sink not configured, skipping <event-type>") and return; no outbound HTTP.
+- The `workspace.created` schema is **shipped and exported**; the AGPL daemon does **NOT** fire it (synthesis A5 / OQ7 — decision B). The auth service is the publisher.
 - COMPAT comment on each new event citing the open-core-architecture.md line range and the workspace-lifecycle.md sequencing.
 
 **Size:** M.
 
-**Depends on:** none in this stream (D-2 emit primitive already exists). Coordinates with PLAN-auth-and-shared on whether the AGPL or proprietary side fires `workspace.created`.
+**Depends on:** none in this stream (D-2 emit primitive already exists). Cross-stream: PLAN-auth-and-shared imports or duplicates `WorkspaceCreatedEventSchema` from this stream's `cloud-webhook-events.ts` (open-core duplication pattern) and emits the event in its workspace-create handler.
 
 ---
 
-### T-9 — Out-of-band provider snapshot consumer (F1 fix)
+### T-9 — Out-of-band provider snapshot consumer (F1 fix; synthesis C2 — rewritten)
 
-**Why:** F1 from the prior-attempt postmortem (IMPLEMENTATION-ROADMAP.md:269): "the cloud model picker rendered 'No models match your search' because `useProvidersSnapshot` is relay-gated and no container exists pre-spawn." The cloud daemon must NOT be the catalog's source. D-3 reverses the dependency: a deployment-time-published snapshot lives at a known URL (or in the image); the daemon reads it.
+**Why:** F1 from the prior-attempt postmortem (IMPLEMENTATION-ROADMAP.md:269): "the cloud model picker rendered 'No models match your search' because `useProvidersSnapshot` is relay-gated and no container exists pre-spawn." The cloud daemon must NOT be the catalog's source. **Synthesis C2 (operator-accepted recommendation):** the source of truth is a TypeScript constant in `@orchestra/cloud-shared/src/providers.ts` (`PROVIDER_SNAPSHOT` + `PROVIDER_SNAPSHOT_VERSION`). The auth service exposes it at `GET /api/v1/cloud/providers/snapshot` for the app (PLAN-app Task 4). The AGPL daemon mirrors the same constant in its own source — open-core duplication-by-design, matching the existing pattern in `cloud-clone.ts` / `cloud-version-beacon.ts` (the AGPL fork must NOT import from `@orchestra/cloud-shared`).
+
+Compared to the pre-synthesis draft of this task, the changes are:
+
+- **DROP** `process.env.ORCHESTRA_PROVIDER_SNAPSHOT_URL` env var lookup.
+- **DROP** the TTL-driven HTTP fetch + URL fallback chain.
+- **DROP** the Dockerfile `COPY .../provider-snapshot.json /paseo/provider-snapshot.json` bake step.
+- **DROP** the S3 `_meta/providers-snapshot.json` deployment artifact (PLAN-cdk-infra drops the corresponding SSM Parameter Store path + per-workspace `_meta/*` IAM grant).
+- **KEEP** the on-host per-cwd refresh path unchanged (single discriminator on `isPaseoCloudMode()` — F11 preserved).
 
 **Files touched:**
 
-- `packages/server/src/server/agent/provider-snapshot-manager.ts:33` — extend `ProviderSnapshotManager` with a cloud-mode branch:
-  - If `isPaseoCloudMode()` AND `ORCHESTRA_PROVIDER_SNAPSHOT_URL` is set → fetch the snapshot from the URL on boot + every TTL (default 5 min, matching `DEFAULT_SNAPSHOT_TTL_MS`). HTTP GET (no HMAC; the URL is a public-read S3 object or a CloudFront distribution — pinned by PLAN-cdk-infra). The snapshot validates against the existing `ProviderSnapshotEntry` schema.
-  - Fallback: a `provider-snapshot.json` baked into the daemon Docker image at `/paseo/provider-snapshot.json` (path matches the existing `/paseo` mount per `agent-host-topology.md`). The image-baked snapshot matches the daemon image's tagged version.
-  - On-host mode: unchanged (per-cwd `refreshSnapshotForCwd` reads the local install). Single discriminator (F11 preserved).
-- `packages/server/src/server/agent/provider-snapshot-manager.test.ts` — add tests for the cloud-mode branch (mock fetch; assert TTL refresh; assert image-baked fallback).
-- `Dockerfile` — add a step that COPYs the snapshot JSON to `/paseo/provider-snapshot.json`. Source of the JSON is a build-time artifact published by the deployment pipeline (PLAN-cdk-infra produces it; this stream COPYs it in).
+- `packages/server/src/server/cloud-provider-snapshot.ts` (new) — exports `CLOUD_PROVIDER_SNAPSHOT: ProviderSnapshotEntry[]` and `CLOUD_PROVIDER_SNAPSHOT_VERSION: string` as TS constants. Mirrors `@orchestra/cloud-shared/src/providers.ts` verbatim; carries an open-core-duplication annotation (same pattern as `cloud-clone.ts:18-21` and the D-2 webhook-events file). Anti-drift CI (deferred follow-up #8 — D-1.5 carryover) covers this mirror alongside the existing duplicates.
+- `packages/server/src/server/agent/provider-snapshot-manager.ts:33` — extend `ProviderSnapshotManager` so that when `isPaseoCloudMode()`, `getSnapshot()` returns `CLOUD_PROVIDER_SNAPSHOT` directly (no fetch, no TTL — the constant changes only via a daemon redeploy, same lifecycle as the daemon image itself). The cache-miss / loading-state paths from the on-host branch are bypassed in cloud mode.
+- `packages/server/src/server/agent/provider-snapshot-manager.test.ts` — add a test asserting the cloud-mode branch returns the constant set and does NOT invoke any per-cwd provider binary.
+- `Dockerfile` — **no change.** The pre-amendment plan added a snapshot COPY step; that step is dropped.
 
 **Acceptance criteria:**
 
-- In cloud mode with `ORCHESTRA_PROVIDER_SNAPSHOT_URL` set, the daemon's `getSnapshot(cwd)` returns the deployment-published catalog without invoking any per-cwd provider binary. Mockable via the existing test seam.
-- When the URL fetch fails (network outage), the daemon falls back to the image-baked file; if that's also missing or stale, the snapshot has `status:"loading"` entries (existing on-host behavior preserved).
-- The `agent_stream`-side path that depends on the snapshot (model picker, provider list) does NOT call into the daemon's per-cwd `getSnapshot` codepath — instead, the cloud branch serves the prebuilt catalog. F1 cleanly closed.
+- In cloud mode, `getSnapshot(cwd)` returns the constant set from `cloud-provider-snapshot.ts`. The daemon does NOT invoke any per-cwd provider binary in cloud mode. F1 cleanly closed: the catalog is queryable without a running daemon container (PLAN-app calls auth's REST route which serves the same constant; daemon serves its own mirror).
+- On-host mode is unchanged: existing per-cwd `refreshSnapshotForCwd` path serves the catalog from the local install.
+- The mirror file `cloud-provider-snapshot.ts` carries: (a) the open-core-duplication annotation header comment; (b) a `COMPAT(provider-snapshot)` comment citing the `@orchestra/cloud-shared/src/providers.ts` source of truth and the version field; (c) a unit test asserting the constant array's length and version match a known fixture.
+- Anti-drift CI (deferred follow-up #8) covers the new mirror in the same sweep as `cloud-clone.ts` and `cloud-webhook-events.ts`. PR ordering: cloud-shared's `PROVIDER_SNAPSHOT` lands first; the AGPL mirror lands next in the same sprint; CI enforces equality.
 
-**Size:** M.
+**Size:** S (the constant + a mirror module + one test; no env-var or Docker plumbing).
 
-**Cross-stream:** PLAN-cdk-infra builds the snapshot publication step in CI; PLAN-app may want to consume the `lastFetched` timestamp from the daemon's snapshot for stale-warning UX (out of this stream).
+**Cross-stream:** PLAN-auth-and-shared owns the `@orchestra/cloud-shared/src/providers.ts` source of truth + the `GET /api/v1/cloud/providers/snapshot` route. PLAN-cdk-infra drops the `_meta/providers-snapshot.json` S3 artifact + SSM path + `_meta/*` IAM grant (synthesis C2 downstream impact).
 
 ---
 
@@ -451,28 +484,45 @@ The verification is largely a test addition — the `Sec-WebSocket-Protocol: pas
 
 ---
 
-### T-12 — Quota / 429 propagation: typed `rpc_error{code:"quota_exceeded"}` (D-3 new surface)
+### T-12 — Quota / 429 propagation: typed `rpc_error{code:"quota_exceeded", quotaClass, current, cap}` (D-3 new surface; synthesis A8 — envelope pinned)
 
-**Why:** ROADMAP § Phase D-3 — "Per-workspace quotas" + "When auth returns 429 with rate-limit headers, surface as a WS `rpc_error` with an appropriate code." The daemon's outbound HMAC POSTs (workspace-create, schedule-create-notify, heartbeat, version beacon, webhook emit) can all hit 429 from the auth service. Today's HMAC primitive (`cloud-hmac-fetch.ts`) returns `{ ok: false, status }` on non-2xx, but the caller decides whether to surface anything.
+**Why:** ROADMAP § Phase D-3 — "Per-workspace quotas" + "When auth returns 429 with rate-limit headers, surface as a WS `rpc_error` with an appropriate code." The daemon's outbound HMAC POSTs (workspace-create, schedule-register-notify, heartbeat, version beacon, webhook emit, spend-row write — T-18) can all hit 429 from the auth service. Today's HMAC primitive (`cloud-hmac-fetch.ts`) returns `{ ok: false, status }` on non-2xx, but the caller decides whether to surface anything.
+
+**Envelope (synthesis A8 — operator-decided shape):** the typed `rpc_error` payload carries four fields beyond the `code` discriminator:
+
+```ts
+// In @orchestra/cloud-shared/src/quota.ts (PLAN-auth-and-shared owns the source);
+// AGPL daemon mirrors the type in its own module per the open-core-duplication
+// pattern (cloud-clone.ts, cloud-webhook-events.ts, cloud-provider-snapshot.ts).
+{
+  code: "quota_exceeded",
+  quotaClass: "workspace_count" | "agent_count" | "loop_count" | "outbound_api_spend" | "push_token" | "archived_workspace_count" | string, // open-ended for forward-compat
+  current: number,
+  cap: number,
+}
+```
+
+Auth's HTTP 429 response body carries the same four-field shape (plus `X-RateLimit-Remaining`, `Retry-After`, etc. headers per REST best-practice). The daemon's `cloud-hmac-fetch.ts` parses the body on 429 and propagates the four fields verbatim to the WS `rpc_error` envelope when the originating call was tied to a WS session.
 
 **Files touched:**
 
-- `packages/server/src/shared/messages.ts` (NOT editing the existing `rpc_error.code` taxonomy — adding a new typed code is forward-compatible per CLAUDE.md protocol rules). Specifically: extend the `rpc_error.code` enum union with `"quota_exceeded"`. Per the protocol-contract rule, this is additive — old clients dispatch on `code` and treat unknown values as `"handler_error"` (per `permission.md:259-261` — the catch-all). Forward-compat preserved.
-- `packages/server/src/server/cloud-hmac-fetch.ts` — extend the `CloudHmacFetchResult` type with optional `rateLimitHeaders` (parsed `Retry-After`, `X-RateLimit-Remaining`, etc.; specific shape from PLAN-auth-and-shared's 429 response).
-- `packages/server/src/server/cloud-heartbeat.ts` — on 429: warn-and-continue (no per-call WS session to surface to; the heartbeat is server-internal).
-- `packages/server/src/server/schedule/dynamo-store.ts` — on 429 from `schedule-registered` notify: surface `rpc_error{code:"quota_exceeded", requestId, error:"<auth-returned-message>"}` to the WS session that triggered the create. The session-side wrapper in `session.ts` is what emits the wrapped `rpc_error`; the store layer returns a typed `QuotaExceededError` and the session converts.
-- Same pattern for any other outbound that ties to a user-WS-session.
-- Daemon-internal outbounds with no session context (heartbeat, version beacon, snapshot fetch): log at warn; do NOT surface to any WS.
+- `packages/server/src/shared/messages.ts` — extend the `rpc_error.code` enum union with `"quota_exceeded"`, and extend the `rpc_error.payload` shape with optional `quotaClass: string`, `current: number`, `cap: number` (all `.optional()` for back-compat per the CLAUDE.md protocol-contract rule). Old clients dispatch on `code` and treat unknown values as `"handler_error"` (per `permission.md:259-261` — the catch-all). Forward-compat preserved.
+- `packages/server/src/server/cloud-quota.ts` (new) — exports `QuotaExceededPayload` type + `QuotaExceededError` typed exception. Mirrors `@orchestra/cloud-shared/src/quota.ts`. Open-core-duplication annotation header comment + `COMPAT(quota_exceeded)` linking to the cloud-shared source of truth.
+- `packages/server/src/server/cloud-hmac-fetch.ts` — extend `CloudHmacFetchResult` with optional `quotaPayload: QuotaExceededPayload | null` parsed from the 429 body. Also expose `rateLimitHeaders` (parsed `Retry-After`, `X-RateLimit-Remaining`).
+- `packages/server/src/server/cloud-heartbeat.ts`, `cloud-version-beacon.ts`: on 429 → warn-and-continue (no per-call WS session; server-internal).
+- `packages/server/src/server/schedule/dynamo-store.ts`, `loop-service.ts`, agent-create site, etc.: on 429 from any user-WS-session-originated call → throw `QuotaExceededError(payload)`; the session-side wrapper in `session.ts` catches and emits `rpc_error{code:"quota_exceeded", requestId, quotaClass, current, cap}` to the WS client.
+- T-18 (spend-row writer) also handles its own 429 — but those are server-internal (turn-end hook is not bound to a user request that's expecting a response); warn-and-continue.
 
 **Acceptance criteria:**
 
-- A test injects a mock auth-service that returns 429 on `schedule-registered`; the daemon's `schedule/create` WS RPC returns `rpc_error{code:"quota_exceeded"}` to the client. The schedule's DDB row is rolled back (or never written — depends on the call order; PLAN-auth-and-shared owns this decision).
-- The protocol-contract rule is satisfied: old clients seeing the new code dispatch as if it were `handler_error` (forward-compat) and surface a generic error to the user. New clients dispatch specifically on `quota_exceeded` and surface a quota-specific UX (PLAN-app).
-- COMPAT comment in messages.ts: `// COMPAT(quota_exceeded): added in v0.X.0 for D-3 cloud quotas; drop the back-compat fall-through to handler_error when the protocol floor includes this code (target removal: 6 months from D-3 ship).`
+- A test injects a mock auth-service that returns 429 with body `{code:"quota_exceeded", quotaClass:"agent_count", current:10, cap:10}` on `agent-create`; the daemon's `create_agent_request` WS RPC returns `rpc_error{code:"quota_exceeded", quotaClass:"agent_count", current:10, cap:10}` to the client. The agent's DDB row is not written.
+- The protocol-contract rule is satisfied: old clients seeing the new code dispatch as if it were `handler_error` (forward-compat) and surface a generic error to the user. New clients dispatch specifically on `quota_exceeded` and surface a quota-specific UX with the (current, cap, class) values (PLAN-app Task 8).
+- COMPAT comment in messages.ts: `// COMPAT(quota_exceeded): added in v0.X.0 for D-3 cloud quotas; envelope { quotaClass, current, cap } pinned by @orchestra/cloud-shared/src/quota.ts (synthesis A8 — 2026-05-26). Drop the back-compat fall-through to handler_error when the protocol floor includes this code (target removal: 6 months from D-3 ship).`
+- The four-field payload is end-to-end: auth's 429 body, the daemon's outbound parse, the daemon's WS emit, the app's dispatch — all reference the cloud-shared type (PLAN-auth-and-shared owns the source; this stream and PLAN-app mirror).
 
 **Size:** M.
 
-**Depends on:** PLAN-auth-and-shared (the 429 response shape + rate-limit headers).
+**Depends on:** PLAN-auth-and-shared (the cloud-shared `QuotaExceededPayload` type + the 429 response shape on the relevant routes).
 
 ---
 
@@ -494,20 +544,139 @@ The verification is largely a test addition — the `Sec-WebSocket-Protocol: pas
 
 ---
 
-### T-14 — D-2 carry-in: `provisioning_failed` cap-trap + workspace-cap edge case (LEARNINGS 2026-05-25 operator UAT)
+### T-14 — D-2 carry-in: `provisioning_failed` cap-trap + workspace-cap edge case (LEARNINGS 2026-05-25 operator UAT; synthesis C5 — recommendation updated)
 
-**Why:** LEARNINGS.md 2026-05-25 operator UAT — _"`provisioning_failed` cap-trap — three independent fixes possible: (a) make `provisioning_failed → archived` a legal transition; (b) have rollback `DeleteItem` instead of writing tombstones; (c) add a lifecycle-worker sweep for stale `provisioning_failed`. Need a product call on which."_
+**Why:** LEARNINGS.md 2026-05-25 operator UAT identified the `provisioning_failed` cap-trap. The synthesis cross-checked four streams and surfaced a 4-stream consensus on the fix (option (a) + cap exclusion); this stream's earlier (b) preference is overruled (see § Synthesis amendments and O-3 below).
 
-This is PRIMARILY a cross-stream item (PLAN-auth-and-shared owns the workspace-create rollback path; PLAN-lifecycle-worker owns the sweep). The daemon's piece: ensure the daemon does not contribute to `provisioning_failed` tombstones via its own outbound calls. Specifically, the workspace-create flow today is auth-side (RunTask creates the daemon container); the daemon's role is post-RunTask. So this is largely cross-stream — daemon stream confirms it has no contribution to make and surfaces the decision back to the operator.
+This is PRIMARILY a cross-stream item: PLAN-auth-and-shared owns the workspace-create rollback path AND the transition-table edit that makes `provisioning_failed → archived` legal AND the cap-counter exclusion. PLAN-lifecycle-worker D-3-5 adds an orphan-detect signal for stale `provisioning_failed` rows. The daemon's piece is verification only.
 
 **Files touched:** none in this stream.
 
 **Acceptance criteria:**
 
 - Confirm via grep: `provisioning_failed` does not appear in any AGPL daemon source. (It's a `WorkspaceRecord.state` value owned by the proprietary side.) If a daemon-side write to this state exists, the daemon stream flags and resolves with PLAN-auth-and-shared.
-- Surface the open question (a/b/c above) to the operator's synthesis round (O-3 below).
+- This stream's earlier recommendation (option (b) — rollback `DeleteItem`) is **withdrawn** in favor of the 4-stream consensus (option (a) + cap exclusion). See O-3 below for the updated recommendation.
 
 **Size:** 0 (cross-stream coordination only).
+
+---
+
+### T-15 — Daemon `/api/internal/schedule-fire` HMAC-validated handler (synthesis A3 — new)
+
+**Why:** synthesis A3 surfaced this verb as unowned. The lifecycle worker's `schedule-fire-callback` (D-3-2) receives an EventBridge Scheduler fire and HMAC-POSTs the daemon at `/api/internal/schedule-fire`. The daemon dispatches the agent per the schedule's `target.type`, writes `runs[N]` per the round-19 binding, and returns 200/4xx/5xx. The cross-stream contract was filed by lifecycle-worker but never picked up by the daemon plan; this task closes the gap.
+
+**Files touched (new):**
+
+- `packages/server/src/server/cloud-schedule-fire-route.ts` (new) — Express handler `POST /api/internal/schedule-fire`. HMAC-validated via the existing shared HMAC middleware (mirrors auth-internal route discipline). Request body: `{ workspaceId, scheduleId, scheduledFor, runId }`. Validates `workspaceId === PASEO_WORKSPACE_ID` (defense-in-depth — the worker shouldn't be calling a workspace's daemon with the wrong id, but if it does the daemon refuses; mirrors paseo PR #5's workspace-binding pattern).
+- `packages/server/src/server/cloud-schedule-fire-route.test.ts` (new) — table-driven test of (HMAC-valid + correct workspaceId), (HMAC-valid + wrong workspaceId → 403), (HMAC-invalid → 401), (unknown scheduleId → 404 + the worker treats as a no-op).
+- `packages/server/src/server/bootstrap.ts` — mount the route AFTER the `requireWorkspaceAuth` HMAC middleware in cloud mode; not mounted on-host.
+
+**Handler flow:**
+
+1. Validate HMAC. Reject 401 if invalid.
+2. Validate `workspaceId` matches `PASEO_WORKSPACE_ID`. Reject 403 if mismatch.
+3. Look up the schedule via `DynamoStore.Schedule.get(scheduleId)` (T-2). If absent → 404 (the worker treats as "already deregistered; ignore"). If present but `status:"paused" | "completed"` → 200 with `{skipped: true, reason}` (idempotent skip; the worker logs and moves on).
+4. Restore the ALS context from the schedule's persisted `cloudOwnerWorkspaceId` + `cloudOwnerAccountId` (T-7 fields). Invoke the existing `ScheduleService.executeSchedule(schedule, runId)` under `workspaceAuthStorage.run(...)`.
+5. The `runs[N]` row is appended by `ScheduleService` per existing on-host code (service.ts:411). The DynamoStore.Schedule.put writes the updated record + run row to DDB.
+6. Return 200 with `{runId, status: "<succeeded|failed>", endedAt}`.
+
+**Acceptance criteria:**
+
+- Round-19 `runs[N].status:"failed"` shape (e.g., bad cwd) is written to DDB byte-identical via this path. Test verifies parity with the existing in-process schedule-fire path (i.e., the same `executeSchedule(schedule, runId)` code runs; the HMAC route is just an entrypoint).
+- Sub-minute cadence rejection from T-2 does NOT fire here (the schedule was created with `everyMs >= 60_000` — the cloud-mode register-time gate). The worker can re-fire a schedule whose `everyMs` was on the edge.
+- Idempotency: if EventBridge retries the same `(scheduleId, runId)` after a partial failure, the daemon's executeSchedule re-runs and overwrites — UNVERIFIED whether this is correct behavior; see open question OQ-A below.
+- F3 preserved: `workspaceId` is verified against the boot-env `PASEO_WORKSPACE_ID`; the daemon never trusts the wire to identify which workspace it's serving.
+
+**Size:** M (the route + ALS-context restoration + 404/403/200 dispatch + tests).
+
+**Depends on:** T-2 (DynamoScheduleStore must read the schedule), T-7 (ALS restoration); PLAN-cdk-infra (the SG / PrivateLink config that constrains who can reach `/api/internal/*` from outside the per-workspace daemon's ENI).
+
+---
+
+### T-16 — Daemon `/api/files/download/internal/:tokenId` handler (synthesis C3 / A4 — new)
+
+**Why:** synthesis C3 resolved the download-token ownership to auth-mints-redeems-orchestration, daemon-serves-the-file. Auth's public `GET /api/files/download/:tokenId` 302-redirects to `https://<wsId>.<base>/api/files/download/internal/:tokenId` on the per-workspace daemon's ALB target. The daemon receives the redirect (the original requester's browser follows it), optionally revalidates by HMAC-POSTing auth at `/api/auth-internal/files/check-download-token`, then streams the file from the EBS-mounted workspace root.
+
+The cross-instance promise (`day-1-scope-recommendations.md` § HTTP routes — "the WS RPC issuing the token and the HTTP redemption may land on different instances") is satisfied: a token minted on workspace W's daemon container before a `StopTask + RunTask` cycle (D-2 suspend/resume) redeems against the NEW container ENI; the token row in DDB (auth-owned) survives the cycle.
+
+**Files touched (new):**
+
+- `packages/server/src/server/file-download-internal-route.ts` (new) — Express handler `GET /api/files/download/internal/:tokenId`. HMAC-validated via the existing shared HMAC middleware (the auth service signs the redirect URL with HMAC so a third party can't trigger a download via guessing tokenIds — UNVERIFIED whether the URL contains a query-string HMAC or whether the daemon just trusts the path-token and revalidates with auth; see open question OQ-B below). Validates the token via one of two paths:
+  - **Path A (revalidate with auth):** `POST /api/auth-internal/files/check-download-token` with `{tokenId, workspaceId}`; auth returns `{path: "<absolute-workspace-relative-path>", filename: "<download-filename>", contentType: "<mime>", expiresAt}`. Daemon streams the file from `path` (gated by workspace-root prefix; rejects path-traversal — `..`, absolute-outside-workspace).
+  - **Path B (trust the HMAC'd URL):** the auth service signs the redirect URL itself; daemon trusts the HMAC and reads the path from a verified query string. Simpler but requires HMAC verification at the daemon edge.
+  - **Decision: Path A** (revalidate with auth). Reasons: (i) single-source-of-truth — auth's DDB row is the only authority on what file the token grants access to; (ii) the daemon's HMAC key is shared per-deployment, not per-token; trusting a URL HMAC would mean any party that can forge an auth-HMAC can request any file; (iii) the revalidate round-trip is one extra hop (~5ms in-VPC) — acceptable for a user-initiated download.
+- `packages/server/src/server/file-download-internal-route.test.ts` (new) — happy path; expired-token rejection (auth returns 410); cross-tenant token rejection (auth returns 403 because the token's `workspaceId` claim doesn't match the daemon's `PASEO_WORKSPACE_ID`); path-traversal rejection.
+- `packages/server/src/server/bootstrap.ts` — mount the route in cloud mode only (on-host mode preserves the existing direct `/api/files/download/:tokenId` path served by the same daemon that minted, per the historical wire surface — UNVERIFIED whether on-host code path needs to change at all; flag for the implementing agent).
+
+**Acceptance criteria:**
+
+- Cross-instance redeem (synthesis Probe 8): mint a token on daemon container A; `StopTask + RunTask` cycle yields container B (new ENI); browser-redirect-follows lands on container B's `/api/files/download/internal/:tokenId`; daemon B revalidates with auth; auth's DDB row is intact (rows survive container respawn); daemon B streams the file from B's EBS volume (which holds the same workspace's data per D-2's per-workspace EBS topology). **The download succeeds.**
+- Path-traversal probe: a token whose `path` claim contains `../../../etc/passwd` (forged or otherwise) is rejected with 400 + log entry. The daemon's path-prefix check is the second layer; auth's mint validates first; daemon's check is defense-in-depth.
+- Atomic redeem: a token redeemed twice returns 410 on the second attempt (auth's `UpdateItem` with `ConditionExpression: attribute_not_exists(redeemedAt) AND #ttl > :now` is the single-shot mechanism — synthesis C3, owned by auth). Daemon never writes the token row; F9 preserved per PLAN-auth-and-shared Task 8.
+- Streaming: the daemon uses Node `fs.createReadStream` with an explicit `O_NOFOLLOW` flag (mirrors `bootstrap.ts:163-164` `DOWNLOAD_OPEN_FLAGS` constant). Backpressure-aware pipe. Aborts cleanly on client disconnect.
+
+**Size:** M.
+
+**Depends on:** PLAN-auth-and-shared Tasks 9-12 (mint route + the internal `check-download-token` route this stream calls); PLAN-cdk-infra Task 4 (DDB TTL setup for the token rows).
+
+---
+
+### T-17 — Extend `cloud-heartbeat.ts` `activeAgents` to count loops + schedules (synthesis A6 — new)
+
+**Why:** synthesis A6: PLAN-lifecycle-worker's idle-suspend gate (R7 invariant — `activeAgents == 0 AND connectedClients == 0`) fires falsely on a workspace whose only "activity" is a running long loop or a pending schedule (no agent processes alive). The daemon must count those into the heartbeat's `activeAgents` field. **Field name unchanged** (per the operator's specific decision and per lifecycle-worker's R7 invariant — the gate depends on the count being a true active-work-unit count, not the literal name).
+
+**Files touched:**
+
+- `packages/server/src/server/cloud-heartbeat.ts` — extend the `activeAgents` computation. Today (D-2 T-4) the value is the count of running agent processes in the session registry. The amended value is:
+  ```
+  activeAgents = countRunningAgents(sessionRegistry)
+               + loopService.runningCount()
+               + scheduleService.pendingCount()
+  ```
+  where `runningCount()` is the number of loops in `status:"running"` and `pendingCount()` is the number of schedules whose `nextRunAt <= now + heartbeatIntervalMs` (i.e., scheduled to fire before the next heartbeat). Both methods are new on the respective services; sized inside this task.
+- `packages/server/src/server/cloud-heartbeat.test.ts` — extend the existing tests with three new cases: (only loops running → activeAgents > 0); (only pending schedules → activeAgents > 0); (neither + no agents → activeAgents == 0).
+- `packages/server/src/server/schedule/service.ts` — add `pendingCount(now?: Date)` method. Reads in-memory schedule list; counts `status:"active" && nextRunAt <= now + heartbeatIntervalMs`.
+- `packages/server/src/server/loop-service.ts` — add `runningCount()` method. Reads in-memory loop map; counts `status:"running"`.
+
+**Acceptance criteria:**
+
+- A test asserts: with one running loop and zero agents, the heartbeat body has `activeAgents:1`. The lifecycle worker's idle-suspend gate (R7 invariant) does not fire — verified by PLAN-lifecycle-worker's parallel test on its scanner.
+- A test asserts: with one pending schedule (nextRunAt within the heartbeat window) and zero loops/agents, the heartbeat body has `activeAgents:1`.
+- The field name is **`activeAgents`** (not `activeWorkUnits`). The operator's specific decision per the synthesis amendments table: "do NOT rename the field; lifecycle-worker's R7 invariant depends on the count, not the name."
+- The COMPAT comment is updated: `// COMPAT(heartbeat-activeAgents-semantic): the activeAgents counter spans agents + running loops + pending schedules (synthesis A6 — 2026-05-26). Lifecycle-worker's idle-suspend gate (R7) depends on the count, not the discriminator name. Future rename to activeWorkUnits is a Day-N breaking change requiring coordinated worker update.`
+
+**Size:** S.
+
+**Depends on:** D-2 T-4 (the heartbeat loop landed in D-2; this task extends it).
+
+---
+
+### T-18 — Per-turn spend-row writer in `agent-manager.ts` turn-end hook (synthesis A7 — new)
+
+**Why:** synthesis A7: PLAN-lifecycle-worker D-3-3 (quota aggregator) reads `<ws>#spend#<yyyy-mm-dd>` rows for the `apiSpendUsdCents` quota counter. The cross-stream pin filed the daemon as the writer; the pre-amendment PLAN-daemon T-8 ("token/cost telemetry in webhook payload") covered the on-the-wire emission but did NOT write per-turn DDB spend rows. Without these rows, the quota aggregator has empty data and the outbound-API-spend quota is unenforceable.
+
+**Files touched:**
+
+- `packages/server/src/server/cloud-spend-writer.ts` (new) — `writeSpendRow({workspaceId, turnCount, spendCents, dayKey, logger})`. Atomic DDB `UpdateItem` with `ADD turnCount :turnCount, ADD spendCents :spendCents` on the `<workspaceId>#spend / <yyyy-mm-dd>` row. The `dayKey` is computed UTC; one row per workspace per UTC-day. Idempotent? No — each turn writes once; if the write fails, the spend is lost for the aggregator (warn-and-continue; see acceptance criteria for rationale). The DDB write goes through the daemon's existing `dynamodb:UpdateItem` grant on the per-workspace partition prefix (D-2 IAM template).
+- `packages/server/src/server/cloud-spend-writer.test.ts` (new) — vi.fn() DDB mock; assert the right key shape; assert idempotency-key semantics (or the lack thereof — see open question OQ-C below); assert warn-and-continue on DDB failure.
+- `packages/server/src/server/agent/agent-manager.ts` — at the turn-end hook (search for `turn_completed` event emission; same site T-8 adds the webhook fire), if `isPaseoCloudMode()`, also call `writeSpendRow(...)`. The token/cost telemetry is extracted from the provider session (Claude SDK exposes `usage.input_tokens`, `usage.output_tokens`, etc.; cost is computed from the model's per-token rate — UNVERIFIED whether the daemon owns the rate table or whether it stores raw tokens and the aggregator computes cost; see OQ-C).
+
+**Row shape (consumed pin from PLAN-auth-and-shared):**
+
+- `pk = "<workspaceId>#spend"`, `sk = "<yyyy-mm-dd>"` → `SpendRowRecord{ turnCount: number, spendCents: number, updatedAt: string }`.
+- The key builder `keys.spendRow(workspaceId, dayKey)` is added to `@orchestra/cloud-shared` by PLAN-auth-and-shared.
+
+**Acceptance criteria:**
+
+- After a successful agent turn in cloud mode, the daemon writes a `<ws>#spend#<today-utc>` row with the incremented `turnCount` + `spendCents`. Verified by a test that runs a mock agent turn and asserts the DDB UpdateItem call.
+- The DDB partition+sort key is sourced from PLAN-auth-and-shared's `keys.spendRow` helper (mirrored on the AGPL side per the duplication pattern). No inline strings (preserves the F12/F13 design-out from D-1's footgun audit).
+- On DDB write failure: warn-and-continue; the agent turn's outcome is unaffected. Rationale: spend rows feed a quota counter; one missed row is a quota under-count, not a correctness regression. Repeated failures surface via CloudWatch metric (PLAN-cdk-infra adds an EMF metric `SpendRowWriteFailed` per `observability.md:88`).
+- F3 preserved: the daemon reads `workspaceId` from `getCurrentWorkspaceAuth()` (or, if the turn fires from a scheduled/loop spawn, from the ALS restored in T-7); never accepts a `workspaceId` from a caller.
+- If the auth-service is returning 429 on `agent-create` (T-12 quota), the turn never happens; no spend row is written. The aggregator does NOT see phantom rows from rejected turns.
+
+**Size:** S.
+
+**Depends on:** PLAN-auth-and-shared (key builder + schema in cloud-shared); the daemon's existing per-workspace DDB IAM grant (extended in the CDK / IAM impact row below to cover the new `<ws>#spend#*` prefix).
 
 ---
 
@@ -528,74 +697,81 @@ This is PRIMARILY a cross-stream item (PLAN-auth-and-shared owns the workspace-c
 
 **Answer (this stream's scope):**
 
-| Concern                                              | Yes/No                                                                                                                                                                                                                                                                                                                                                                                                                                                | Detail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New env var on a consuming service                   | **Yes**                                                                                                                                                                                                                                                                                                                                                                                                                                               | `ORCHESTRA_PROVIDER_SNAPSHOT_URL` (T-9; the daemon reads the out-of-band provider catalog from this URL); `ORCHESTRA_WEBHOOK_SINK_URL` (T-8; daemon emits webhooks to this URL; if unset, no-op). Both injected into the per-workspace daemon ECS task definition. **PLAN-cdk-infra must add these as task-definition environment fields.**                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| New IAM grant on a producing service                 | **Yes**                                                                                                                                                                                                                                                                                                                                                                                                                                               | Daemon task role needs (a) DDB `GetItem`/`PutItem`/`Query`/`DeleteItem` on the per-workspace partition prefix for the NEW DDB partitions (`<workspaceId>#chat`, `<workspaceId>#chat#msg`, `<workspaceId>#schedule`, `<workspaceId>#schedule#run`, `<workspaceId>#loop`, `<workspaceId>#loop#iteration`, `<workspaceId>#loop#log`, `<workspaceId>#permission`, `<workspaceId>#agent#timeline`); (b) S3 `GetObject`/`PutObject` on `s3://orchestra-<stage>-loop-logs/<workspaceId>/*` for T-3 (loop logs offload); (c) S3 `GetObject` on the provider-snapshot bucket (T-9). All scoped via the existing per-workspace IAM role machinery (D-2 ACCEPTANCE entry, LEARNINGS.md:2657). **PLAN-cdk-infra extends `packages/infra/lib/workspace-role-template.json`.** |
-| New ALB route or listener rule                       | **No.** All daemon-inbound paths stay on the existing `/ws` + `/api/*` + `/mcp/agents` routes. T-10 verifies the existing routing matches the new MCP test expectations.                                                                                                                                                                                                                                                                              |
-| New Secrets Manager prefix                           | **No.** Per-workspace Anthropic credential prefix from D-1.5 (`paseo-cloud/<account>/<workspace>/anthropic-credential`) is unchanged.                                                                                                                                                                                                                                                                                                                 |
-| New DDB table or partition-key shape                 | **Yes (many).** The 9 partition-key prefixes above. **All keyed by `<workspaceId>` first**, preserving the F3 design-out (workspace identity not on the wire — derived from JWT at boot, then used as the partition-key root). **Owned by PLAN-auth-and-shared** (the shapes live in `@orchestra/cloud-shared/keys.ts`); this stream consumes the helpers. **PLAN-cdk-infra adds the DDB table-level config** (per-key projection, GSIs — see below). |
-| New EventBridge Scheduler schedule group / SQS queue | **No on this stream's side.** The schedule-firing register/deregister mechanism (T-2) goes through `/api/auth-internal/schedule-{registered,deregistered}` on the auth service; **PLAN-lifecycle-worker** is the EventBridge Scheduler caller and owns the schedule-group config.                                                                                                                                                                     |
-| New KMS CMK or alias scheme                          | **No.** Per-workspace CMK from D-2 (`alias/orchestra/<stage>/workspace/<workspaceId>`) is reused for any new at-rest encryption.                                                                                                                                                                                                                                                                                                                      |
-| New IAM role                                         | **No.** The per-workspace daemon task role from D-2 is extended with new grants (above), not replaced.                                                                                                                                                                                                                                                                                                                                                |
-| New Route 53 record or ACM domain                    | **No.** D-2's per-workspace ALB rule + subdomain pattern is unchanged.                                                                                                                                                                                                                                                                                                                                                                                |
-| New CloudWatch log group naming convention           | **No on this stream's side.** Per-tenant log group from D-2 (`/orchestra-cloud/<account>/<workspace>/daemon`) is unchanged. **PLAN-cdk-infra owns** the EMF metric publisher addition (`observability.md:88` — "structured CloudWatch fields per log line" + the 5-EMF-metric pattern).                                                                                                                                                               |
+| Concern                                              | Yes/No                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Detail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New env var on a consuming service                   | **Yes**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` (T-8; renamed from `ORCHESTRA_WEBHOOK_SINK_URL` per synthesis A8; targets auth's HMAC sink; if unset → no-op); `ORCHESTRA_LIFECYCLE_INTERNAL_URL` (T-2; outbound register/deregister-schedule URL — targets the lifecycle worker, NOT auth — per synthesis C1). **DROPPED** per synthesis C2: `ORCHESTRA_PROVIDER_SNAPSHOT_URL` (daemon now reads from a daemon-side mirror of the cloud-shared TS constant; no env-var fetch). **PLAN-cdk-infra must add the two remaining env vars as per-workspace daemon task-definition environment fields.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| New IAM grant on a producing service                 | **Yes**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Daemon task role needs (a) DDB `GetItem`/`PutItem`/`Query`/`UpdateItem`/`DeleteItem` on the per-workspace partition prefix for the 10 NEW DDB partitions (`<workspaceId>#chat`, `<workspaceId>#chat#msg`, `<workspaceId>#schedule`, `<workspaceId>#schedule#run`, `<workspaceId>#loop`, `<workspaceId>#loop#iteration`, `<workspaceId>#loop#log`, `<workspaceId>#permission`, `<workspaceId>#agent#timeline`, AND **NEW per synthesis A7** `<workspaceId>#spend` for T-18); (b) S3 `GetObject`/`PutObject` on `s3://orchestra-<stage>-loop-logs/<workspaceId>/*` for T-3 (loop logs offload). **DROPPED** per synthesis C2: S3 `GetObject` on the provider-snapshot bucket — daemon no longer fetches the snapshot. **NOTE** per synthesis C3 (download-token): the existing `<ws>#*` LeadingKeys allows the daemon to write `<ws>#download-token#*`, but PLAN-auth-and-shared Task 8 calls out that the daemon MUST NOT write these (auth is the single writer per F9); PLAN-cdk-infra coordinates whether to tighten with a sub-prefix denial or rely on application discipline. All grants scoped via the existing per-workspace IAM role machinery (D-2 ACCEPTANCE entry, LEARNINGS.md:2657). **PLAN-cdk-infra extends `packages/infra/lib/workspace-role-template.json`.** |
+| New ALB route or listener rule                       | **No new public routes.** All daemon-inbound paths stay on the existing `/ws` + `/api/*` + `/mcp/agents` routes. The new internal routes T-15 (`/api/internal/schedule-fire`) and T-16 (`/api/files/download/internal/:tokenId`) are sub-paths under the existing `/api/internal/*` / `/api/files/*` prefixes; the per-workspace ALB target group routes them to the per-workspace daemon. T-10 verifies the existing `/mcp/agents` path is workspace-bound.                                                                                                                                        |
+| New Secrets Manager prefix                           | **No.** Per-workspace Anthropic credential prefix from D-1.5 (`paseo-cloud/<account>/<workspace>/anthropic-credential`) is unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| New DDB table or partition-key shape                 | **Yes (10 partition prefixes, synthesis added one).** The 9 partition-key prefixes from this stream's pre-amendment scope + the NEW `<workspaceId>#spend` per synthesis A7 (T-18). **All keyed by `<workspaceId>` first**, preserving the F3 design-out (workspace identity not on the wire — derived from JWT at boot, then used as the partition-key root). **Owned by PLAN-auth-and-shared** (the shapes + key builders live in `@orchestra/cloud-shared/keys.ts`); this stream consumes the helpers. **PLAN-cdk-infra adds the DDB table-level config** (per-key projection, GSIs — see below). |
+| New EventBridge Scheduler schedule group / SQS queue | **No on this stream's side.** Per synthesis C1, the schedule-firing register/deregister mechanism (T-2) goes through **`/api/lifecycle-internal/{register-schedule,deregister-schedule}`** on the lifecycle worker (not auth). The `scheduler:CreateSchedule\|UpdateSchedule\|DeleteSchedule` grant on the new `orchestra-<stage>-runtime` schedule group lives on the **lifecycle-worker task role**, not the auth task role. **PLAN-cdk-infra DECISION 7 rewrites accordingly.**                                                                                                                  |
+| New KMS CMK or alias scheme                          | **No.** Per-workspace CMK from D-2 (`alias/orchestra/<stage>/workspace/<workspaceId>`) is reused for any new at-rest encryption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| New IAM role                                         | **No.** The per-workspace daemon task role from D-2 is extended with new grants (above), not replaced.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| New Route 53 record or ACM domain                    | **No.** D-2's per-workspace ALB rule + subdomain pattern is unchanged.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| New CloudWatch log group naming convention           | **No on this stream's side.** Per-tenant log group from D-2 (`/orchestra-cloud/<account>/<workspace>/daemon`) is unchanged. **PLAN-cdk-infra owns** the EMF metric publisher addition (`observability.md:88` — "structured CloudWatch fields per log line" + the 5-EMF-metric pattern).                                                                                                                                                                                                                                                                                                             |
 
-**Cross-stream CDK pin sequencing (the lesson from D-2 PR #11 / #34): PLAN-cdk-infra must deploy the new DDB table shapes + the per-workspace IAM grant extensions BEFORE the daemon stream's PRs land**, OR PLAN-auth-and-shared lands a shim that no-ops cleanly when the partitions don't yet exist (preferred Day-1; the daemon's `loadAll` at boot tolerates an empty partition by returning empty arrays — that's the safe fall-through). Either order works but the explicit-order-or-shim discipline is what avoided D-1.5's three deploy-recovery PRs.
+**Cross-stream CDK pin sequencing (the lesson from D-2 PR #11 / #34): PLAN-cdk-infra must deploy the new DDB table shapes + the per-workspace IAM grant extensions (including the new `<ws>#spend#*` partition and the `UpdateItem` action) + the two new env vars (`ORCHESTRA_AUTH_WEBHOOK_SINK_URL`, `ORCHESTRA_LIFECYCLE_INTERNAL_URL`) BEFORE the daemon stream's PRs land**, OR PLAN-auth-and-shared lands a shim that no-ops cleanly when the partitions don't yet exist (preferred Day-1; the daemon's `loadAll` at boot tolerates an empty partition by returning empty arrays — that's the safe fall-through). Either order works but the explicit-order-or-shim discipline is what avoided D-1.5's three deploy-recovery PRs.
 
 ---
 
 ## Cross-stream dependencies
 
-| Dep                                                                                                         | This stream → other                                               | Other → this stream                                                                                                                 | Resolution mechanism                                                                                                                                                                                                                                                                                                        |
-| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chat / schedule / loop / permission / agent-timeline DDB row shape pins (`@orchestra/cloud-shared/keys.ts`) | **Consumed by** this stream (T-1, T-2, T-3, T-4, T-6)             | **Authored by** PLAN-auth-and-shared                                                                                                | Joint note pinning the 9 partition-key prefixes + sort-key compositions. Daemon stubs the helpers locally with a TODO until the cloud-shared release lands; swap to import after.                                                                                                                                           |
-| `POST /api/auth-internal/schedule-{registered,deregistered}` routes                                         | **Emitted by** this stream's T-2                                  | **Consumed by** PLAN-auth-and-shared (persists or proxies to EventBridge) and PLAN-lifecycle-worker (the actual EventBridge caller) | Joint note pinning the wire shape `{ workspaceId, scheduleId, nextRunAt, cadence }` for registered + `{ workspaceId, scheduleId }` for deregistered.                                                                                                                                                                        |
-| Provider snapshot publication pipeline                                                                      | **Consumed by** this stream's T-9                                 | **Authored by** PLAN-cdk-infra (CI step that builds the snapshot per release)                                                       | Snapshot JSON shape pinned in `ProviderSnapshotEntry` schema; pipeline publishes to S3 with a `latest` tag the daemon reads via env var.                                                                                                                                                                                    |
-| Per-workspace IAM extensions (DDB partitions + S3 buckets + provider-snapshot S3)                           | **Consumed by** this stream (T-1, T-2, T-3, T-4, T-6, T-9)        | **Authored by** PLAN-cdk-infra                                                                                                      | New grants land in `workspace-role-template.json`. Daemon hands-on probes (cross-tenant denials still hold) verify per the D-2 ACCEPTANCE pattern.                                                                                                                                                                          |
-| S3 bucket `orchestra-<stage>-loop-logs/<workspaceId>/*`                                                     | **Consumed by** this stream's T-3                                 | **Authored by** PLAN-cdk-infra (bucket + lifecycle rule + per-workspace IAM grant)                                                  | Path shape pinned: `<workspaceId>/<loopId>/<seqStart>-<seqEnd>.jsonl`.                                                                                                                                                                                                                                                      |
-| Per-tenant CloudWatch log group + EMF metric publisher                                                      | **Emitted by** this stream's daemon (structured log lines)        | **Authored by** PLAN-cdk-infra (the log group; the metric extractor)                                                                | Structured field schema per `observability.md:88` (`ts`, `level`, `account_id`, `workspace_id`, `agent_id?`, `ws_session_id?`, `rpc_family?`, `rpc_type?`, `request_id?`, `latency_ms?`, `event`). The daemon's logger already emits structured JSON; this stream may need to extend log-line content for new RPC families. |
-| `/mcp/agents/*` SG / PrivateLink network isolation                                                          | **Verified by** this stream's T-10 (daemon-side defense-in-depth) | **Authored by** PLAN-cdk-infra (the SG / PrivateLink config)                                                                        | Daemon middleware test asserts the workspace-bound denial; CDK enforces the L4 isolation.                                                                                                                                                                                                                                   |
-| 429 + rate-limit headers response shape on auth-internal routes                                             | **Consumed by** this stream's T-12                                | **Authored by** PLAN-auth-and-shared                                                                                                | Joint note pinning the 429 body + headers; daemon's `cloud-hmac-fetch.ts` parses + propagates.                                                                                                                                                                                                                              |
-| Webhook subscriber endpoint (no-op log writer Day-1)                                                        | **Emitted by** this stream's T-8                                  | **Authored by** PLAN-auth-and-shared OR PLAN-lifecycle-worker                                                                       | Day-1: any endpoint that returns 2xx; bonus: log the body to a CloudWatch log group for operator visibility.                                                                                                                                                                                                                |
-| `ORCHESTRA_PROVIDER_SNAPSHOT_URL` env var injection                                                         | **Consumed by** this stream's T-9                                 | **Injected by** PLAN-cdk-infra (ECS task definition)                                                                                | URL points at the snapshot S3 object (or a CloudFront distribution); daemon validates the JSON via `ProviderSnapshotEntry` schema.                                                                                                                                                                                          |
-| `ORCHESTRA_WEBHOOK_SINK_URL` env var injection                                                              | **Consumed by** this stream's T-8                                 | **Injected by** PLAN-cdk-infra                                                                                                      | If unset, all webhook emits no-op (Day-1 acceptable).                                                                                                                                                                                                                                                                       |
-| App-side dispatch on `runs[N].status:"failed"`, `interrupt:true`, `loops[].text` cap message                | None (daemon emits the binding shapes)                            | **Authored by** PLAN-app                                                                                                            | Round-19 captures referenced from `examples/` — both sides must reference the same captures to avoid drift.                                                                                                                                                                                                                 |
-| App-side dispatch on `rpc_error{code:"quota_exceeded"}`                                                     | **Emitted by** this stream's T-12                                 | **Authored by** PLAN-app                                                                                                            | New typed code; back-compat fall-through to `handler_error` for old clients (per protocol-contract rule).                                                                                                                                                                                                                   |
-| Heartbeat second-hop bug fix on the lifecycle-worker side                                                   | **Heartbeat emit unchanged** in this stream (D-2 T-4 shape)       | **Worker-side read shape** authored by PLAN-lifecycle-worker                                                                        | Contract test verifies the round-trip; T-13 confirms.                                                                                                                                                                                                                                                                       |
+| Dep                                                                                                                     | This stream → other                                                     | Other → this stream                                                                | Resolution mechanism                                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat / schedule / loop / permission / agent-timeline / **spend** DDB row shape pins (`@orchestra/cloud-shared/keys.ts`) | **Consumed by** this stream (T-1, T-2, T-3, T-4, T-6, T-18)             | **Authored by** PLAN-auth-and-shared                                               | Joint note pinning the 10 partition-key prefixes + sort-key compositions. Daemon stubs the helpers locally with a TODO until the cloud-shared release lands; swap to import after. **NEW (synthesis A7):** `<ws>#spend#<yyyy-mm-dd>` for T-18 — PLAN-auth-and-shared adds the key builder.               |
+| `POST /api/lifecycle-internal/{register-schedule,deregister-schedule}` routes (synthesis C1)                            | **Emitted by** this stream's T-2                                        | **Consumed by** PLAN-lifecycle-worker (the EventBridge Scheduler caller)           | Joint note pinning the wire shape `{ workspaceId, scheduleId, nextRunAt, cadence }` for register + `{ workspaceId, scheduleId }` for deregister. **Renamed from `/api/auth-internal/schedule-{registered,deregistered}` per synthesis C1** — owner moved from auth to lifecycle-worker.                  |
+| `POST /api/internal/schedule-fire` daemon route (synthesis A3 — T-15)                                                   | **Exposed by** this stream's T-15                                       | **Consumed by** PLAN-lifecycle-worker's `schedule-fire-callback` (D-3-2)           | Joint note pinning the HMAC body shape `{ workspaceId, scheduleId, scheduledFor, runId }` + the 200/403/404 response semantics + idempotency (OQ-A below).                                                                                                                                               |
+| `GET /api/files/download/internal/:tokenId` daemon route (synthesis C3 / A4 — T-16)                                     | **Exposed by** this stream's T-16                                       | **Consumed by** PLAN-auth-and-shared's `GET /api/files/download/:tokenId` 302      | Daemon revalidates via `POST /api/auth-internal/files/check-download-token`; auth confirms the token and returns the file path. F9 preserved (auth is single writer of token rows).                                                                                                                      |
+| Provider snapshot source of truth (synthesis C2 — rewritten)                                                            | **Consumed by** this stream's T-9 (via daemon-side mirror module)       | **Authored by** PLAN-auth-and-shared (`@orchestra/cloud-shared/src/providers.ts`)  | TS constant `PROVIDER_SNAPSHOT` + `PROVIDER_SNAPSHOT_VERSION` lives in cloud-shared; AGPL fork mirrors in `cloud-provider-snapshot.ts` per the open-core-duplication pattern. Anti-drift CI (deferred follow-up #8) covers the mirror. **DROPPED**: S3 manifest, SSM Parameter Store, env-var-URL fetch. |
+| Per-workspace IAM extensions (DDB partitions + S3 buckets + spend partition)                                            | **Consumed by** this stream (T-1, T-2, T-3, T-4, T-6, T-18)             | **Authored by** PLAN-cdk-infra                                                     | New grants land in `workspace-role-template.json`. `<ws>#spend#*` `UpdateItem` action explicitly added (synthesis A7). **DROPPED** per synthesis C2: provider-snapshot S3 `_meta/*` grant. Daemon hands-on probes (cross-tenant denials still hold) verify per the D-2 ACCEPTANCE pattern.               |
+| S3 bucket `orchestra-<stage>-loop-logs/<workspaceId>/*`                                                                 | **Consumed by** this stream's T-3                                       | **Authored by** PLAN-cdk-infra (bucket + lifecycle rule + per-workspace IAM grant) | Path shape pinned: `<workspaceId>/<loopId>/<seqStart>-<seqEnd>.jsonl`.                                                                                                                                                                                                                                   |
+| Per-tenant CloudWatch log group + EMF metric publisher                                                                  | **Emitted by** this stream's daemon (structured log lines)              | **Authored by** PLAN-cdk-infra (the log group; the metric extractor)               | Structured field schema per `observability.md:88`. The daemon's logger already emits structured JSON; this stream may need to extend log-line content for new RPC families. EMF metric `SpendRowWriteFailed` (T-18 acceptance) lands per PLAN-cdk-infra Task 8 OQ6 naming.                               |
+| `/mcp/agents/*` SG / PrivateLink network isolation                                                                      | **Verified by** this stream's T-10 (daemon-side defense-in-depth)       | **Authored by** PLAN-cdk-infra (the SG / PrivateLink config)                       | Daemon middleware test asserts the workspace-bound denial; CDK enforces the L4 isolation.                                                                                                                                                                                                                |
+| Cloud-shared `QuotaExceededPayload` type (synthesis A8)                                                                 | **Consumed by** this stream's T-12 (daemon mirrors in `cloud-quota.ts`) | **Authored by** PLAN-auth-and-shared (`@orchestra/cloud-shared/src/quota.ts`)      | Pinned shape: `{code:"quota_exceeded", quotaClass, current, cap}`. Auth's HTTP 429 body + daemon's WS `rpc_error` body both reference this type. PLAN-app dispatches on it.                                                                                                                              |
+| Webhook subscriber endpoint (no-op log writer Day-1 — synthesis C4)                                                     | **Emitted by** this stream's T-8                                        | **Authored by** PLAN-auth-and-shared (`POST /api/webhooks/sink` — DDB row + log)   | Day-1: auth writes `<ws>#webhook-event/<eventId>` row + structured-logs the event. **DROPPED** per synthesis C4: cdk-infra's `orchestra-webhook-events` SQS-as-destination. Lifecycle-worker's retry-SQS lands additively.                                                                               |
+| `ORCHESTRA_AUTH_WEBHOOK_SINK_URL` env var injection (synthesis A8 — renamed)                                            | **Consumed by** this stream's T-8                                       | **Injected by** PLAN-cdk-infra (per-workspace ECS task definition)                 | If unset, all webhook emits no-op (Day-1 acceptable). **Renamed from `ORCHESTRA_WEBHOOK_SINK_URL`** for clarity that it targets auth's HMAC sink.                                                                                                                                                        |
+| `ORCHESTRA_LIFECYCLE_INTERNAL_URL` env var injection (synthesis C1 — new)                                               | **Consumed by** this stream's T-2 outbound notify                       | **Injected by** PLAN-cdk-infra (per-workspace ECS task definition)                 | URL targets the lifecycle worker's `/api/lifecycle-internal/*` routes.                                                                                                                                                                                                                                   |
+| Heartbeat `activeAgents` count semantic (synthesis A6 — T-17)                                                           | **Emitted by** this stream's T-17                                       | **Consumed by** PLAN-lifecycle-worker's R7 invariant (idle-suspend gate)           | Pinned: `activeAgents = countRunningAgents + loopService.runningCount() + scheduleService.pendingCount()`. **Field name unchanged** per operator decision; lifecycle-worker's gate depends on the count.                                                                                                 |
+| `<ws>#spend#<yyyy-mm-dd>` row writes (synthesis A7 — T-18)                                                              | **Written by** this stream's T-18                                       | **Consumed by** PLAN-lifecycle-worker D-3-3 (quota aggregator)                     | Row shape `{turnCount: number, spendCents: number, updatedAt: string}`. UTC day key. Aggregator reads on a periodic sweep.                                                                                                                                                                               |
+| Schedule deregister on archive (synthesis OQ2 — operator-decided B)                                                     | None on this stream (auth walks)                                        | **Authored by** PLAN-auth-and-shared (extends D-2 archive route)                   | Auth's archive route enumerates `<ws>#schedule#*` rows and HMAC-POSTs `/api/lifecycle-internal/deregister-schedule` for each row before transitioning the workspace to `archived`. Closes O-2.                                                                                                           |
+| App-side dispatch on `runs[N].status:"failed"`, `interrupt:true`, `loops[].text` cap message                            | None (daemon emits the binding shapes)                                  | **Authored by** PLAN-app                                                           | Round-19 captures referenced from `examples/` — both sides must reference the same captures to avoid drift.                                                                                                                                                                                              |
+| App-side dispatch on `rpc_error{code:"quota_exceeded", quotaClass, current, cap}`                                       | **Emitted by** this stream's T-12                                       | **Authored by** PLAN-app                                                           | New typed code + envelope; back-compat fall-through to `handler_error` for old clients (per protocol-contract rule).                                                                                                                                                                                     |
+| Heartbeat second-hop bug fix on the lifecycle-worker side                                                               | **Heartbeat emit unchanged** in this stream (D-2 T-4 shape + T-17)      | **Worker-side read shape** authored by PLAN-lifecycle-worker                       | Contract test verifies the round-trip; T-13 confirms.                                                                                                                                                                                                                                                    |
 
 ---
 
 ## Open questions / assumptions (for operator's synthesis round; do NOT decide here)
 
-### O-1: Who fires `workspace.created` — the AGPL daemon or the auth service?
+### O-1: Who fires `workspace.created` — the AGPL daemon or the auth service? **(CLOSED — synthesis A5 / OQ7 → B)**
 
-The `workspace.created` event is listed in `open-core-architecture.md:56-60` as an AGPL-core event. But the workspace-create flow today is auth-side (auth's `POST /api/v1/cloud/workspaces` issues `ecs:RunTask`). The daemon doesn't observe the workspace's first existence on its own — it learns about itself at boot via `PASEO_WORKSPACE_ID`. Two interpretations:
+> **RESOLVED 2026-05-26:** Operator decided **B (auth emits)** per the synthesis. PLAN-auth-and-shared adds an emit call in `workspace-create.ts` after the metadata-and-state DDB write. AGPL fork ships the schema (T-8); auth fires the event. `open-core-architecture.md` will be updated to clarify that "the open-core boundary's webhook catalogue can be emitted by either the AGPL core OR a proprietary service, provided the schema is AGPL-core-defined."
+
+(Analysis preserved for historical reference.)
+
+The `workspace.created` event is listed in `open-core-architecture.md:56-60` as an AGPL-core event. But the workspace-create flow today is auth-side (auth's `POST /api/v1/cloud/workspaces` issues `ecs:RunTask`). The daemon doesn't observe the workspace's first existence on its own — it learns about itself at boot via `PASEO_WORKSPACE_ID`. The two interpretations were:
 
 - **A — daemon emits.** The daemon emits `workspace.created` on first-boot per workspace (gate on a "boot is first lifetime" flag persisted in DDB at first heartbeat). Preserves "AGPL core emits its own externally-observable behavior." Cost: re-firing risk if the daemon respawns and the flag write fails — needs idempotency on the subscriber side.
-- **B — auth emits.** The auth service emits `workspace.created` immediately after the DDB write succeeds, before the RunTask succeeds. Decouples the event from container start latency. **Boundary blur:** the AGPL core's documented event catalogue gets emitted by a proprietary service. The spec doc would need to clarify this (open-core-architecture.md:54 says "The AGPL core emits events to a configured webhook endpoint" — strictly, this means the auth service is doing AGPL-core-defined emission).
+- **B — auth emits (CHOSEN).** The auth service emits `workspace.created` immediately after the DDB write succeeds, before the RunTask succeeds. Decouples the event from container start latency. Boundary blur acknowledged + documented.
 
-**This stream's recommendation:** B (auth emits) — minimizes the daemon's bootstrap complexity and avoids the idempotency requirement on the subscriber side. But the doc needs updating to say "the open-core boundary's webhook catalogue can be emitted by either the AGPL core OR a proprietary service, provided the schema is AGPL-core-defined." Decision needed before T-8 closes.
+### O-2: Should an `archived` workspace's schedule fire? **(CLOSED — synthesis OQ2 → B)**
 
-### O-2: Should an `archived` workspace's schedule fire?
+> **RESOLVED 2026-05-26:** Operator decided **B (deregister on archive)**. PLAN-auth-and-shared's archive route walks `<ws>#schedule#*` and HMAC-POSTs `/api/lifecycle-internal/deregister-schedule` for each row before the workspace state transitions to `archived`. PLAN-lifecycle-worker's idempotent-skip-on-archive at the schedule-fire-callback path is the backstop for races.
 
-T-7 above raises the case: a schedule was created when the workspace was `active`. The workspace is now `archived` (per D-2's workspace-lifecycle.md). The schedule's `cloudOwnerWorkspaceId` points at the archived workspace. When EventBridge Scheduler fires at `nextRunAt`, the lifecycle worker spawns the daemon container... but the workspace is archived. What happens?
+(Analysis preserved for historical reference.) T-7 raised the case: a schedule was created when the workspace was `active`. The workspace is now `archived` (per D-2's workspace-lifecycle.md). The three options were:
 
-- **A — schedule fires, daemon starts, agent runs.** The user expects "I archived this workspace; nothing should happen there." Violates user expectation.
-- **B — schedule is deregistered on archive, never fires.** Preserves user expectation. Requires the archive flow (PLAN-auth-and-shared T-13) to walk the workspace's schedule partition and deregister each one. The schedule's DDB row could be retained for un-archive recovery.
-- **C — schedule fires, daemon starts, agent immediately rejects with `archived` error.** Wasteful (RunTask cost) but covers user expectation. Worth measuring.
+- **A — schedule fires, daemon starts, agent runs.** Violates user expectation.
+- **B — schedule is deregistered on archive, never fires (CHOSEN).** Preserves user expectation. Requires the archive flow to walk `<ws>#schedule#*` and deregister each one.
+- **C — schedule fires, daemon starts, agent immediately rejects with `archived` error.** Wasteful RunTask cost.
 
-**This stream's recommendation:** B. But the archive flow is PLAN-auth-and-shared's territory; this stream surfaces the question only.
+### O-3: `provisioning_failed` cap-trap fix path **(CLOSED — synthesis C5 → (a) + cap exclusion)**
 
-### O-3: `provisioning_failed` cap-trap fix path (a/b/c from LEARNINGS 2026-05-25 operator UAT)
+> **RESOLVED 2026-05-26:** Operator accepted the 4-stream consensus per synthesis C5. **(a) make `provisioning_failed → archived` a legal transition + cap exclusion.** PLAN-auth-and-shared owns the transition-table edit + the cap-counter exclusion. PLAN-lifecycle-worker D-3-5 adds an orphan-detect signal for stale `provisioning_failed` rows. This stream's earlier (b) recommendation is **withdrawn** — the audit-trail value preserved by (a) outweighs the cleanup-simplicity argument; cap exclusion neutralizes the user-visible cap-trap without losing the trail.
 
-Recapping the three options for the `provisioning_failed` cap-trap:
+Recapping the three options for the `provisioning_failed` cap-trap (preserved for historical reference):
 
-- (a) make `provisioning_failed → archived` a legal transition;
-- (b) have rollback `DeleteItem` instead of writing tombstones;
-- (c) add a lifecycle-worker sweep for stale `provisioning_failed`.
-
-The daemon stream has no preference and surfaces the decision back to the operator. **Recommendation: (b)** — rollback should clean up its own mess; tombstones in the cap-counter are a confusing UX. But the decision sits with PLAN-auth-and-shared.
+- (a) make `provisioning_failed → archived` a legal transition (**CHOSEN**);
+- (b) have rollback `DeleteItem` instead of writing tombstones (this stream's earlier preference, withdrawn);
+- (c) add a lifecycle-worker sweep for stale `provisioning_failed` (deferred to Day-N per PLAN-auth-and-shared; PLAN-lifecycle-worker D-3-5's orphan-detect signal lands Day-1 as the operator-triage seam).
 
 ### O-4: S3 offload threshold for loop logs (T-3)
 
@@ -613,9 +789,40 @@ D-2's webhook emit primitive is single-shot (no retries; the spec says EventBrid
 
 **Recommendation:** A — accept loss Day-1. The billing module is the layer that cares about exactly-once; defer its retry-semantics design to D-4 when the module lands.
 
-### O-6 (LOW): Provider-snapshot freshness vs daemon image immutability
+### O-6: Provider-snapshot freshness **(CLOSED — synthesis C2 → cloud-shared constant, no fetch)**
 
-T-9's image-baked fallback (`/paseo/provider-snapshot.json`) creates a tight coupling between the daemon image's tagged version and the provider catalog version. If a new provider lands between image releases, the URL-fetch path picks it up; the fallback does not. This is acceptable Day-1, but worth noting: when the URL fetch fails for an extended period, the daemon serves a stale catalog. The TTL refresh (default 5 min) bounds the staleness window — but if the URL is down for hours, the fallback is hours-stale. Surface to PLAN-cdk-infra: ensure the URL has high availability (CloudFront with origin failover, or similar).
+> **RESOLVED 2026-05-26:** Per synthesis C2, the daemon reads from a daemon-side mirror of the cloud-shared TS constant. The "URL fetch + TTL + image-baked fallback" chain is dropped. Staleness window now equals daemon-redeploy cadence (the constant changes only when the cloud-shared package releases + the daemon image rebuilds). Anti-drift CI (deferred follow-up #8) covers the mirror.
+
+### OQ-A (NEW): T-15 schedule-fire idempotency
+
+If EventBridge Scheduler retries the same `(scheduleId, runId)` after a partial failure (e.g., the daemon's executeSchedule completed but the worker's HTTP response was lost in transit), the daemon's executeSchedule re-runs and overwrites the run record. Two options:
+
+- **A — accept replay.** The worker is responsible for not retrying. UNVERIFIED whether EventBridge Scheduler retry semantics actually fire a duplicate at the daemon; the worker's `schedule-fire-callback` may dedupe upstream.
+- **B — daemon-side idempotency key.** Maintain a small TTL'd in-memory set of recent `(scheduleId, runId)` pairs; return 200 + `{idempotent: true}` on a hit. Cost: minor state; risk: memory leak under high schedule rates.
+
+**Recommendation:** A Day-1 — defer until evidence of replay shows up in production logs. PLAN-lifecycle-worker's `schedule-fire-callback` is the natural place for dedup if needed; surface to that stream.
+
+### OQ-B (NEW): T-16 URL-signing vs revalidate-with-auth
+
+The download-token redirect URL from auth to daemon (`https://<wsId>.<base>/api/files/download/internal/:tokenId`) — does auth sign the URL with HMAC (so the daemon trusts the path-token plus signature without a roundtrip), or does the daemon revalidate via `POST /api/auth-internal/files/check-download-token`?
+
+- **A (chosen in T-16 acceptance criteria) — revalidate with auth.** One extra ~5ms in-VPC hop per redeem; single source of truth lives in auth's DDB row.
+- **B — sign the URL with HMAC.** No extra hop; cheaper. But the daemon's HMAC key is shared deployment-wide (not per-token), so trusting a URL HMAC means any party with the HMAC can request any file in any workspace — narrower than auth's per-token check.
+
+**Recommendation:** A (revalidate) — already pinned in T-16. The 5ms hop is acceptable for a user-initiated download; the auth check is the single source of truth.
+
+### OQ-C (NEW): T-18 spend telemetry — daemon owns the rate table OR aggregator computes from raw tokens?
+
+T-18 writes `<ws>#spend#<yyyy-mm-dd>` with `{turnCount, spendCents}`. The `spendCents` value implies the daemon knows the per-token rate for each model. Two options:
+
+- **A — daemon writes `spendCents` directly.** The daemon imports the rate table from cloud-shared (or a local mirror); on each turn, it multiplies `input_tokens * input_rate + output_tokens * output_rate` and writes the result. Rate-table updates require a daemon redeploy.
+- **B — daemon writes raw token counts, aggregator computes cents.** The DDB row carries `{turnCount, inputTokens, outputTokens, model}`; PLAN-lifecycle-worker D-3-3 (quota aggregator) computes cents from a rate table on its side. Rate-table updates are aggregator-side only.
+
+**Recommendation:** B — keep the rate table on the aggregator side. PLAN-lifecycle-worker / PLAN-auth-and-shared coordinate. The daemon's job is to write raw observed tokens; pricing is a billing-side concern. The DDB row shape is then `{turnCount, inputTokens, outputTokens, model, updatedAt}` instead of `{turnCount, spendCents}`. **PLAN-auth-and-shared owns the final key/schema decision** — flag for that stream's amendment round.
+
+### OQ-D (NEW): Sub-minute `every` cadence cloud divergence — confirmed accepted
+
+> **RESOLVED 2026-05-26 (synthesis OQ1):** Operator accepted the cloud-vs-on-host parity break. Cloud-mode `DynamoScheduleStore.create` rejects `every` cadences with `everyMs < 60_000` (EventBridge Scheduler `rate(...)` minimum is 1 min); on-host mode preserves the round-17 BINDING sub-minute support unchanged. PLAN-lifecycle-worker docs the divergence in `90-cloud-considerations/schedule-cadence-cloud-divergence.md`. This stream's T-2 acceptance criterion adds the gate.
 
 ---
 
@@ -676,17 +883,20 @@ npx vitest run packages/server/src/server/agent/permission-store.test.ts --bail=
 # - daemon.log grep for "workspace auth context" — expect NO matches over 5 min.
 # - The schedule's persisted record has cloudOwnerWorkspaceId === PASEO_WORKSPACE_ID.
 
-# T-8 — Webhook event catalogue
-# - ORCHESTRA_WEBHOOK_SINK_URL=https://httpbin.org/post (or a no-op log writer)
+# T-8 — Webhook event catalogue (env var renamed per synthesis A8)
+# - ORCHESTRA_AUTH_WEBHOOK_SINK_URL=https://httpbin.org/post (or auth's no-op log writer)
 # - Run an agent; turn completes.
 # - daemon.log shows "Webhook emit delivered" with eventType:"agent.turn_completed".
+# - workspace.created is NOT emitted by the daemon (auth emits — synthesis A5 / OQ7).
 
-# T-9 — Out-of-band provider snapshot
-# Local:
-docker run --rm -e PASEO_CLOUD_MODE=1 \
-  -e ORCHESTRA_PROVIDER_SNAPSHOT_URL=https://example.invalid/snapshot.json \
-  <ecr>/paseo-daemon:dev-latest
-# Expect: daemon falls back to /paseo/provider-snapshot.json baked into the image.
+# T-9 — Provider snapshot from cloud-shared mirror (synthesis C2 — rewritten)
+npx vitest run packages/server/src/server/agent/provider-snapshot-manager.test.ts --bail=1
+# Hands-on:
+# - In cloud mode, getSnapshot(cwd) returns the daemon-side cloud-provider-snapshot.ts
+#   constant set without invoking any per-cwd provider binary.
+# - Anti-drift CI flags any divergence between AGPL mirror and @orchestra/cloud-shared.
+# - No ORCHESTRA_PROVIDER_SNAPSHOT_URL env var; no /paseo/provider-snapshot.json file
+#   in the image.
 
 # T-10 — /mcp/agents workspace-bound JWT
 npx vitest run packages/server/src/server/bootstrap.workspace-binding.test.ts --bail=1
@@ -701,21 +911,60 @@ npx vitest run packages/server/src/server/cloud-auth.workspace-binding.test.ts -
 # - Expect WS close code 4401.
 # - Capture artifact in D-3-plans/probe-7-ws-results.md.
 
-# T-12 — Quota / 429 propagation
+# T-12 — Quota / 429 propagation (envelope pinned per synthesis A8)
 # Hands-on:
-# - Configure auth-service to return 429 on schedule-registered for a workspace.
-# - schedule/create in that workspace returns rpc_error{code:"quota_exceeded"}.
+# - Configure auth-service to return 429 with body
+#   {code:"quota_exceeded", quotaClass:"agent_count", current:10, cap:10}.
+# - create_agent_request in that workspace returns rpc_error{code:"quota_exceeded",
+#   quotaClass:"agent_count", current:10, cap:10}.
+
+# T-15 — /api/internal/schedule-fire (synthesis A3 — new)
+npx vitest run packages/server/src/server/cloud-schedule-fire-route.test.ts --bail=1
+# Hands-on:
+# - Lifecycle worker simulates an EventBridge fire by HMAC-POSTing the daemon at
+#   /api/internal/schedule-fire with {workspaceId, scheduleId, scheduledFor, runId}.
+# - The daemon dispatches the agent under workspaceAuthStorage.run(...); the
+#   schedule's runs[] grows with the right round-19 binding shape.
+# - Cross-tenant probe: HMAC-POST with the wrong workspaceId → 403.
+
+# T-16 — /api/files/download/internal/:tokenId (synthesis C3 / A4 — new)
+npx vitest run packages/server/src/server/file-download-internal-route.test.ts --bail=1
+# Hands-on (cross-instance — Probe 8 from PLAN-auth-and-shared):
+# - Mint a download token on daemon container A.
+# - Trigger a StopTask + RunTask cycle on the workspace; daemon container B is now
+#   the active ENI.
+# - Follow auth's 302 → daemon B's /api/files/download/internal/:tokenId.
+# - Daemon B revalidates with auth, streams the file. Download succeeds across
+#   container respawn.
+
+# T-17 — Heartbeat activeAgents counts loops + schedules (synthesis A6 — new)
+npx vitest run packages/server/src/server/cloud-heartbeat.test.ts --bail=1
+# Hands-on:
+# - Start a long-running loop in the workspace. No connected WS clients.
+# - Daemon heartbeat reports activeAgents > 0.
+# - Lifecycle worker's idle-suspend gate (R7) does NOT fire — verified by
+#   PLAN-lifecycle-worker's parallel scanner test.
+
+# T-18 — Per-turn spend-row writer (synthesis A7 — new)
+npx vitest run packages/server/src/server/cloud-spend-writer.test.ts --bail=1
+# Hands-on:
+# - Run one agent turn in cloud mode.
+# - aws dynamodb get-item --table orchestra-<stage>-state \
+#     --key '{"pk":{"S":"<wsId>#spend"},"sk":{"S":"<today-utc>"}}'
+# - Expect a row with turnCount:1 and token-count fields (see OQ-C above).
 
 # Final D-3 hands-on gate (ROADMAP § Phase D-3, lines 200-211):
-# - Schedule, loop, permission, agent_stream catchup all work end-to-end
-#   under cross-restart and disconnect-reconnect scenarios.
+# - Schedule, loop, permission, agent_stream catchup all work end-to-end under
+#   cross-restart and disconnect-reconnect scenarios.
+# - Download token redeem succeeds against a daemon that was StopTask+RunTask'd
+#   between mint and redeem (synthesis C3 cross-instance probe).
 ```
 
 ---
 
 ## Risks / known-hard parts
 
-1. **DDB row shapes are a 9-partition extension to `@orchestra/cloud-shared/keys.ts` — the cross-stream contract is the largest of any D-3 stream.** A typo in a partition prefix (e.g., `<workspaceId>#chat#message` vs `<workspaceId>#chat#msg`) is invisible until rehydration silently returns empty. The D-2 lesson (LEARNINGS 2026-05-25 ECS-tagresource bite × 4) applies: every helper added to `cloud-shared/keys.ts` should be paired with a daemon-side consumer test BEFORE any deploy. The anti-drift guard from D-1.5 (still open) becomes load-bearing here — without it, the daemon and the lifecycle worker can drift in opposite directions.
+1. **DDB row shapes are a 10-partition extension to `@orchestra/cloud-shared/keys.ts` (post-synthesis: 9 chat/schedule/loop/permission/agent-timeline + 1 spend partition from T-18) — the cross-stream contract is the largest of any D-3 stream.** A typo in a partition prefix (e.g., `<workspaceId>#chat#message` vs `<workspaceId>#chat#msg`) is invisible until rehydration silently returns empty. The D-2 lesson (LEARNINGS 2026-05-25 ECS-tagresource bite × 4) applies: every helper added to `cloud-shared/keys.ts` should be paired with a daemon-side consumer test BEFORE any deploy. The anti-drift guard from D-1.5 (still open) becomes load-bearing here — without it, the daemon and the lifecycle worker can drift in opposite directions.
 
 2. **Daemon-restart auto-stop for loops MUST preserve `loop.md:332-343` exactly.** A cross-tenant test where the daemon is suspended → resumed mid-loop must show `status:"stopped"`, `failureReason:"Daemon restarted"` on the iteration, and the final log entry. Failing this is a silent regression — the loop will look "still running" to the client until the next mutation, then transition; the client's polling will see an inconsistent state. Add a regression test that simulates the restart explicitly.
 
@@ -725,7 +974,7 @@ npx vitest run packages/server/src/server/cloud-auth.workspace-binding.test.ts -
 
 5. **The fail-loud branch in `cloud-credentials.ts:170-174` is the "canary" for T-7.** The whole D-3 closure depends on that branch never firing under normal operation. A regression test that asserts "no `workspaceAuthStorage` errors in daemon.log during a 10-minute schedule firing run" is the load-bearing check. Without it, T-7 looks done but is brittle.
 
-6. **Provider snapshot bundling (T-9) creates a CI-side dependency on `PLAN-cdk-infra`'s snapshot-publish step.** If the daemon image is rebuilt without the snapshot file, the image fallback path is missing. The Dockerfile must FAIL the build if the snapshot is absent (rather than COPY a 0-byte file). Add `--from=<snapshot-builder>` discipline.
+6. **Provider snapshot mirror (T-9, post-synthesis C2) creates a duplication contract with `@orchestra/cloud-shared/src/providers.ts`.** The AGPL fork mirrors the cloud-shared constant in `cloud-provider-snapshot.ts`; anti-drift CI (deferred follow-up #8) is the load-bearing safety net. Without it, the daemon and the auth-served catalog can drift silently — same failure mode as the AGPL ↔ proprietary schema duplication footgun from D-1.5. Ship the anti-drift sweep BEFORE T-9 closes.
 
 7. **The new `rpc_error{code:"quota_exceeded"}` (T-12) is the FIRST forward-compat-additive code in the catalog.** Existing typed codes are baked into the wire. A 6-month-old client will fall through to the `handler_error` default per `permission.md:259-261`, surface a generic error. The COMPAT comment in messages.ts should mark a 6-month removal date for the back-compat fall-through (per CLAUDE.md protocol-rules). Verify clients (mobile) ship the dispatch before the removal date.
 
@@ -751,31 +1000,35 @@ Surfaced while planning; NOT in scope for this PR — same anti-bundle disciplin
 
 7. **Per-account archived-workspace cap** (workspace-lifecycle.md:126 — TBD). Likely owned by PLAN-auth-and-shared, not the daemon.
 
-8. **Anti-drift guard for AGPL ↔ proprietary duplicated schemas** — still open from D-1.5 (LEARNINGS.md:2398). D-3 adds the largest set of duplicates yet (9 DDB key-shape helpers). Single sweep, post-D-3.
+8. **Anti-drift guard for AGPL ↔ proprietary duplicated schemas** — still open from D-1.5 (LEARNINGS.md:2398). D-3 adds the largest set of duplicates yet: 10 DDB key-shape helpers + `WorkspaceCreatedEventSchema` / `AgentTurnCompletedEventSchema` / `AgentTurnFailedEventSchema` (T-8) + `CLOUD_PROVIDER_SNAPSHOT` (T-9, synthesis C2) + `QuotaExceededPayload` (T-12, synthesis A8). Single sweep, post-D-3; load-bearing for T-9's correctness.
 
-9. **`/api/files/download` cross-instance token store.** ROADMAP § Phase D-3 lists this; **but** Day-1's single-daemon-per-workspace topology means there is no cross-instance case at the daemon side. The token is minted by the daemon's WS handler, redeemed by the same daemon's HTTP handler — both in the same container. **Nothing for this stream to do.** When/if Day-N introduces sticky-session-but-multi-instance (e.g., per-workspace daemon's HTTP and WS routed to different ALB targets), revisit. For Day-1, this is a no-op for daemon stream.
+9. **`/api/files/download` cross-instance flow.** ~~Day-1's single-daemon-per-workspace topology means there is no cross-instance case at the daemon side.~~ **WITHDRAWN per synthesis C3.** The D-2 suspend/resume cycle replaces the daemon container ENI between token mint and redeem; auth owns the token row (single writer per F9); daemon serves the file via T-16. The Day-1 cross-instance probe (synthesis Probe 8) exercises this.
 
-10. **EMF metric publisher per `observability.md:88` "5-EMF-metric pattern".** The 5 metrics from the prior attempt's Phase 39b. Daemon emits the structured log lines; PLAN-cdk-infra extracts. This stream's piece: ensure logger output is JSON with the required fields. The fields are already in the daemon's structured logger (`logger.ts`); confirm during T-1..T-9 implementation.
+10. **EMF metric publisher per `observability.md:88` "5-EMF-metric pattern".** The 5 metrics from the prior attempt's Phase 39b + the new `SpendRowWriteFailed` from T-18. Daemon emits the structured log lines; PLAN-cdk-infra extracts. This stream's piece: ensure logger output is JSON with the required fields. The fields are already in the daemon's structured logger (`logger.ts`); confirm during T-1..T-18 implementation.
 
 ---
 
 ## Summary
 
 - **T-1** `DynamoChatStore implements ChatStore` — load/save per `<workspaceId>#chat#room` + `<workspaceId>#chat#msg`; round-trip chat-lifecycle captures; cross-restart rehydration. **M.**
-- **T-2** `DynamoScheduleStore implements ScheduleStore` + EventBridge Scheduler register/deregister notify — round-trip round-19 `runs[N].status:"failed"` (BINDING); 5-field cron rejection preserved; HMAC notify on every mutation. **L.**
+- **T-2** `DynamoScheduleStore implements ScheduleStore` + register/deregister notify (synthesis C1 — URL targets **lifecycle-worker** at `/api/lifecycle-internal/{register,deregister}-schedule`) + sub-minute cadence gate (synthesis OQ1) — round-trip round-19 `runs[N].status:"failed"` (BINDING); 5-field cron rejection preserved. **L.**
 - **T-3** `DynamoLoopStore implements LoopStore` + S3 offload — round-trip round-19 `maxTimeMs` cap (text in `logs[]`, not `failureReason`; BINDING); daemon-restart auto-stop preserved per `loop.md:332-343`. **L.**
 - **T-4** NEW `PermissionStore` interface + `DynamoPermissionStore` + on-host `FileBackedPermissionStore` — round-trip both round-19 deny shapes (`interrupt:true` and `interrupt`-omitted). **L.**
 - **T-5** Container-boot rehydration in cloud mode — populate ChatService / ScheduleService / LoopService / AgentManager from DDB before serving WS. **M.**
 - **T-6** `agent_stream` catchup on cross-restart / reconnect — durable `DynamoAgentTimelineStore`; `(epoch, seq)` cursor semantics preserved (BINDING). **L.**
 - **T-7** Persist `cloudOwnerWorkspaceId` + `cloudOwnerAccountId` on schedule/loop/agent records; restore ALS at fire time; eliminates the `cloud-credentials.ts:170-174` fail-loud branch for scheduled/loop/background spawns. **M.**
-- **T-8** Webhook catalogue expansion — `workspace.created` + `agent.turn_completed`/`agent.turn_failed`. **M.**
-- **T-9** Out-of-band provider snapshot consumer — F1 closed. ProviderSnapshotManager reads from URL + image-baked fallback. **M.**
+- **T-8** Webhook catalogue expansion — `agent.turn_completed` + `agent.turn_failed` (daemon-fired) + schema-only `WorkspaceCreatedEventSchema` (auth fires, per synthesis A5 / OQ7 — operator decision B). Env var renamed to **`ORCHESTRA_AUTH_WEBHOOK_SINK_URL`** per synthesis A8. **M.**
+- **T-9** Out-of-band provider snapshot — F1 closed via **daemon-side mirror of the cloud-shared `PROVIDER_SNAPSHOT` constant** (synthesis C2 rewrite). No env var, no S3, no Docker bake step. Anti-drift CI covers. **S.**
 - **T-10** `/mcp/agents/*` workspace-bound JWT enforcement regression test (defense-in-depth alongside CDK SG/PrivateLink). **S.**
 - **T-11** Probe 7 WebSocket variant capture (D-2 ACCEPTANCE carry-in). **S.**
-- **T-12** Quota / 429 propagation — new typed `rpc_error{code:"quota_exceeded"}`; back-compat fall-through to `handler_error` per protocol-contract rule. **M.**
+- **T-12** Quota / 429 propagation — new typed `rpc_error{code:"quota_exceeded", quotaClass, current, cap}` (envelope pinned per synthesis A8); back-compat fall-through to `handler_error` per protocol-contract rule. **M.**
 - **T-13** D-2 heartbeat second-hop bug carry-in (verification; mostly cross-stream).
-- **T-14** D-2 `provisioning_failed` cap-trap carry-in (cross-stream only; daemon has no contribution).
+- **T-14** D-2 `provisioning_failed` cap-trap carry-in (cross-stream only; daemon's prior (b) recommendation withdrawn → (a) + cap exclusion per synthesis C5).
+- **T-15** **(NEW — synthesis A3)** Daemon `/api/internal/schedule-fire` HMAC-validated handler — lifecycle-worker calls into this on every EventBridge fire; daemon dispatches the agent under restored ALS context; writes `runs[N]` per round-19 BINDING. **M.**
+- **T-16** **(NEW — synthesis C3 / A4)** Daemon `/api/files/download/internal/:tokenId` handler — auth's public route 302-redirects to this; daemon revalidates token with auth + streams from EBS-mounted workspace root. Closes the cross-instance promise. **M.**
+- **T-17** **(NEW — synthesis A6)** Extend `cloud-heartbeat.ts` `activeAgents` to count running loops + pending schedules. Field name unchanged per operator decision. **S.**
+- **T-18** **(NEW — synthesis A7)** Per-turn spend-row writer in `agent-manager.ts` turn-end hook — writes `<ws>#spend#<yyyy-mm-dd>` rows. Daemon writes raw tokens (per OQ-C recommendation); aggregator computes cents. **S.**
 
-**Hardest part:** the 9 DDB row-shape contracts with `@orchestra/cloud-shared` (T-1..T-4, T-6). D-2's lesson — synthesis amendments must rewrite both sides of cross-stream contracts (LEARNINGS.md:2507-2511) — is load-bearing here. Without the anti-drift guard (deferred item #8), drift between the daemon's reader and the worker's writer is a silent class of failure.
+**Hardest part:** the 10 DDB row-shape contracts with `@orchestra/cloud-shared` (T-1..T-4, T-6, T-18) — synthesis added the `<ws>#spend` partition; load-bearing for PLAN-lifecycle-worker D-3-3 quota aggregator. D-2's lesson — synthesis amendments must rewrite both sides of cross-stream contracts (LEARNINGS.md:2507-2511) — is load-bearing here. The 2026-05-26 synthesis amendments above are paired on both sides per that discipline; the four new tasks (T-15..T-18) close the seven unowned-pin gaps the synthesis surfaced.
 
-**Total estimate:** ~12–18 days of focused engineering (excluding cross-stream coordination), assuming PLAN-auth-and-shared's `@orchestra/cloud-shared/keys.ts` extensions land before T-1 starts. The 4 stores (T-1..T-4) are the bulk of the work; T-5..T-7 wire them together; T-8..T-12 add the new surfaces.
+**Total estimate (post-synthesis):** ~14–20 days of focused engineering (excluding cross-stream coordination), assuming PLAN-auth-and-shared's `@orchestra/cloud-shared/keys.ts` extensions + `quota.ts` envelope + `providers.ts` constant land before T-1/T-9/T-12 start. The 4 stores (T-1..T-4) are still the bulk; T-5..T-7 wire them together; T-8..T-18 add the new surfaces — with T-9 shrunk from M to S by synthesis C2, T-15/T-16 added as M each, T-17/T-18 as S each.
