@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import { getCurrentWorkspaceAuth } from "./cloud-auth.js";
 import type { AgentTurnEndCallback, AgentTurnEndContext } from "./agent/agent-manager.js";
+import { toUtcDayKey, writeSpendRow } from "./cloud-spend-writer.js";
 import { emitWebhookEvent } from "./cloud-webhook-emit.js";
 import type { AgentTurnCompletedEvent, AgentTurnFailedEvent } from "./cloud-webhook-events.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
@@ -44,6 +45,13 @@ export interface CreateCloudTurnEndHookParams {
    */
   hmacKey: string | undefined;
   /**
+   * T-18 (synthesis A7) — base URL for the auth service's internal
+   * spend-row write route (`<authInternalUrl>/api/auth-internal/spend`).
+   * Sourced from ORCHESTRA_AUTH_INTERNAL_URL. If unset, spend rows
+   * are skipped (Day-1 posture identical to the webhook sink).
+   */
+  authInternalUrl: string | undefined;
+  /**
    * Daemon-side logger. Hook errors warn-and-continue here.
    */
   logger: Logger;
@@ -67,14 +75,19 @@ export function createCloudTurnEndHook(
   params: CreateCloudTurnEndHookParams,
 ): AgentTurnEndCallback | undefined {
   if (!isPaseoCloudMode()) return undefined;
-  const { webhookSinkUrl, hmacKey, logger } = params;
-  if (!webhookSinkUrl) {
-    logger.debug("ORCHESTRA_AUTH_WEBHOOK_SINK_URL not set — agent.turn_* webhook fan-out disabled");
+  const { webhookSinkUrl, hmacKey, authInternalUrl, logger } = params;
+  // Either configured surface (webhook OR spend writer) is enough to
+  // justify wiring the hook. If neither is configured, the hook is
+  // pure overhead — return undefined so AgentManager skips it.
+  if (!webhookSinkUrl && !authInternalUrl) {
+    logger.debug(
+      "Neither ORCHESTRA_AUTH_WEBHOOK_SINK_URL nor ORCHESTRA_AUTH_INTERNAL_URL is set — turn-end fan-out disabled",
+    );
     return undefined;
   }
   if (!hmacKey) {
     logger.warn(
-      "ORCHESTRA_AUTH_WEBHOOK_SINK_URL is set but ORCHESTRA_INTERNAL_HMAC_KEY is not — webhook emit disabled",
+      "ORCHESTRA_AUTH_WEBHOOK_SINK_URL / ORCHESTRA_AUTH_INTERNAL_URL is set but ORCHESTRA_INTERNAL_HMAC_KEY is not — turn-end fan-out disabled",
     );
     return undefined;
   }
@@ -95,7 +108,13 @@ export function createCloudTurnEndHook(
     }
 
     void (async () => {
-      try {
+      // Both fan-outs are independent — a webhook failure must not
+      // skip the spend write, and vice-versa. We `Promise.allSettled`
+      // so one's failure does not poison the other; each path warns-
+      // and-continues per its own logger contract.
+      const tasks: Promise<unknown>[] = [];
+
+      if (webhookSinkUrl) {
         if (context.outcome === "completed") {
           const event: AgentTurnCompletedEvent = {
             eventType: "agent.turn_completed",
@@ -112,13 +131,15 @@ export function createCloudTurnEndHook(
               totalCostUsd: null,
             },
           };
-          await emitWebhookEvent({
-            subscriberUrl: webhookSinkUrl,
-            hmacKey,
-            event,
-            logger,
-            ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
-          });
+          tasks.push(
+            emitWebhookEvent({
+              subscriberUrl: webhookSinkUrl,
+              hmacKey,
+              event,
+              logger,
+              ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
+            }),
+          );
         } else {
           const event: AgentTurnFailedEvent = {
             eventType: "agent.turn_failed",
@@ -131,19 +152,50 @@ export function createCloudTurnEndHook(
             error: context.error,
             usage: context.usage,
           };
-          await emitWebhookEvent({
-            subscriberUrl: webhookSinkUrl,
+          tasks.push(
+            emitWebhookEvent({
+              subscriberUrl: webhookSinkUrl,
+              hmacKey,
+              event,
+              logger,
+              ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
+            }),
+          );
+        }
+      }
+
+      // T-18 (synthesis A7) — write the spend row. We record token
+      // counts even on failed turns (the provider may have partially
+      // streamed before failing); per-model rate pricing happens on
+      // the aggregator side. Skip when no usage data is available
+      // (provider returned no usage block; nothing to attribute).
+      if (authInternalUrl && context.usage) {
+        const spendUrl = `${authInternalUrl.replace(/\/$/, "")}/api/auth-internal/spend`;
+        tasks.push(
+          writeSpendRow({
+            url: spendUrl,
             hmacKey,
-            event,
+            workspaceId: claims.workspaceId,
+            dayKey: toUtcDayKey(new Date(context.endedAt)),
+            turn: {
+              inputTokens: context.usage.inputTokens,
+              cachedInputTokens: context.usage.cachedInputTokens,
+              outputTokens: context.usage.outputTokens,
+            },
             logger,
             ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
-          });
-        }
-      } catch (err) {
-        logger.warn(
-          { err, agentId: context.agentId, outcome: context.outcome },
-          "Cloud turn-end webhook emit failed",
+          }),
         );
+      }
+
+      const results = await Promise.allSettled(tasks);
+      for (const r of results) {
+        if (r.status === "rejected") {
+          logger.warn(
+            { err: r.reason, agentId: context.agentId, outcome: context.outcome },
+            "Cloud turn-end fan-out task failed",
+          );
+        }
       }
     })();
   };

@@ -1148,6 +1148,7 @@ function buildCloudTurnEndHook(logger: Logger) {
   return createCloudTurnEndHook({
     webhookSinkUrl: process.env.ORCHESTRA_AUTH_WEBHOOK_SINK_URL?.trim(),
     hmacKey: process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim(),
+    authInternalUrl: process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim(),
     logger,
   });
 }

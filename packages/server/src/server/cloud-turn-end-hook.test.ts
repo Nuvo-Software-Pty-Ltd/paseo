@@ -44,15 +44,17 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com",
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
     });
     expect(hook).toBeUndefined();
   });
 
-  it("returns undefined when webhookSinkUrl is unset (no-op sink)", () => {
+  it("returns undefined when both webhookSinkUrl and authInternalUrl are unset", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: undefined,
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
     });
     expect(hook).toBeUndefined();
@@ -62,6 +64,7 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com",
       hmacKey: undefined,
+      authInternalUrl: undefined,
       logger,
     });
     expect(hook).toBeUndefined();
@@ -77,6 +80,7 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com/hook",
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
       fetchImpl,
     });
@@ -112,6 +116,7 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com/hook",
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
       fetchImpl,
     });
@@ -145,6 +150,7 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com/hook",
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
       fetchImpl,
     });
@@ -164,6 +170,7 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     const hook = createCloudTurnEndHook({
       webhookSinkUrl: "https://sink.example.com/hook",
       hmacKey: "k",
+      authInternalUrl: undefined,
       logger,
       fetchImpl,
     });
@@ -179,5 +186,109 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       },
     );
+  });
+
+  // ----- T-18 (synthesis A7) — spend-row writer ----------------------------
+
+  it("writes a spend row to /api/auth-internal/spend with the UTC day key + raw token counts", async () => {
+    const captures: { url: string; body: string }[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      captures.push({ url, body: String(init?.body) });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const hook = createCloudTurnEndHook({
+      webhookSinkUrl: undefined,
+      hmacKey: "k",
+      authInternalUrl: "https://auth.example.com",
+      logger,
+      fetchImpl,
+    });
+    expect(hook).toBeDefined();
+
+    await workspaceAuthStorage.run(
+      { workspaceId: "ws_self", accountId: "acc_1", expiresAt: 999_999_999_999 },
+      async () => {
+        hook!(buildCompletedContext());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+    );
+
+    expect(captures.length).toBe(1);
+    expect(captures[0].url).toBe("https://auth.example.com/api/auth-internal/spend");
+    const body = JSON.parse(captures[0].body);
+    expect(body.workspaceId).toBe("ws_self");
+    // Raw token counts per OQ-C (daemon writes raw; aggregator
+    // computes cents from rate table).
+    expect(body.turnCount).toBe(1);
+    expect(body.inputTokens).toBe(100);
+    expect(body.cachedInputTokens).toBe(50);
+    expect(body.outputTokens).toBe(30);
+    // UTC day-key from endedAt:"2026-05-26T03:00:00.000Z"
+    expect(body.dayKey).toBe("2026-05-26");
+  });
+
+  it("fires both webhook + spend write when both URLs are configured", async () => {
+    const captures: { url: string }[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      captures.push({ url });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const hook = createCloudTurnEndHook({
+      webhookSinkUrl: "https://sink.example.com/hook",
+      hmacKey: "k",
+      authInternalUrl: "https://auth.example.com",
+      logger,
+      fetchImpl,
+    });
+
+    await workspaceAuthStorage.run(
+      { workspaceId: "ws_self", accountId: "acc_1", expiresAt: 999_999_999_999 },
+      async () => {
+        hook!(buildCompletedContext());
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+    );
+
+    const urls = captures.map((c) => c.url).sort();
+    expect(urls).toEqual([
+      "https://auth.example.com/api/auth-internal/spend",
+      "https://sink.example.com/hook",
+    ]);
+  });
+
+  it("skips the spend write when the turn has no usage block", async () => {
+    const captures: { url: string }[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      captures.push({ url });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const hook = createCloudTurnEndHook({
+      webhookSinkUrl: undefined,
+      hmacKey: "k",
+      authInternalUrl: "https://auth.example.com",
+      logger,
+      fetchImpl,
+    });
+
+    await workspaceAuthStorage.run(
+      { workspaceId: "ws_self", accountId: "acc_1", expiresAt: 999_999_999_999 },
+      async () => {
+        hook!({
+          agentId: "agent_uuid_3",
+          provider: "claude",
+          model: null,
+          outcome: "failed",
+          usage: null, // provider returned no usage block
+          error: "no usage",
+          endedAt: "2026-05-26T05:00:00.000Z",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+    );
+
+    expect(captures.length).toBe(0);
   });
 });
