@@ -2,32 +2,33 @@ import type { ProviderSnapshotEntry } from "./agent/agent-sdk-types.js";
 
 // F1 design-out (synthesis C2, 2026-05-26): the cloud daemon does NOT pull
 // the provider catalog from a running container or from S3. It serves a
-// static catalog mirrored from `@orchestra/cloud-shared/src/providers.ts`.
-// Source of truth (proprietary side):
-//   - PROVIDER_SNAPSHOT (the array below)
-//   - PROVIDER_SNAPSHOT_VERSION (the version string below)
+// static catalog at cloud-mode boot, baked into the daemon image.
 //
-// The AGPL fork MUST NOT import from `@orchestra/cloud-shared`. This
-// module is the AGPL-side duplicate; anti-drift CI (deferred follow-up #8
-// from D-1.5 / D-2 — single sweep post-D-3) enforces equality between
-// this file and the cloud-shared source.
+// IMPORTANT — round-3 audit clarification (closes integration-audit B5):
+// this file is the DAEMON-INTERNAL cloud-mode catalog. The shape is
+// `ProviderSnapshotEntry` (defined in `agent/agent-sdk-types.ts`), which is
+// the daemon's own internal type used by `ProviderSnapshotManager` to
+// describe per-cwd provider availability. The static cloud-mode array
+// below is what `ProviderSnapshotManager.getSnapshot()` returns when
+// `isPaseoCloudMode()` is true — bypassing the per-cwd binary probe.
 //
-// COMPAT(provider-snapshot): payload pinned by
-// @orchestra/cloud-shared/src/providers.ts (PLAN-auth-and-shared D-3 Task 7).
-// Auth's GET /api/v1/cloud/providers/snapshot serves the same constant to
-// PLAN-app. Same lifecycle as the daemon image — the constant rotates only
-// on a daemon redeploy. No env var, no S3 fetch, no Docker COPY step.
+// `@orchestra/cloud-shared/src/providers.ts` is a SEPARATE, app-facing
+// manifest with a different shape (`Provider` — used by the mobile app's
+// "Add agent" picker to render labels, icons, and feature flags). The two
+// are NOT a verbatim mirror, despite both being named with "provider":
+//   - This file:      `ProviderSnapshotEntry[]`   (daemon-internal,
+//                                                  per-cwd availability)
+//   - cloud-shared:   `Provider[]`                (app-facing UI manifest)
 //
 // On-host self-host operators get the existing per-cwd refresh path
 // (provider-snapshot-manager.ts default) and never read this constant —
 // the cloud-mode branch in ProviderSnapshotManager.getSnapshot is the
 // single discriminator (F11 preserved).
 //
-// Open-core boundary: same duplication pattern as `cloud-clone.ts`
-// (GitHub-token Secrets Manager id template), `cloud-webhook-events.ts`
-// (D-2 webhook event schemas), and `cloud-quota.ts` (D-3 T-12 quota
-// envelope). The AGPL fork ships the shape; cloud-shared serves the
-// authoritative copy that other proprietary modules import.
+// COMPAT(provider-snapshot): the wire shape `ProviderSnapshotEntry` is
+// part of the daemon's WS protocol contract; new fields must be optional
+// + back-compat per CLAUDE.md. Catalog versioning is tracked by
+// `CLOUD_PROVIDER_SNAPSHOT_VERSION` below — bump on every release.
 
 export const CLOUD_PROVIDER_SNAPSHOT_VERSION = "2026.05-1";
 
