@@ -16,13 +16,22 @@ const CloneRepoBody = z.object({
   repoUrl: z.string().url(),
 });
 
-// T-15 — lifecycle-worker fires a schedule. Body shape verified against
+// T-15 — lifecycle-worker fires a schedule. Body shape verified
+// against
 // `orchestra-cloud-private:d-3-plan-lifecycle-worker/packages/lifecycle-worker/src/routes/schedule-fire-callback.ts`
-// (the worker POSTs `{ scheduleId }` only — workspaceId comes from the
-// daemon's own PASEO_WORKSPACE_ID binding per paseo PR #5, not the wire).
-const ScheduleFireBody = z.object({
-  scheduleId: z.string().min(1),
-});
+// HEAD `7788692` (round-3 audit). The worker's outbound call at
+// line 148 is literally `{ scheduleId }` — workspaceId comes from
+// the daemon's own `PASEO_WORKSPACE_ID` binding (paseo PR #5), not
+// the wire. The route uses `.strict()` so any drift from the worker
+// side (e.g., someone later adds `workspaceId` to the body) produces
+// a clear 400 here at the contract surface, rather than the daemon
+// silently ignoring the extra field. Closes INTEGRATION-NOTE 4 from
+// the resumed-run audit.
+const ScheduleFireBody = z
+  .object({
+    scheduleId: z.string().min(1),
+  })
+  .strict();
 
 // T-16 — download-token internal redemption. Auth's
 // `GET /api/files/download/:tokenId` 302-redirects to the per-workspace

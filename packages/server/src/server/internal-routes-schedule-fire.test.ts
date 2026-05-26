@@ -219,4 +219,28 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  // Round-3 audit (closes INTEGRATION-NOTE 4): the lifecycle worker's
+  // outbound body is verified `{ scheduleId }` only. The daemon's
+  // ScheduleFireBody uses `.strict()` so any future drift (worker
+  // starts also sending `workspaceId`) fails loudly at the daemon's
+  // contract surface instead of being silently dropped.
+  test("extra fields in body → 400 (strict contract; lifecycle-worker must send {scheduleId} only)", async () => {
+    fixture = await buildFixture({
+      scheduleByGetId: {},
+    });
+    const body = JSON.stringify({
+      scheduleId: "abc12345",
+      workspaceId: "ws_extra",
+    });
+    const res = await fetch(`${fixture.url}/api/internal/schedule-fire`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Orchestra-Internal-HMAC": signBody(fixture.hmacKey, body),
+      },
+      body,
+    });
+    expect(res.status).toBe(400);
+  });
 });
