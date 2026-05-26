@@ -2013,6 +2013,14 @@ export const PongMessageSchema = z.object({
   }),
 });
 
+// COMPAT(quota_exceeded): D-3 T-12 (synthesis A8 — 2026-05-26) extends
+// the rpc_error envelope with three optional fields: quotaClass,
+// current, cap. Old clients dispatch on `code` only and fall through
+// to "handler_error" per permission.md:259-261. Envelope shape is
+// pinned by @orchestra/cloud-shared/src/quota.ts (mirrored locally in
+// cloud-quota.ts). Drop the back-compat fall-through to handler_error
+// when the protocol floor includes "quota_exceeded" (target removal:
+// 6 months from D-3 ship).
 export const RpcErrorMessageSchema = z.object({
   type: z.literal("rpc_error"),
   payload: z.object({
@@ -2020,6 +2028,10 @@ export const RpcErrorMessageSchema = z.object({
     requestType: z.string().optional(),
     error: z.string(),
     code: z.string().optional(),
+    // T-12 envelope (synthesis A8): present only when code === "quota_exceeded".
+    quotaClass: z.string().optional(),
+    current: z.number().optional(),
+    cap: z.number().optional(),
   }),
 });
 
