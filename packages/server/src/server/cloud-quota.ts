@@ -33,9 +33,9 @@ export type QuotaClass =
   | "workspace_count"
   | "agent_count"
   | "loop_count"
-  | "outbound_api_spend"
-  | "push_token"
-  | "archived_workspace_count"
+  | "outbound_spend"
+  | "push_token_count"
+  | "workspace_archived_count"
   | (string & {});
 
 /** Camel-case in-TS shape used by the daemon and WS rpc_error envelope. */

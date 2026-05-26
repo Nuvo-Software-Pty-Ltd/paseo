@@ -83,7 +83,7 @@ describe("cloud-spend-writer — T-18 (synthesis A7)", () => {
         new Response(
           JSON.stringify({
             code: "quota_exceeded",
-            quota_class: "outbound_api_spend",
+            quota_class: "outbound_spend",
             current: 500,
             cap: 500,
           }),
@@ -105,7 +105,7 @@ describe("cloud-spend-writer — T-18 (synthesis A7)", () => {
     expect(result.status).toBe(429);
     expect(result.quotaPayload).toEqual({
       code: "quota_exceeded",
-      quotaClass: "outbound_api_spend",
+      quotaClass: "outbound_spend",
       current: 500,
       cap: 500,
     });

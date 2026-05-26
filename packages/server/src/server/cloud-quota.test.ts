@@ -42,14 +42,14 @@ describe("cloud-quota — T-12 envelope (synthesis A8)", () => {
   it("tryParseQuotaExceededBody parses a valid 429 body", () => {
     const body = JSON.stringify({
       code: "quota_exceeded",
-      quota_class: "outbound_api_spend",
+      quota_class: "outbound_spend",
       current: 500.5,
       cap: 500,
     });
     const parsed = tryParseQuotaExceededBody(body);
     expect(parsed).toEqual({
       code: "quota_exceeded",
-      quotaClass: "outbound_api_spend",
+      quotaClass: "outbound_spend",
       current: 500.5,
       cap: 500,
     });
