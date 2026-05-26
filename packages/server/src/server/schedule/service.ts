@@ -7,6 +7,7 @@ import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
 import { getUnattendedModeId } from "../agent/provider-manifest.js";
+import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import type {
@@ -191,6 +192,12 @@ export class ScheduleService {
     validateScheduleCadence(input.cadence);
     const runOnCreate = input.runOnCreate ?? input.cadence.type === "every";
     const nextRunAt = runOnCreate ? now : computeNextRunAt(input.cadence, now);
+    // T-7 (synthesis carryover): persist the workspace + account
+    // claims from the ALS at create-time so the fire-time spawn can
+    // restore them before invoking the agent. F3 design-out: NEVER
+    // accept from a caller; ALWAYS derive from getCurrentWorkspaceAuth.
+    // On-host (no ALS) → both null.
+    const cloudOwner = getCurrentWorkspaceAuth();
     const schedule = await this.store.create({
       name: trimOptionalName(input.name),
       prompt,
@@ -205,12 +212,52 @@ export class ScheduleService {
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
       runs: [],
+      cloudOwnerWorkspaceId: cloudOwner?.workspaceId ?? null,
+      cloudOwnerAccountId: cloudOwner?.accountId ?? null,
     });
     return schedule;
   }
 
   async list(): Promise<StoredSchedule[]> {
     return this.store.list();
+  }
+
+  /**
+   * Public store accessor. Used by the bootstrap caller to wire the
+   * same store into the T-15 `/api/internal/schedule-fire` route — so
+   * the route looks the schedule up via the same DDB / file path the
+   * service itself uses.
+   */
+  getStore(): ScheduleStore {
+    return this.store;
+  }
+
+  /**
+   * Count of schedules whose `nextRunAt` falls within the next
+   * `lookaheadMs` ms (default 30s — one heartbeat window). Consumed by
+   * the cloud-mode heartbeat (T-17, synthesis A6) so the lifecycle
+   * worker's R7 idle-suspend gate does not false-positive on a
+   * workspace whose only activity is a pending schedule that's about
+   * to fire (no agents alive, no WS clients connected).
+   *
+   * Schedules with `status:"paused"` / `"completed"` / `nextRunAt:null`
+   * are excluded. Schedules whose `nextRunAt` has already elapsed are
+   * INCLUDED — they are due to fire and count as "active work".
+   *
+   * The method reads the store directly (no in-memory cache); a cloud
+   * `DynamoScheduleStore` will query DDB per call. The cost is one
+   * partition scan per 30s, acceptable given the per-workspace scope.
+   */
+  async pendingCount(lookaheadMs = 30_000, now: Date = this.now()): Promise<number> {
+    const upperBound = new Date(now.getTime() + lookaheadMs);
+    const schedules = await this.store.list();
+    let count = 0;
+    for (const schedule of schedules) {
+      if (schedule.status !== "active") continue;
+      if (!schedule.nextRunAt) continue;
+      if (new Date(schedule.nextRunAt) <= upperBound) count += 1;
+    }
+    return count;
   }
 
   async inspect(id: string): Promise<StoredSchedule> {
@@ -413,7 +460,26 @@ export class ScheduleService {
     await this.store.put(scheduleWithRun);
 
     try {
-      const result = await this.runner(scheduleWithRun, runId);
+      // T-7 (synthesis carryover): restore the workspaceAuthStorage
+      // context at fire time so the agent spawn finds the per-spawn
+      // ~/.claude credential (cloud-credentials.ts:170-174 fail-loud
+      // branch). On-host records have null cloudOwner* → runner runs
+      // without an ALS context (identical to today's on-host behavior).
+      // expiresAt: schedules outlive a JWT lifetime; set the value to
+      // far-future so any downstream consumer of `expiresAt` treats
+      // the context as still-valid. The schedule's authority comes
+      // from the workspace's existence, not the original JWT's expiry.
+      const result =
+        scheduleWithRun.cloudOwnerWorkspaceId && scheduleWithRun.cloudOwnerAccountId
+          ? await workspaceAuthStorage.run(
+              {
+                workspaceId: scheduleWithRun.cloudOwnerWorkspaceId,
+                accountId: scheduleWithRun.cloudOwnerAccountId,
+                expiresAt: Number.MAX_SAFE_INTEGER,
+              },
+              () => this.runner(scheduleWithRun, runId),
+            )
+          : await this.runner(scheduleWithRun, runId);
       await this.finishRun({
         scheduleId: schedule.id,
         runId,

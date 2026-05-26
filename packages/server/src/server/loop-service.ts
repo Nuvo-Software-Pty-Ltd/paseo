@@ -13,6 +13,7 @@ import type {
 } from "./agent/agent-sdk-types.js";
 import { execCommand, platformShell } from "../utils/spawn.js";
 import { getUnattendedModeId } from "./agent/provider-manifest.js";
+import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "./cloud-auth.js";
 import type { LoopStore } from "./loop-store.js";
 import {
   LoopIterationRecordSchema,
@@ -294,6 +295,12 @@ export class LoopService {
     }
 
     const createdAt = nowIso();
+    // T-7 (synthesis carryover): persist workspace + account claims
+    // from the ALS at create-time. The loop's executeLoop site reads
+    // them at fire time and binds workspaceAuthStorage before invoking
+    // the worker agent. F3 design-out: NEVER from a caller; ALWAYS
+    // from getCurrentWorkspaceAuth.
+    const cloudOwner = getCurrentWorkspaceAuth();
     const record = LoopRecordSchema.parse({
       id: createLoopId(),
       name: normalizeName(input.name),
@@ -325,6 +332,8 @@ export class LoopService {
       activeIteration: null,
       activeWorkerAgentId: null,
       activeVerifierAgentId: null,
+      cloudOwnerWorkspaceId: cloudOwner?.workspaceId ?? null,
+      cloudOwnerAccountId: cloudOwner?.accountId ?? null,
     });
 
     this.loops.set(record.id, record);
@@ -337,7 +346,27 @@ export class LoopService {
     await this.persist();
 
     const abortController = new AbortController();
-    const promise = this.executeLoop(record.id, abortController.signal).finally(() => {
+    // T-7 (synthesis carryover): restore the workspaceAuthStorage
+    // context for the duration of executeLoop so that any
+    // agentManager.createAgent invocations from within finds the
+    // per-spawn ~/.claude credential. On-host records have null
+    // cloudOwner* and the loop runs without an ALS context (identical
+    // to today's on-host behavior). expiresAt: loops outlive a JWT
+    // lifetime; set to far-future since the loop's authority is the
+    // workspace's existence.
+    const run = () => this.executeLoop(record.id, abortController.signal);
+    const promise = (
+      record.cloudOwnerWorkspaceId && record.cloudOwnerAccountId
+        ? workspaceAuthStorage.run(
+            {
+              workspaceId: record.cloudOwnerWorkspaceId,
+              accountId: record.cloudOwnerAccountId,
+              expiresAt: Number.MAX_SAFE_INTEGER,
+            },
+            run,
+          )
+        : run()
+    ).finally(() => {
       this.running.delete(record.id);
     });
     this.running.set(record.id, { abortController, promise });
@@ -358,6 +387,25 @@ export class LoopService {
         updatedAt: record.updatedAt,
         activeIteration: record.activeIteration,
       }));
+  }
+
+  /**
+   * Count of loops currently in `status:"running"`. Consumed by the
+   * cloud-mode heartbeat (T-17, synthesis A6) so the lifecycle worker's
+   * R7 idle-suspend gate does not false-positive on a workspace whose
+   * only activity is a long-running loop with no connected WS clients.
+   *
+   * Reads in-memory state without `await initialize()` — the heartbeat
+   * loop fires every 30s and must be cheap; if initialize() has not
+   * been called yet (rare; pre-first-mutation boot), the result is 0,
+   * which is correct (no loops have been touched, so none are running).
+   */
+  runningCount(): number {
+    let count = 0;
+    for (const record of this.loops.values()) {
+      if (record.status === "running") count += 1;
+    }
+    return count;
   }
 
   async inspectLoop(idOrPrefix: string): Promise<LoopRecord> {

@@ -10,7 +10,7 @@ import {
 const logger = pino({ level: "silent" });
 
 describe("sendDaemonVersionBeacon", () => {
-  it("POSTs to /api/internal/daemon-versions with HMAC signature and the contract body shape", async () => {
+  it("POSTs to /api/auth-internal/daemon-versions with HMAC signature and the contract body shape", async () => {
     let capturedUrl = "";
     let capturedInit: RequestInit | undefined;
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
@@ -30,7 +30,7 @@ describe("sendDaemonVersionBeacon", () => {
     });
 
     expect(result).toEqual({ ok: true, status: 200 });
-    expect(capturedUrl).toBe("https://auth.example.com/api/internal/daemon-versions");
+    expect(capturedUrl).toBe("https://auth.example.com/api/auth-internal/daemon-versions");
     expect(capturedInit?.method).toBe("POST");
 
     const headers = capturedInit?.headers as Record<string, string>;
@@ -65,7 +65,7 @@ describe("sendDaemonVersionBeacon", () => {
       resolveSdkVersion: () => "0.2.0",
     });
 
-    expect(capturedUrl).toBe("https://auth.example.com/api/internal/daemon-versions");
+    expect(capturedUrl).toBe("https://auth.example.com/api/auth-internal/daemon-versions");
   });
 
   it("falls back to 'unknown' when the CLI version probe returns null", async () => {

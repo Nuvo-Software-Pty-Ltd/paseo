@@ -30,6 +30,8 @@ import {
   setAnthropicCredential,
   mintWorkspaceToken,
   listGithubRepos,
+  archiveCloudWorkspace,
+  unarchiveCloudWorkspace,
   OrchestraSessionExpiredError,
 } from "./orchestra-cloud-client";
 
@@ -76,7 +78,8 @@ describe("listWorkspaces", () => {
 
     const result = await listWorkspaces();
 
-    expect(result).toEqual(workspaces);
+    expect(result).toHaveLength(1);
+    expect(result[0].workspaceId).toBe("ws_001");
     expect(global.fetch).toHaveBeenCalledOnce();
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
@@ -96,6 +99,55 @@ describe("listWorkspaces", () => {
   it("throws when no session token is stored", async () => {
     await expect(listWorkspaces()).rejects.toThrow(OrchestraSessionExpiredError);
   });
+
+  it("defaults state to 'active' and archivedAt to null when the wire omits them", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [{ workspaceId: "ws_legacy" }],
+    });
+
+    const [row] = await listWorkspaces();
+    expect(row.state).toBe("active");
+    expect(row.archivedAt).toBeNull();
+  });
+
+  it("parses every cloud workspace state plus archivedAt", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [
+        { workspaceId: "ws_a", state: "active", archivedAt: null },
+        { workspaceId: "ws_s", state: "suspended", archivedAt: null },
+        {
+          workspaceId: "ws_b",
+          state: "billing_locked",
+          archivedAt: null,
+        },
+        {
+          workspaceId: "ws_x",
+          state: "archived",
+          archivedAt: "2026-05-20T12:00:00.000Z",
+        },
+      ],
+    });
+
+    const rows = await listWorkspaces();
+    expect(rows.map((row) => row.state)).toEqual([
+      "active",
+      "suspended",
+      "billing_locked",
+      "archived",
+    ]);
+    expect(rows[3].archivedAt).toBe("2026-05-20T12:00:00.000Z");
+  });
+
+  it("falls back to 'active' when state is an unrecognized value (forward-compat)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaces: [{ workspaceId: "ws_future", state: "exploding" }],
+    });
+    const [row] = await listWorkspaces();
+    expect(row.state).toBe("active");
+  });
 });
 
 describe("createWorkspace", () => {
@@ -109,7 +161,9 @@ describe("createWorkspace", () => {
       displayName: "My Repo",
     });
 
-    expect(result).toEqual(workspace);
+    expect(result.workspaceId).toBe("ws_002");
+    expect(result.state).toBe("active");
+    expect(result.archivedAt).toBeNull();
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       RequestInit,
@@ -142,20 +196,166 @@ describe("setAnthropicCredential", () => {
 });
 
 describe("mintWorkspaceToken", () => {
-  it("calls POST and returns token + expiresAt", async () => {
+  it("200 → active variant with token + expiresAt", async () => {
     await storeSessionToken(TOKEN);
-    const payload = { token: "ws-jwt", expiresAt: 1234567890 };
-    mockFetch(200, payload);
+    mockFetch(200, { token: "ws-jwt", expiresAt: 1234567890 });
 
     const result = await mintWorkspaceToken("ws_002");
 
-    expect(result).toEqual(payload);
+    expect(result).toEqual({ status: "active", token: "ws-jwt", expiresAt: 1234567890 });
     const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
       string,
       RequestInit,
     ];
     expect(url).toContain("/api/v1/cloud/workspaces/ws_002/token");
     expect(init.method).toBe("POST");
+  });
+
+  it("200 with missing token throws (defensive — the server contract guarantees it)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { expiresAt: 1 });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(/missing token/);
+  });
+
+  it("202 → resuming variant with retryAfterMs (lifecycle worker signaled to wake the daemon)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(202, { resuming: true, retryAfterMs: 1500 });
+
+    expect(await mintWorkspaceToken("ws_002")).toEqual({ status: "resuming", retryAfterMs: 1500 });
+  });
+
+  it("202 with no retryAfterMs falls back to 1500 ms default", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(202, { resuming: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({ status: "resuming", retryAfterMs: 1500 });
+  });
+
+  it("402 → billing_locked variant with reactivateUrl", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(402, {
+      error: "Plan inactive",
+      reactivateUrl: "https://orchestra.example/billing",
+    });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "billing_locked",
+      reactivateUrl: "https://orchestra.example/billing",
+    });
+  });
+
+  it("402 with null reactivateUrl is preserved as null", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(402, { error: "Plan inactive", reactivateUrl: null });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "billing_locked",
+      reactivateUrl: null,
+    });
+  });
+
+  it("503 → provisioning variant with retryAfterMs (Day-0 first-connect path)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(503, { error: "Workspace still provisioning", retryAfterMs: 2000 });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "provisioning",
+      retryAfterMs: 2000,
+    });
+  });
+
+  it("409 with canUnarchive disambiguates to archived", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Workspace is archived", canUnarchive: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "archived",
+      canUnarchive: true,
+    });
+  });
+
+  it("409 with retryable disambiguates to provisioning_failed", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Workspace failed to start", retryable: true });
+    expect(await mintWorkspaceToken("ws_002")).toEqual({
+      status: "provisioning_failed",
+      retryable: true,
+    });
+  });
+
+  it("409 with neither disambiguating key throws (unknown 409 shape)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(409, { error: "Some new conflict shape" });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(
+      /Failed to mint workspace token: 409/,
+    );
+  });
+
+  it("401 throws OrchestraSessionExpiredError (auth seam unchanged)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(OrchestraSessionExpiredError);
+  });
+
+  it("500 (and other unexpected codes) throws with the status code", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(500, "internal error");
+    await expect(mintWorkspaceToken("ws_002")).rejects.toThrow(
+      /Failed to mint workspace token: 500/,
+    );
+  });
+});
+
+describe("archiveCloudWorkspace", () => {
+  it("calls POST /api/v1/cloud/workspaces/:id/archive and normalizes the response", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      workspaceId: "ws_007",
+      state: "archived",
+      archivedAt: "2026-05-22T01:00:00.000Z",
+    });
+
+    const result = await archiveCloudWorkspace("ws_007");
+
+    expect(result.state).toBe("archived");
+    expect(result.archivedAt).toBe("2026-05-22T01:00:00.000Z");
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain("/api/v1/cloud/workspaces/ws_007/archive");
+    expect(init.method).toBe("POST");
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(archiveCloudWorkspace("ws_007")).rejects.toThrow(OrchestraSessionExpiredError);
+  });
+
+  it("throws with body details on server error", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(500, "boom");
+    await expect(archiveCloudWorkspace("ws_007")).rejects.toThrow(/500/);
+  });
+});
+
+describe("unarchiveCloudWorkspace", () => {
+  it("calls POST /api/v1/cloud/workspaces/:id/unarchive and normalizes the response", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { workspaceId: "ws_007", state: "active", archivedAt: null });
+
+    const result = await unarchiveCloudWorkspace("ws_007");
+
+    expect(result.state).toBe("active");
+    expect(result.archivedAt).toBeNull();
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain("/api/v1/cloud/workspaces/ws_007/unarchive");
+    expect(init.method).toBe("POST");
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(unarchiveCloudWorkspace("ws_007")).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });
 

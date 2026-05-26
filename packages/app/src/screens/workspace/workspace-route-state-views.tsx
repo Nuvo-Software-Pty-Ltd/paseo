@@ -1,9 +1,11 @@
 import { Text, View } from "react-native";
-import { ArrowLeftToLine, RotateCw, Settings } from "lucide-react-native";
+import { ArrowLeftToLine, CreditCard, RotateCw, Settings } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { CloudResumeSplash } from "@/components/cloud-resume-splash";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { BILLING_LOCKED_PROMPT_COPY } from "@/lib/cloud-workspace-copy";
 import { formatConnectionStatus } from "@/utils/daemons";
 import type { WorkspaceRouteState } from "@/screens/workspace/workspace-route-state";
 
@@ -11,6 +13,7 @@ interface WorkspaceRouteStateActions {
   onRetryHost: () => void;
   onManageHost: () => void;
   onDismissMissingWorkspace: () => void;
+  onManagePlan: () => void;
 }
 
 export function renderWorkspaceRouteGate(input: {
@@ -35,6 +38,10 @@ export function renderWorkspaceRouteGate(input: {
           onDismiss={input.actions.onDismissMissingWorkspace}
         />
       );
+    case "cold-resume":
+      return <CloudResumeSplash />;
+    case "billing-locked":
+      return <WorkspaceBillingLocked onManagePlan={input.actions.onManagePlan} />;
     case "ready":
     case "reconnecting":
       return null;
@@ -114,6 +121,21 @@ function WorkspaceUnreachable({
           </Button>
         </View>
       ) : null}
+    </View>
+  );
+}
+
+function WorkspaceBillingLocked({ onManagePlan }: { onManagePlan: () => void }) {
+  return (
+    <View style={styles.emptyState} testID="workspace-billing-locked">
+      <View style={styles.textStack}>
+        <Text style={styles.title}>{BILLING_LOCKED_PROMPT_COPY}</Text>
+      </View>
+      <View style={styles.actions}>
+        <Button size="sm" variant="default" leftIcon={CreditCard} onPress={onManagePlan}>
+          Manage plan
+        </Button>
+      </View>
     </View>
   );
 }

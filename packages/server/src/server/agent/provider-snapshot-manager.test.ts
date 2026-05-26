@@ -1248,6 +1248,70 @@ describe("ProviderSnapshotManager", () => {
 
     manager.destroy();
   });
+
+  // T-9 synthesis C2: cloud mode bypasses the per-cwd refresh + warmUp
+  // machinery and serves the static cloud-shared mirror directly.
+  describe("cloud-mode (synthesis C2 — T-9)", () => {
+    test("getSnapshot returns the cloud-shared mirror when PASEO_CLOUD_MODE=1", () => {
+      const originalEnv = process.env.PASEO_CLOUD_MODE;
+      process.env.PASEO_CLOUD_MODE = "1";
+      try {
+        const { registry, handles } = createRegistry([createMockProvider({ provider: "claude" })]);
+        const manager = new ProviderSnapshotManager(registry, createTestLogger());
+
+        const snapshot = manager.getSnapshot();
+
+        expect(snapshot.length).toBeGreaterThan(0);
+        const claudeEntry = getProviderEntry(snapshot, "claude");
+        expect(claudeEntry?.status).toBe("ready");
+        expect(claudeEntry?.models?.length ?? 0).toBeGreaterThan(0);
+        // F1 closed: cloud-mode does NOT invoke the per-cwd provider binary.
+        expect(handles.claude?.isAvailable).not.toHaveBeenCalled();
+        expect(handles.claude?.fetchModels).not.toHaveBeenCalled();
+        expect(handles.claude?.fetchModes).not.toHaveBeenCalled();
+
+        manager.destroy();
+      } finally {
+        if (originalEnv === undefined) {
+          delete process.env.PASEO_CLOUD_MODE;
+        } else {
+          process.env.PASEO_CLOUD_MODE = originalEnv;
+        }
+      }
+    });
+
+    test("getSnapshot excludes providers absent from the daemon's registry", () => {
+      const originalEnv = process.env.PASEO_CLOUD_MODE;
+      process.env.PASEO_CLOUD_MODE = "1";
+      try {
+        // Registry intentionally has zero providers to verify filtering.
+        const { registry } = createRegistry([]);
+        const manager = new ProviderSnapshotManager(registry, createTestLogger());
+
+        const snapshot = manager.getSnapshot();
+
+        expect(snapshot).toEqual([]);
+
+        manager.destroy();
+      } finally {
+        if (originalEnv === undefined) {
+          delete process.env.PASEO_CLOUD_MODE;
+        } else {
+          process.env.PASEO_CLOUD_MODE = originalEnv;
+        }
+      }
+    });
+
+    test("getCloudSnapshotVersion exposes the mirror's version string", () => {
+      const { registry } = createRegistry([createMockProvider({ provider: "claude" })]);
+      const manager = new ProviderSnapshotManager(registry, createTestLogger());
+
+      const version = manager.getCloudSnapshotVersion();
+
+      expect(version).toMatch(/^\d{4}\.\d{2}-\d+$/);
+      manager.destroy();
+    });
+  });
 });
 
 function deferred<T>(): Deferred<T> {

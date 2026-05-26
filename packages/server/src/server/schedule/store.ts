@@ -54,7 +54,14 @@ export class FileBackedScheduleStore implements ScheduleStore {
   }
 
   async create(schedule: Omit<StoredSchedule, "id">): Promise<StoredSchedule> {
-    const created = { ...schedule, id: generateScheduleId() };
+    // Re-parse through the schema so any `.default(null)` fields
+    // (T-7 cloudOwner*) populate uniformly — without this, callers
+    // that omit the new fields would receive an object that differs
+    // from what list() returns after re-parsing from disk.
+    const created = StoredScheduleSchema.parse({
+      ...schedule,
+      id: generateScheduleId(),
+    });
     await this.put(created);
     return created;
   }

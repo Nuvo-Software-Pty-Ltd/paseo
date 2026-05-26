@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View, ScrollView } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { QrCode, Link2, ClipboardPaste, ExternalLink, Settings, Cloud } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -111,6 +111,22 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: "center",
     marginTop: theme.spacing[6],
   },
+  sessionExpiredBanner: {
+    width: "100%",
+    maxWidth: 420,
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[3],
+    borderRadius: theme.borderRadius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface1,
+    marginBottom: theme.spacing[3],
+  },
+  sessionExpiredBannerText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    textAlign: "center",
+  },
 }));
 
 function useAnyHostOnline(serverIds: string[]): string | null {
@@ -156,12 +172,17 @@ export interface WelcomeScreenProps {
   onHostAdded?: (profile: HostProfile) => void;
 }
 
+export const SESSION_EXPIRED_BANNER_COPY = "Your session expired. Sign in again to continue.";
+
 export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const appVersion = resolveAppVersion();
   const appVersionText = formatVersionWithPrefix(appVersion);
+  const params = useLocalSearchParams<{ reason?: string | string[] }>();
+  const reason = Array.isArray(params.reason) ? params.reason[0] : params.reason;
+  const showSessionExpiredBanner = reason === "session-expired";
   const [isDirectOpen, setIsDirectOpen] = useState(false);
   const [isPasteLinkOpen, setIsPasteLinkOpen] = useState(false);
   const hosts = useHosts();
@@ -293,6 +314,12 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
               </Pressable>
             ) : null}
           </View>
+
+          {showSessionExpiredBanner ? (
+            <View style={styles.sessionExpiredBanner} testID="welcome-session-expired-banner">
+              <Text style={styles.sessionExpiredBannerText}>{SESSION_EXPIRED_BANNER_COPY}</Text>
+            </View>
+          ) : null}
 
           <View style={styles.actions}>
             {actions.map((action) => (

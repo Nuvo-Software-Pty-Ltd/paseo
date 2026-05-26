@@ -5,6 +5,11 @@ import { resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { withTimeout } from "../../utils/promise-timeout.js";
+import {
+  CLOUD_PROVIDER_SNAPSHOT,
+  CLOUD_PROVIDER_SNAPSHOT_VERSION,
+} from "../cloud-provider-snapshot.js";
+import { isPaseoCloudMode } from "../paseo-env.js";
 import type { AgentProvider, ProviderSnapshotEntry } from "./agent-sdk-types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
 
@@ -53,6 +58,15 @@ export class ProviderSnapshotManager {
   }
 
   getSnapshot(_cwd?: string): ProviderSnapshotEntry[] {
+    // Cloud-mode (synthesis C2): serve the static cloud-shared mirror
+    // directly. The constant rotates only on a daemon redeploy. F1
+    // closed — the catalog is queryable without per-cwd provider-binary
+    // invocation, so the prior-attempt "no models match your search"
+    // failure mode cannot recur.
+    if (isPaseoCloudMode()) {
+      return this.getCloudSnapshot();
+    }
+
     const resolvedCwd = resolveGlobalSnapshotCwd();
     const entries = this.snapshots.get(resolvedCwd);
     if (!entries) {
@@ -156,6 +170,40 @@ export class ProviderSnapshotManager {
       this.emitChange(cwd);
       void this.warmUp(cwd);
     }
+  }
+
+  /**
+   * Cloud-mode snapshot source (synthesis C2). Returns the static
+   * `CLOUD_PROVIDER_SNAPSHOT` constant mirrored from
+   * `@orchestra/cloud-shared/src/providers.ts`. The result is filtered
+   * to providers in the current `providerRegistry` (so a deployment
+   * that excludes a provider for build / licensing reasons does not
+   * surface it). Models / modes pass through unchanged.
+   */
+  private getCloudSnapshot(): ProviderSnapshotEntry[] {
+    const registeredProviders = new Set(this.getProviderIds());
+    const result: ProviderSnapshotEntry[] = [];
+    for (const entry of CLOUD_PROVIDER_SNAPSHOT) {
+      if (!registeredProviders.has(entry.provider)) continue;
+      // Defensive shallow clone of mutable arrays so external callers
+      // can't mutate the constant.
+      const cloned: ProviderSnapshotEntry = { ...entry };
+      if (entry.models) cloned.models = [...entry.models];
+      if (entry.modes) cloned.modes = [...entry.modes];
+      result.push(cloned);
+    }
+    return result;
+  }
+
+  /**
+   * Cloud-mode snapshot version (synthesis C2). Returns the
+   * `CLOUD_PROVIDER_SNAPSHOT_VERSION` constant. The version is purely
+   * informational on the daemon side; the auth service's
+   * `GET /api/v1/cloud/providers/snapshot` route serves the same value
+   * to clients that want to detect catalog rotation.
+   */
+  getCloudSnapshotVersion(): string {
+    return CLOUD_PROVIDER_SNAPSHOT_VERSION;
   }
 
   private createLoadingEntries(): Map<AgentProvider, ProviderSnapshotEntry> {

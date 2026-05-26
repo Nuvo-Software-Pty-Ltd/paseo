@@ -89,6 +89,8 @@ See [docs/development.md](docs/development.md) for full setup, build sync requir
 
 - **All back-compat shims are tagged and dated for cleanup.** Every shim that exists for old-client/old-daemon support carries a `COMPAT(name)` comment with the version it was added in and a target removal date (typically 6 months out). One grep — `rg "COMPAT\("` — should produce the full list of cleanup work. Don't bury back-compat in untagged `??`-fallbacks or optional-chain tunnels — that's how it stops being deletable.
 
+- **Locked user-visible copy lives in single source-of-truth constants.** The 30-day archive GC notice, the Resuming-workspace splash text, and the rest of the cloud-workspace UX strings come straight from `paseo-cloud-daemon/90-cloud-considerations/workspace-lifecycle.md` § "UX copy". They are user-visible promises — treat them as binding. Centralize per-file constants (see `packages/app/src/lib/cloud-workspace-copy.ts`) so a stray refactor cannot silently rephrase them. Unit tests in `cloud-workspace-archive-dialog.test.ts` assert each constant verbatim against the spec.
+
 ## Platform gating
 
 The app runs on iOS, Android, web (browser), and web (Electron desktop). Code is cross-platform by default. Gate only when you must. Import gates from `@/constants/platform`.
