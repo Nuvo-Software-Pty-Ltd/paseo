@@ -76,6 +76,14 @@ export const LoopRecordSchema = z.object({
   activeIteration: z.number().int().positive().nullable(),
   activeWorkerAgentId: z.string().nullable(),
   activeVerifierAgentId: z.string().nullable(),
+  // T-7 (synthesis carryover, 2026-05-26) — cloud-owner persisted
+  // claims so loop iterations spawned post-restart can bind
+  // workspaceAuthStorage before invoking the worker agent. Both
+  // fields default to null for on-host parity (existing on-disk
+  // records load cleanly post-upgrade). F3 design-out: NEVER from
+  // a caller; ALWAYS from getCurrentWorkspaceAuth at create-time.
+  cloudOwnerWorkspaceId: z.string().nullable().default(null),
+  cloudOwnerAccountId: z.string().nullable().default(null),
 });
 
 export const StoredLoopsSchema = z.array(LoopRecordSchema);

@@ -7,6 +7,7 @@ import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
 import { getUnattendedModeId } from "../agent/provider-manifest.js";
+import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import type {
@@ -191,6 +192,12 @@ export class ScheduleService {
     validateScheduleCadence(input.cadence);
     const runOnCreate = input.runOnCreate ?? input.cadence.type === "every";
     const nextRunAt = runOnCreate ? now : computeNextRunAt(input.cadence, now);
+    // T-7 (synthesis carryover): persist the workspace + account
+    // claims from the ALS at create-time so the fire-time spawn can
+    // restore them before invoking the agent. F3 design-out: NEVER
+    // accept from a caller; ALWAYS derive from getCurrentWorkspaceAuth.
+    // On-host (no ALS) → both null.
+    const cloudOwner = getCurrentWorkspaceAuth();
     const schedule = await this.store.create({
       name: trimOptionalName(input.name),
       prompt,
@@ -205,6 +212,8 @@ export class ScheduleService {
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
       runs: [],
+      cloudOwnerWorkspaceId: cloudOwner?.workspaceId ?? null,
+      cloudOwnerAccountId: cloudOwner?.accountId ?? null,
     });
     return schedule;
   }
@@ -441,7 +450,26 @@ export class ScheduleService {
     await this.store.put(scheduleWithRun);
 
     try {
-      const result = await this.runner(scheduleWithRun, runId);
+      // T-7 (synthesis carryover): restore the workspaceAuthStorage
+      // context at fire time so the agent spawn finds the per-spawn
+      // ~/.claude credential (cloud-credentials.ts:170-174 fail-loud
+      // branch). On-host records have null cloudOwner* → runner runs
+      // without an ALS context (identical to today's on-host behavior).
+      // expiresAt: schedules outlive a JWT lifetime; set the value to
+      // far-future so any downstream consumer of `expiresAt` treats
+      // the context as still-valid. The schedule's authority comes
+      // from the workspace's existence, not the original JWT's expiry.
+      const result =
+        scheduleWithRun.cloudOwnerWorkspaceId && scheduleWithRun.cloudOwnerAccountId
+          ? await workspaceAuthStorage.run(
+              {
+                workspaceId: scheduleWithRun.cloudOwnerWorkspaceId,
+                accountId: scheduleWithRun.cloudOwnerAccountId,
+                expiresAt: Number.MAX_SAFE_INTEGER,
+              },
+              () => this.runner(scheduleWithRun, runId),
+            )
+          : await this.runner(scheduleWithRun, runId);
       await this.finishRun({
         scheduleId: schedule.id,
         runId,
