@@ -55,21 +55,28 @@ export interface EmitWebhookEventParams {
   fetchImpl?: typeof fetch;
 }
 
-// INTEGRATION (2026-05-26): auth's POST /api/webhooks/sink expects
-// the envelope shape below (verified against
-// `orchestra-cloud-private:d-3-plan-auth-and-shared/packages/auth/src/routes/webhooks.ts`,
-// SinkBody schema lines 26-33):
+// INTEGRATION (2026-05-26 round-3): auth's POST /api/webhooks/sink
+// canonical SinkBody (verified against
+// `orchestra-cloud-private:d-3-plan-auth-and-shared/packages/auth/src/routes/webhooks.ts`
+// after auth's P2 patch `cb4def1`):
 //
-//   { eventId, eventType, payload, emittedAt, workspaceId?, accountId? }
+//   {
+//     eventId,                                        // randomUUID — idempotent ack key
+//     eventType,                                      // discriminator
+//     eventTime,                                      // ISO wall-clock at emit
+//     eventSchemaVersion: literal("1").default("1"),  // single source of truth
+//     workspaceId?,                                   // partition-key selector
+//     accountId?,                                     // account-side fan-out selector
+//     data,                                           // snake_case wire body from toWire*Event
+//   }
 //
-// The `payload` field is the snake_case wire-body produced by the
-// toWire*Event helpers; the outer envelope carries the audit metadata
-// (eventId for idempotent ack, emittedAt for wall-clock, workspaceId/
-// accountId for partition-key selection on the sink's DDB write).
-//
-// Original D-3 T-8 emit shipped the wire body directly as the POST
-// body — this was the integration mismatch surfaced at the resumed-
-// run audit. Fixed here.
+// History: original D-3 T-8 (commit `f72554f3`) sent the raw wire
+// body directly — caught at resumed-run audit, fixed at `7e9934b5`
+// with the field names `payload` + `emittedAt`. Round-3 audit found
+// the daemon's `payload`/`emittedAt` shape and auth's `data`/
+// `eventTime` shape were the same idea under different names — this
+// rewrite picks auth's canonical names + adds `eventSchemaVersion`
+// (auth side is the source of truth for the wire schema).
 
 interface SinkEnvelope {
   body: string;
@@ -87,14 +94,14 @@ function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
   let eventType: string;
   let workspaceId: string;
   let accountId: string;
-  let payload: unknown;
+  let data: unknown;
   switch (event.eventType) {
     case "workspace.hard_delete_imminent": {
       const parsed = WorkspaceHardDeleteImminentEventSchema.parse(event);
       eventType = parsed.eventType;
       workspaceId = parsed.workspaceId;
       accountId = parsed.accountId;
-      payload = toWireWorkspaceHardDeleteImminentEvent(parsed);
+      data = toWireWorkspaceHardDeleteImminentEvent(parsed);
       break;
     }
     case "workspace.created": {
@@ -102,7 +109,7 @@ function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
       eventType = parsed.eventType;
       workspaceId = parsed.workspaceId;
       accountId = parsed.accountId;
-      payload = toWireWorkspaceCreatedEvent(parsed);
+      data = toWireWorkspaceCreatedEvent(parsed);
       break;
     }
     case "agent.turn_completed": {
@@ -110,7 +117,7 @@ function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
       eventType = parsed.eventType;
       workspaceId = parsed.workspaceId;
       accountId = parsed.accountId;
-      payload = toWireAgentTurnCompletedEvent(parsed);
+      data = toWireAgentTurnCompletedEvent(parsed);
       break;
     }
     case "agent.turn_failed": {
@@ -118,7 +125,7 @@ function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
       eventType = parsed.eventType;
       workspaceId = parsed.workspaceId;
       accountId = parsed.accountId;
-      payload = toWireAgentTurnFailedEvent(parsed);
+      data = toWireAgentTurnFailedEvent(parsed);
       break;
     }
   }
@@ -126,10 +133,11 @@ function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
   const envelope = {
     eventId,
     eventType,
-    payload,
-    emittedAt: new Date().toISOString(),
+    eventTime: new Date().toISOString(),
+    eventSchemaVersion: "1",
     workspaceId,
     accountId,
+    data,
   };
   return {
     body: JSON.stringify(envelope),

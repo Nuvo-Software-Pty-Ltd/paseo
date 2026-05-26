@@ -46,15 +46,17 @@ describe("emitWebhookEvent", () => {
     expect(headers["X-Orchestra-Internal-HMAC"]).toMatch(/^[a-f0-9]{64}$/);
 
     const bodyString = String(capturedInit?.body);
-    // Body is the auth-sink envelope wrapping the snake_case wire
-    // payload. eventId is server-generated; emittedAt is wall-clock.
+    // Body is the auth-sink envelope wrapping the snake_case wire data.
+    // eventId is server-generated; eventTime is wall-clock;
+    // eventSchemaVersion is the canonical "1" literal.
     const parsedBody = JSON.parse(bodyString);
     expect(parsedBody.eventType).toBe("workspace.hard_delete_imminent");
     expect(parsedBody.workspaceId).toBe("ws_abc");
     expect(parsedBody.accountId).toBe("acc_1");
     expect(typeof parsedBody.eventId).toBe("string");
-    expect(typeof parsedBody.emittedAt).toBe("string");
-    expect(parsedBody.payload).toEqual({
+    expect(typeof parsedBody.eventTime).toBe("string");
+    expect(parsedBody.eventSchemaVersion).toBe("1");
+    expect(parsedBody.data).toEqual({
       event_type: "workspace.hard_delete_imminent",
       workspace_id: "ws_abc",
       account_id: "acc_1",
@@ -152,7 +154,7 @@ describe("emitWebhookEvent", () => {
     expect(parsedBody.eventType).toBe("workspace.created");
     expect(parsedBody.workspaceId).toBe("ws_new");
     expect(parsedBody.accountId).toBe("acc_1");
-    expect(parsedBody.payload).toEqual({
+    expect(parsedBody.data).toEqual({
       event_type: "workspace.created",
       workspace_id: "ws_new",
       account_id: "acc_1",
@@ -195,7 +197,7 @@ describe("emitWebhookEvent", () => {
     const parsedBody = JSON.parse(captured!.body);
     expect(parsedBody.eventType).toBe("agent.turn_completed");
     expect(parsedBody.workspaceId).toBe("ws_x");
-    expect(parsedBody.payload).toEqual({
+    expect(parsedBody.data).toEqual({
       event_type: "agent.turn_completed",
       workspace_id: "ws_x",
       account_id: "acc_1",
@@ -240,7 +242,7 @@ describe("emitWebhookEvent", () => {
 
     const parsedBody = JSON.parse(captured!.body);
     expect(parsedBody.eventType).toBe("agent.turn_failed");
-    expect(parsedBody.payload).toEqual({
+    expect(parsedBody.data).toEqual({
       event_type: "agent.turn_failed",
       workspace_id: "ws_y",
       account_id: "acc_1",

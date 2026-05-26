@@ -97,17 +97,18 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
 
     expect(captured).not.toBeNull();
     expect(captured!.url).toBe("https://sink.example.com/hook");
-    // Auth's POST /api/webhooks/sink envelope (resumed-run integration
-    // fix at 7e9934b5): { eventId, eventType, payload, emittedAt,
-    // workspaceId, accountId }; the snake_case wire body lives under
-    // `payload`.
+    // Auth's canonical SinkBody (round-3 re-alignment):
+    // { eventId, eventType, eventTime, eventSchemaVersion: "1",
+    //   workspaceId, accountId, data }
+    // The snake_case wire body lives under `data`.
     const envelope = JSON.parse(captured!.body);
     expect(envelope.eventType).toBe("agent.turn_completed");
     expect(envelope.workspaceId).toBe("ws_self");
     expect(envelope.accountId).toBe("acc_1");
     expect(typeof envelope.eventId).toBe("string");
-    expect(typeof envelope.emittedAt).toBe("string");
-    const body = envelope.payload;
+    expect(typeof envelope.eventTime).toBe("string");
+    expect(envelope.eventSchemaVersion).toBe("1");
+    const body = envelope.data;
     expect(body.event_type).toBe("agent.turn_completed");
     expect(body.workspace_id).toBe("ws_self");
     expect(body.account_id).toBe("acc_1");
@@ -152,7 +153,8 @@ describe("createCloudTurnEndHook (T-8 / synthesis A5)", () => {
     expect(envelope.eventType).toBe("agent.turn_failed");
     expect(envelope.workspaceId).toBe("ws_self");
     expect(envelope.accountId).toBe("acc_1");
-    const body = envelope.payload;
+    expect(envelope.eventSchemaVersion).toBe("1");
+    const body = envelope.data;
     expect(body.event_type).toBe("agent.turn_failed");
     expect(body.error).toBe("Provider 500");
     expect(body.model).toBeNull();
