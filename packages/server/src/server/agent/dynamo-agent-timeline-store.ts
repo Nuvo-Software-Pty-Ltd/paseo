@@ -14,23 +14,32 @@ import type {
 // T-6 (D-3) — durable AgentTimelineStore for cloud mode (cross-restart
 // + cross-instance `agent_stream` catchup).
 //
-// Row layout (daemon-owned local key shape — cloud-shared does NOT
-// yet ship this; the daemon-side mirror at
-// `cloud-shared-mirror.ts:workspaceAgentTimeline` is the source of
-// truth until cloud-shared adopts it):
+// ANTI-DRIFT: wire shape mirrors
+// `@orchestra/cloud-shared/src/{keys,schemas}.ts` (auth-and-shared P4
+// patch `88f3895`). Closes INTEGRATION-NOTE 1 from the resumed run.
+// The cloud-shared mirror at `cloud-shared-mirror.ts` is the verbatim
+// duplicate the daemon imports from (AGPL boundary forbids importing
+// from cloud-shared directly).
 //
+// Row layout (cloud-shared canonical):
 //   pk = "<ws>#agent#timeline"
-//   sk = "<agentId>#<epoch>#<zero-padded-seq>"
+//   sk = "<agentId>#<epoch>#<seq-padded-12>"
+// DDB Item attributes:
+//   { workspaceId, agentId, epoch, seq, eventType, payload, emittedAt }
+//
+// Translation to the daemon's INTERNAL row API (`AgentTimelineRow`
+// from `agent-timeline-store-types.ts`, which stays unchanged):
+//   payload   ↔  item        (the AgentTimelineItem)
+//   emittedAt ↔  timestamp
+// `eventType` is the daemon-side classification —
+// "agent_stream.<item.type>" — so external readers (lifecycle worker,
+// the proprietary catchup module) can filter without parsing the full
+// item payload.
 //
 // The (epoch, seq) cursor is BINDING per agent-stream.md § "Resumption
 // / reconnection". On `appendCommitted`, the daemon writes the row +
 // returns the assigned seq. On `fetchCommitted`, we Query the partition
 // with `begins_with(sk, "<agentId>#<epoch>#")` and slice by cursor.
-//
-// INTEGRATION-NOTE filed in STATUS-daemon.md: the cloud-shared
-// `keys.ts` does not yet include `workspaceAgentTimeline`. Daemon-side
-// definition stands until cloud-shared adopts; anti-drift CI will
-// catch divergence post-D-3 once both sides ship.
 //
 // Throughput: writes are async-with-best-effort per PLAN-daemon T-6's
 // acceptance ("If the DDB write fails, the in-memory append still
@@ -112,21 +121,21 @@ export class DynamoAgentTimelineStore implements AgentTimelineStore {
     const state = await this.ensureEpoch(agentId);
     const seq = state.nextSeq;
     state.nextSeq += 1;
-    const row: AgentTimelineRow = {
-      seq,
-      timestamp: options?.timestamp ?? new Date().toISOString(),
-      item,
-    };
-    const key = this.keys.workspaceAgentTimeline(this.workspaceId, agentId, state.epoch, seq);
+    const timestamp = options?.timestamp ?? new Date().toISOString();
+    const row: AgentTimelineRow = { seq, timestamp, item };
+    const key = this.keys.agentTimeline(this.workspaceId, agentId, state.epoch, seq);
+    // Cloud-shared canonical row body — see ANTI-DRIFT block at top.
     await this.client.put({
       TableName: this.tableName,
       Item: {
         ...key,
+        workspaceId: this.workspaceId,
         agentId,
         epoch: state.epoch,
         seq,
-        timestamp: row.timestamp,
-        item,
+        eventType: deriveEventType(item),
+        payload: item,
+        emittedAt: timestamp,
       },
     });
     return row;
@@ -141,10 +150,12 @@ export class DynamoAgentTimelineStore implements AgentTimelineStore {
         ":prefix": `${agentId}#${epoch}#`,
       },
     });
-    const rows: AgentTimelineRow[] = (result.Items ?? []).map((item) => ({
-      seq: Number(item.seq),
-      timestamp: String(item.timestamp),
-      item: item.item as AgentTimelineItem,
+    // Translate cloud-shared canonical row body back to the daemon's
+    // internal AgentTimelineRow shape (see ANTI-DRIFT block at top).
+    const rows: AgentTimelineRow[] = (result.Items ?? []).map((ddbItem) => ({
+      seq: Number(ddbItem.seq),
+      timestamp: String(ddbItem.emittedAt),
+      item: ddbItem.payload as AgentTimelineItem,
     }));
     rows.sort((a, b) => a.seq - b.seq);
     return rows;
@@ -269,19 +280,31 @@ export class DynamoAgentTimelineStore implements AgentTimelineStore {
   async bulkInsert(agentId: string, rows: readonly AgentTimelineRow[]): Promise<void> {
     const state = await this.ensureEpoch(agentId);
     for (const row of rows) {
-      const key = this.keys.workspaceAgentTimeline(this.workspaceId, agentId, state.epoch, row.seq);
+      const key = this.keys.agentTimeline(this.workspaceId, agentId, state.epoch, row.seq);
       await this.client.put({
         TableName: this.tableName,
         Item: {
           ...key,
+          workspaceId: this.workspaceId,
           agentId,
           epoch: state.epoch,
           seq: row.seq,
-          timestamp: row.timestamp,
-          item: row.item,
+          eventType: deriveEventType(row.item),
+          payload: row.item,
+          emittedAt: row.timestamp,
         },
       });
       if (row.seq >= state.nextSeq) state.nextSeq = row.seq + 1;
     }
   }
+}
+
+// Derive a `eventType` classifier from the daemon's AgentTimelineItem
+// so external readers (lifecycle worker, the proprietary catchup
+// module) can filter without parsing the full payload. The prefix
+// matches the cloud-shared example fixtures
+// (`agent_stream.delta`, `agent_stream.tool_call`, ...).
+function deriveEventType(item: AgentTimelineItem): string {
+  const t = (item as { type?: unknown }).type;
+  return typeof t === "string" && t.length > 0 ? `agent_stream.${t}` : "agent_stream.unknown";
 }

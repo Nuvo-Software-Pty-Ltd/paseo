@@ -37,14 +37,17 @@ export interface CloudSharedKeys {
   workspacePermission(workspaceId: string, permissionId: string): DdbKey;
   workspaceDownloadToken(workspaceId: string, tokenId: string): DdbKey;
   spendDaily(workspaceId: string, yyyyMmDd: string): DdbKey;
-  // NOT in cloud-shared yet (resumed-run integration mismatch): the
-  // agent-timeline key builder is owned by the daemon for T-6. Filed
-  // as INTEGRATION-NOTE in STATUS-daemon.md so cloud-shared can adopt
-  // it post-D-3.
-  workspaceAgentTimeline(workspaceId: string, agentId: string, epoch: string, seq: number): DdbKey;
+  // ANTI-DRIFT: mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:agentTimeline` (auth-and-shared
+  // P4 patch `88f3895`). Closes INTEGRATION-NOTE 1 from the resumed run.
+  // Method name + sort-key padding width (12, matching cloud-shared's
+  // LOOP_STEP_SEQ_WIDTH constant) are wire-shape contracts — any drift
+  // breaks cross-restart catchup or cross-tenant isolation.
+  agentTimeline(workspaceId: string, agentId: string, epoch: string, seq: number): DdbKey;
 }
 
-const TIMELINE_SEQ_WIDTH = 16;
+// ANTI-DRIFT: matches `LOOP_STEP_SEQ_WIDTH` in cloud-shared keys.ts.
+const TIMELINE_SEQ_WIDTH = 12;
 
 export function createCloudSharedKeys(): CloudSharedKeys {
   return {
@@ -79,12 +82,7 @@ export function createCloudSharedKeys(): CloudSharedKeys {
     spendDaily(workspaceId: string, yyyyMmDd: string): DdbKey {
       return { pk: `${workspaceId}#spend`, sk: yyyyMmDd };
     },
-    workspaceAgentTimeline(
-      workspaceId: string,
-      agentId: string,
-      epoch: string,
-      seq: number,
-    ): DdbKey {
+    agentTimeline(workspaceId: string, agentId: string, epoch: string, seq: number): DdbKey {
       const padded = String(seq).padStart(TIMELINE_SEQ_WIDTH, "0");
       return {
         pk: `${workspaceId}#agent#timeline`,
@@ -194,18 +192,28 @@ export const PermissionRowSchema = z
 
 export type PermissionRow = z.infer<typeof PermissionRowSchema>;
 
-// Agent timeline row body — daemon-owned shape (cloud-shared does NOT
-// yet ship this; filed as INTEGRATION-NOTE).
+// ANTI-DRIFT: mirror of
+// `@orchestra/cloud-shared/src/schemas.ts:AgentTimelineEntrySchema`
+// (auth-and-shared P4 patch `88f3895`). Closes INTEGRATION-NOTE 1.
+//
+// Field-by-field correspondence with cloud-shared:
+//   workspaceId, agentId, epoch, seq, eventType, payload, emittedAt
+// Translation to the daemon's INTERNAL `AgentTimelineRow` shape (which
+// is `{seq, timestamp, item}` from `agent/agent-timeline-store-types.ts`):
+//   payload   ↔  item        (the AgentTimelineItem)
+//   emittedAt ↔  timestamp   (ISO string)
+// `DynamoAgentTimelineStore` does the serialization on writes and the
+// reverse on reads, keeping the daemon's in-memory API stable while
+// the DDB wire shape stays verbatim aligned with cloud-shared.
 export const AgentTimelineRowSchema = z
   .object({
+    workspaceId: z.string(),
     agentId: z.string(),
     epoch: z.string(),
     seq: z.number().int().nonnegative(),
-    timestamp: z.string(),
-    // Item payload is the AgentTimelineItem from agent-sdk-types.ts;
-    // we treat it as opaque here (the row serializer doesn't need
-    // to know the shape).
-    item: z.unknown(),
+    eventType: z.string(),
+    payload: z.unknown(),
+    emittedAt: z.string(),
   })
   .passthrough();
 
