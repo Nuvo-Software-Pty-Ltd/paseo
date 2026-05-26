@@ -282,7 +282,12 @@ function resolveDaemonDownloadTarget(daemon?: HostProfile): DownloadTarget {
   return { baseUrl, authHeader, authCredentials };
 }
 
-function buildDownloadUrl(
+// Exported for the cross-instance anti-drift test (T11). The resulting URL
+// must NOT embed the issuer's instance identity — the redemption may land
+// on a different daemon container per
+// paseo-cloud-daemon/90-cloud-considerations/day-1-scope-recommendations.md
+// § HTTP routes (auth-served 302 redirect chain, synthesis § 1 C3).
+export function buildDownloadUrl(
   baseUrl: string,
   token: string,
   authCredentials: { username: string; password: string } | null,

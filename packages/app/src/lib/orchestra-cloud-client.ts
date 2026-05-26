@@ -363,3 +363,86 @@ export function getOrchestraDaemonWsUrl(): string {
 export function getOrchestraAuthUrl(): string {
   return getAuthBaseUrl();
 }
+
+// Out-of-band provider snapshot fetch (PLAN-app Task 4). Closes prior-attempt
+// F1: the model picker is queryable BEFORE any daemon container exists, so
+// the cloud client can render the provider list at app startup. The auth
+// service serves the manifest from a static @orchestra/cloud-shared TS
+// constant (CROSS-STREAM-SYNTHESIS § 1 C2, commit 9dc8972). No auth header
+// — the catalog is account-agnostic and cache-friendly (ETag-driven 304).
+//
+// Anti-drift CI (PLAN-auth-and-shared Task 17) keeps the cloud-shared copy
+// aligned with the AGPL daemon's models.ts source-of-truth.
+
+export interface CloudProviderModelSnapshot {
+  id: string;
+  displayName: string;
+  description: string;
+  contextWindow: number;
+  deprecated: boolean;
+  isDefault?: boolean;
+}
+
+export interface CloudProviderSnapshotEntry {
+  id: string;
+  displayName: string;
+  models: CloudProviderModelSnapshot[];
+}
+
+export interface CloudProvidersSnapshotResponse {
+  version: string;
+  generatedAt: string;
+  providers: CloudProviderSnapshotEntry[];
+}
+
+export async function getCloudProvidersSnapshot(): Promise<CloudProvidersSnapshotResponse> {
+  // No-auth GET — the catalog is the same for every account. The auth
+  // service decides whether to gate by IP / rate-limit; the app does not
+  // attach the session token.
+  const res = await fetch(`${getAuthBaseUrl()}/api/v1/cloud/providers/snapshot`, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch provider snapshot: ${res.status}`);
+  }
+  const body = (await res.json()) as unknown;
+  return normalizeCloudProvidersSnapshot(body);
+}
+
+export function normalizeCloudProvidersSnapshot(body: unknown): CloudProvidersSnapshotResponse {
+  const obj = (body ?? {}) as Record<string, unknown>;
+  const version = typeof obj.version === "string" ? obj.version : "unknown";
+  const generatedAt = typeof obj.generatedAt === "string" ? obj.generatedAt : "";
+  const rawProviders = Array.isArray(obj.providers) ? obj.providers : [];
+  const providers: CloudProviderSnapshotEntry[] = rawProviders
+    .map((rawProvider): CloudProviderSnapshotEntry | null => {
+      const p = (rawProvider ?? {}) as Record<string, unknown>;
+      const id = typeof p.id === "string" ? p.id : null;
+      const displayName = typeof p.displayName === "string" ? p.displayName : (id ?? "Unknown");
+      if (!id) return null;
+      const rawModels = Array.isArray(p.models) ? p.models : [];
+      const models: CloudProviderModelSnapshot[] = rawModels
+        .map((rawModel): CloudProviderModelSnapshot | null => {
+          const m = (rawModel ?? {}) as Record<string, unknown>;
+          const modelId = typeof m.id === "string" ? m.id : null;
+          if (!modelId) return null;
+          const out: CloudProviderModelSnapshot = {
+            id: modelId,
+            displayName: typeof m.displayName === "string" ? m.displayName : modelId,
+            description: typeof m.description === "string" ? m.description : "",
+            contextWindow:
+              typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow)
+                ? m.contextWindow
+                : 0,
+            deprecated: m.deprecated === true,
+          };
+          if (m.isDefault === true) out.isDefault = true;
+          return out;
+        })
+        .filter((m): m is CloudProviderModelSnapshot => m !== null);
+      return { id, displayName, models };
+    })
+    .filter((p): p is CloudProviderSnapshotEntry => p !== null);
+  return { version, generatedAt, providers };
+}

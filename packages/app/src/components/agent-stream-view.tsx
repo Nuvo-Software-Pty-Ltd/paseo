@@ -62,6 +62,14 @@ import { ToolCallDetailsContent } from "./tool-call-details";
 import { QuestionFormCard } from "./question-form-card";
 import { ToolCallSheetProvider } from "./tool-call-sheet";
 import {
+  buildPermissionResponse,
+  isHardAbortAction,
+  resolveDefaultPermissionActions,
+  PERMISSION_DENY_BLOCK_ACTION_ID,
+  PERMISSION_DENY_STOP_ACTION_ID,
+} from "./permission-actions-model";
+import { useAbortedAgentsStore } from "@/stores/aborted-agents-store";
+import {
   buildAgentStreamRenderModel,
   collectAssistantTurnContentForStreamRenderStrategy,
   getStreamNeighborItem,
@@ -1001,21 +1009,7 @@ function PermissionRequestCard({
     if (Array.isArray(request.actions) && request.actions.length > 0) {
       return request.actions;
     }
-    return [
-      {
-        id: "reject",
-        label: "Deny",
-        behavior: "deny",
-        variant: "danger",
-        intent: "dismiss",
-      },
-      {
-        id: "accept",
-        label: isPlanRequest ? "Implement" : "Accept",
-        behavior: "allow",
-        variant: "primary",
-      },
-    ];
+    return resolveDefaultPermissionActions({ isPlanRequest });
   }, [isPlanRequest, request]);
 
   const planMarkdown = useMemo(() => {
@@ -1075,23 +1069,19 @@ function PermissionRequestCard({
     },
     [permission.agentId, permission.request.id, respondToPermission],
   );
+  const markAborted = useAbortedAgentsStore((state) => state.markAborted);
   const handleActionPress = useCallback(
     (action: AgentPermissionAction) => {
       setRespondingActionId(action.id);
-      if (action.behavior === "allow") {
-        handleResponse({
-          behavior: "allow",
-          selectedActionId: action.id,
-        });
-        return;
+      if (isHardAbortAction(action)) {
+        // Record the user-initiated stop BEFORE the wire response so the
+        // abort banner is ready to render the moment the daemon flips the
+        // agent to status:"error" + attentionReason:"error".
+        markAborted(permission.agentId);
       }
-      handleResponse({
-        behavior: "deny",
-        selectedActionId: action.id,
-        message: "Denied by user",
-      });
+      handleResponse(buildPermissionResponse({ action }));
     },
-    [handleResponse],
+    [handleResponse, markAborted, permission.agentId],
   );
 
   const optionsContainerStyle = useMemo(
@@ -1124,7 +1114,10 @@ function PermissionRequestCard({
           const isRespondingAction = respondingActionId === action.id;
           const Icon = action.behavior === "allow" ? ThemedCheckIcon : ThemedXIcon;
           let testID: string;
-          if (action.behavior === "deny") testID = "permission-request-deny";
+          if (action.id === PERMISSION_DENY_STOP_ACTION_ID) testID = "permission-request-stop";
+          else if (action.id === PERMISSION_DENY_BLOCK_ACTION_ID)
+            testID = "permission-request-deny";
+          else if (action.behavior === "deny") testID = "permission-request-deny";
           else if (action.id === "accept" || action.id === "implement")
             testID = "permission-request-accept";
           else testID = `permission-request-action-${action.id}`;
