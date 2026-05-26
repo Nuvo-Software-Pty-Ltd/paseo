@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { cloudHmacFetch, type CloudHmacFetchResult } from "./cloud-hmac-fetch.js";
 import {
@@ -54,54 +55,94 @@ export interface EmitWebhookEventParams {
   fetchImpl?: typeof fetch;
 }
 
-function validateAndSerialize(event: CloudWebhookEvent): {
+// INTEGRATION (2026-05-26): auth's POST /api/webhooks/sink expects
+// the envelope shape below (verified against
+// `orchestra-cloud-private:d-3-plan-auth-and-shared/packages/auth/src/routes/webhooks.ts`,
+// SinkBody schema lines 26-33):
+//
+//   { eventId, eventType, payload, emittedAt, workspaceId?, accountId? }
+//
+// The `payload` field is the snake_case wire-body produced by the
+// toWire*Event helpers; the outer envelope carries the audit metadata
+// (eventId for idempotent ack, emittedAt for wall-clock, workspaceId/
+// accountId for partition-key selection on the sink's DDB write).
+//
+// Original D-3 T-8 emit shipped the wire body directly as the POST
+// body — this was the integration mismatch surfaced at the resumed-
+// run audit. Fixed here.
+
+interface SinkEnvelope {
   body: string;
   eventType: string;
   workspaceId: string;
-} {
+  accountId: string;
+  eventId: string;
+}
+
+function validateAndSerialize(event: CloudWebhookEvent): SinkEnvelope {
   // Re-validate + project to wire shape based on the discriminator. The
   // caller may have built the payload manually (proprietary worker /
   // daemon emit site); catching a bad shape here keeps subscribers from
   // receiving anything off-schema.
+  let eventType: string;
+  let workspaceId: string;
+  let accountId: string;
+  let payload: unknown;
   switch (event.eventType) {
     case "workspace.hard_delete_imminent": {
       const parsed = WorkspaceHardDeleteImminentEventSchema.parse(event);
-      return {
-        body: JSON.stringify(toWireWorkspaceHardDeleteImminentEvent(parsed)),
-        eventType: parsed.eventType,
-        workspaceId: parsed.workspaceId,
-      };
+      eventType = parsed.eventType;
+      workspaceId = parsed.workspaceId;
+      accountId = parsed.accountId;
+      payload = toWireWorkspaceHardDeleteImminentEvent(parsed);
+      break;
     }
     case "workspace.created": {
       const parsed = WorkspaceCreatedEventSchema.parse(event);
-      return {
-        body: JSON.stringify(toWireWorkspaceCreatedEvent(parsed)),
-        eventType: parsed.eventType,
-        workspaceId: parsed.workspaceId,
-      };
+      eventType = parsed.eventType;
+      workspaceId = parsed.workspaceId;
+      accountId = parsed.accountId;
+      payload = toWireWorkspaceCreatedEvent(parsed);
+      break;
     }
     case "agent.turn_completed": {
       const parsed = AgentTurnCompletedEventSchema.parse(event);
-      return {
-        body: JSON.stringify(toWireAgentTurnCompletedEvent(parsed)),
-        eventType: parsed.eventType,
-        workspaceId: parsed.workspaceId,
-      };
+      eventType = parsed.eventType;
+      workspaceId = parsed.workspaceId;
+      accountId = parsed.accountId;
+      payload = toWireAgentTurnCompletedEvent(parsed);
+      break;
     }
     case "agent.turn_failed": {
       const parsed = AgentTurnFailedEventSchema.parse(event);
-      return {
-        body: JSON.stringify(toWireAgentTurnFailedEvent(parsed)),
-        eventType: parsed.eventType,
-        workspaceId: parsed.workspaceId,
-      };
+      eventType = parsed.eventType;
+      workspaceId = parsed.workspaceId;
+      accountId = parsed.accountId;
+      payload = toWireAgentTurnFailedEvent(parsed);
+      break;
     }
   }
+  const eventId = randomUUID();
+  const envelope = {
+    eventId,
+    eventType,
+    payload,
+    emittedAt: new Date().toISOString(),
+    workspaceId,
+    accountId,
+  };
+  return {
+    body: JSON.stringify(envelope),
+    eventType,
+    workspaceId,
+    accountId,
+    eventId,
+  };
 }
 
 export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<WebhookEmitResult> {
   const { subscriberUrl, hmacKey, event, logger } = params;
-  const { body, eventType, workspaceId } = validateAndSerialize(event);
+  const { body, eventType, workspaceId, eventId } = validateAndSerialize(event);
 
   const result = await cloudHmacFetch({
     url: subscriberUrl,
@@ -109,7 +150,7 @@ export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<
     body,
     logger,
     ...(params.fetchImpl !== undefined ? { fetchImpl: params.fetchImpl } : {}),
-    logContext: { eventType, workspaceId },
+    logContext: { eventType, workspaceId, eventId },
     failureLogLabel: "Webhook emit",
   });
 
@@ -120,6 +161,7 @@ export async function emitWebhookEvent(params: EmitWebhookEventParams): Promise<
         subscriberUrl,
         eventType,
         workspaceId,
+        eventId,
       },
       "Webhook emit delivered",
     );
