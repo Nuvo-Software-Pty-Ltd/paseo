@@ -32,6 +32,8 @@ import {
   listGithubRepos,
   archiveCloudWorkspace,
   unarchiveCloudWorkspace,
+  getCloudProvidersSnapshot,
+  normalizeCloudProvidersSnapshot,
   OrchestraSessionExpiredError,
 } from "./orchestra-cloud-client";
 
@@ -356,6 +358,82 @@ describe("unarchiveCloudWorkspace", () => {
     await storeSessionToken(TOKEN);
     mockFetch(401, { error: "unauthorized" });
     await expect(unarchiveCloudWorkspace("ws_007")).rejects.toThrow(OrchestraSessionExpiredError);
+  });
+});
+
+describe("getCloudProvidersSnapshot", () => {
+  it("fetches GET /api/v1/cloud/providers/snapshot WITHOUT auth header", async () => {
+    const snapshot = {
+      version: "2026.05-1",
+      generatedAt: "2026-05-26T00:00:00.000Z",
+      providers: [
+        {
+          id: "anthropic",
+          displayName: "Anthropic Claude",
+          models: [
+            {
+              id: "claude-opus-4-7",
+              displayName: "Opus 4.7",
+              description: "Opus 4.7 · Latest release",
+              contextWindow: 200000,
+              deprecated: false,
+            },
+          ],
+        },
+      ],
+    };
+    mockFetch(200, snapshot);
+
+    const result = await getCloudProvidersSnapshot();
+    expect(result).toEqual(snapshot);
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain("/api/v1/cloud/providers/snapshot");
+    // F1-closed: no Authorization header — the catalog is account-agnostic.
+    const headers = (init.headers as Record<string, string>) ?? {};
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("throws a useful error on non-2xx", async () => {
+    mockFetch(503, { error: "snapshot unavailable" });
+    await expect(getCloudProvidersSnapshot()).rejects.toThrow(/503/);
+  });
+});
+
+describe("normalizeCloudProvidersSnapshot", () => {
+  it("rejects providers without an id (forward-compat)", () => {
+    const out = normalizeCloudProvidersSnapshot({
+      version: "x",
+      generatedAt: "y",
+      providers: [{ displayName: "no id" }, { id: "valid", displayName: "Valid", models: [] }],
+    });
+    expect(out.providers.map((p) => p.id)).toEqual(["valid"]);
+  });
+
+  it("preserves isDefault only when explicitly true", () => {
+    const out = normalizeCloudProvidersSnapshot({
+      version: "x",
+      generatedAt: "y",
+      providers: [
+        {
+          id: "p",
+          displayName: "P",
+          models: [{ id: "m1", isDefault: true }, { id: "m2", isDefault: false }, { id: "m3" }],
+        },
+      ],
+    });
+    expect(out.providers[0]?.models[0]?.isDefault).toBe(true);
+    expect(out.providers[0]?.models[1]?.isDefault).toBeUndefined();
+    expect(out.providers[0]?.models[2]?.isDefault).toBeUndefined();
+  });
+
+  it("defaults missing fields to safe values", () => {
+    const out = normalizeCloudProvidersSnapshot({});
+    expect(out.version).toBe("unknown");
+    expect(out.generatedAt).toBe("");
+    expect(out.providers).toEqual([]);
   });
 });
 
