@@ -12,6 +12,13 @@ import { cloudHmacFetch } from "./cloud-hmac-fetch.js";
 // writer for the heartbeat row (auth-service-side, on behalf of the
 // daemon via the HMAC POST below).
 //
+// COMPAT(heartbeat-activeAgents-semantic): the activeAgents counter
+// spans agents + running loops + pending schedules (synthesis A6 —
+// 2026-05-26). Lifecycle-worker's idle-suspend gate (R7) depends on
+// the count, not the discriminator name. Future rename to
+// activeWorkUnits is a Day-N breaking change requiring coordinated
+// worker update.
+//
 // Mechanism: HMAC POST to the auth service (not direct DDB). The daemon
 // container carries no DDB SDK; auth is the single DDB writer (F9).
 // The auth-side route `/api/auth-internal/heartbeat` (owned by
@@ -36,7 +43,27 @@ const DEFAULT_INITIAL_JITTER_MAX_MS = 2_000;
 
 export interface HeartbeatSessionRegistry {
   countConnectedClients(): number;
-  countActiveAgents(): number;
+  /**
+   * Aggregate "active work units" count surfaced on the heartbeat
+   * body as `activeAgents` (field name unchanged per synthesis A6,
+   * 2026-05-26). Includes:
+   *   - agent processes in `lifecycle:"running"`
+   *   - loops in `status:"running"` (LoopService.runningCount())
+   *   - schedules whose `nextRunAt` falls within the next heartbeat
+   *     window (ScheduleService.pendingCount())
+   *
+   * The lifecycle worker's R7 idle-suspend gate suspends a workspace
+   * when this count is 0 AND connectedClients is 0. A running loop or
+   * imminent schedule must keep the workspace alive even with no
+   * connected WS clients — otherwise the workspace gets suspended
+   * mid-loop (data-loss-class bug; the rejected ALB-metric path from
+   * D-2 synthesis O-2 had this same failure mode).
+   *
+   * The return type is `Promise<number>` because ScheduleService's
+   * pendingCount reads the store; LoopService.runningCount is
+   * synchronous but composed under one async API for symmetry.
+   */
+  countActiveAgents(): Promise<number>;
 }
 
 export interface HeartbeatWireBody {
@@ -91,10 +118,24 @@ export function startHeartbeatLoop(params: StartHeartbeatLoopParams): HeartbeatL
 
   const tick = async (): Promise<void> => {
     if (stopped) return;
+    let activeAgents: number;
+    try {
+      activeAgents = await sessionRegistry.countActiveAgents();
+    } catch (error) {
+      // The scheduler's pendingCount path may throw on a transient DDB
+      // read failure (cloud-mode). Skip this tick; the next one will
+      // retry on the regular cadence. Critical not to crash the loop —
+      // a missed heartbeat is recoverable; a crashed daemon is not.
+      logger.warn(
+        { err: error, workspaceId },
+        "Heartbeat tick skipped — countActiveAgents() threw",
+      );
+      return;
+    }
     const body: HeartbeatWireBody = {
       workspaceId,
       lastHeartbeat: new Date().toISOString(),
-      activeAgents: sessionRegistry.countActiveAgents(),
+      activeAgents,
       connectedClients: sessionRegistry.countConnectedClients(),
       daemonImageTag,
     };

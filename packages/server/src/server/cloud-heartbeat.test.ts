@@ -11,7 +11,7 @@ const logger = pino({ level: "silent" });
 
 function fakeRegistry(active: number, connected: number): HeartbeatSessionRegistry {
   return {
-    countActiveAgents: () => active,
+    countActiveAgents: async () => active,
     countConnectedClients: () => connected,
   };
 }
@@ -91,7 +91,7 @@ describe("startHeartbeatLoop", () => {
     let active = 1;
     let connected = 1;
     const dynamicRegistry: HeartbeatSessionRegistry = {
-      countActiveAgents: () => active,
+      countActiveAgents: async () => active,
       countConnectedClients: () => connected,
     };
 
@@ -267,6 +267,107 @@ describe("startHeartbeatLoop", () => {
     const parsed = JSON.parse(calls[0].body) as Record<string, unknown>;
     expect("accountId" in parsed).toBe(false);
     expect("repoUrl" in parsed).toBe(false);
+
+    controller.stop();
+  });
+
+  // T-17 / synthesis A6: the registry's countActiveAgents() returns
+  // an aggregate (agents + running loops + pending schedules). The
+  // heartbeat loop must consume the async value verbatim — no separate
+  // fields on the wire; the count is what lifecycle-worker's R7 gate
+  // reads. Field name unchanged ("activeAgents").
+  it("activeAgents includes the registry's aggregate (loops + schedules + agents)", async () => {
+    const { calls, fetchImpl } = makeCapturingFetch();
+
+    const aggregateRegistry: HeartbeatSessionRegistry = {
+      // Caller-side composition: 2 agents + 1 running loop +
+      // 1 pending schedule = 4. The heartbeat loop doesn't know /
+      // care about the breakdown — it sees one number.
+      countActiveAgents: async () => 2 + 1 + 1,
+      countConnectedClients: () => 0,
+    };
+
+    const controller = startHeartbeatLoop({
+      authServiceBaseUrl: "https://auth.example.com",
+      hmacKey: "k",
+      workspaceId: "ws_aggregate",
+      daemonImageTag: "t",
+      sessionRegistry: aggregateRegistry,
+      logger,
+      fetchImpl,
+      initialJitterMaxMs: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    const parsed = JSON.parse(calls[0].body) as HeartbeatWireBody;
+    expect(parsed.activeAgents).toBe(4);
+    expect(parsed.connectedClients).toBe(0);
+
+    controller.stop();
+  });
+
+  it("activeAgents is 0 when no agents, no loops, no pending schedules — lifecycle worker R7 gate proceeds to suspend", async () => {
+    const { calls, fetchImpl } = makeCapturingFetch();
+
+    const idleRegistry: HeartbeatSessionRegistry = {
+      countActiveAgents: async () => 0,
+      countConnectedClients: () => 0,
+    };
+
+    const controller = startHeartbeatLoop({
+      authServiceBaseUrl: "https://auth.example.com",
+      hmacKey: "k",
+      workspaceId: "ws_idle",
+      daemonImageTag: "t",
+      sessionRegistry: idleRegistry,
+      logger,
+      fetchImpl,
+      initialJitterMaxMs: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    const parsed = JSON.parse(calls[0].body) as HeartbeatWireBody;
+    expect(parsed.activeAgents).toBe(0);
+    expect(parsed.connectedClients).toBe(0);
+
+    controller.stop();
+  });
+
+  it("a thrown countActiveAgents() warns and continues without crashing the loop", async () => {
+    const { calls, fetchImpl } = makeCapturingFetch();
+
+    let failNext = true;
+    const flakyRegistry: HeartbeatSessionRegistry = {
+      countActiveAgents: async () => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("transient DDB error");
+        }
+        return 7;
+      },
+      countConnectedClients: () => 0,
+    };
+
+    const controller = startHeartbeatLoop({
+      authServiceBaseUrl: "https://auth.example.com",
+      hmacKey: "k",
+      workspaceId: "ws_flaky",
+      daemonImageTag: "t",
+      sessionRegistry: flakyRegistry,
+      logger,
+      fetchImpl,
+      initialJitterMaxMs: 0,
+    });
+
+    // First tick: countActiveAgents throws → no fetch.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.length).toBe(0);
+
+    // Next tick: recovers; one fetch with activeAgents:7.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(calls.length).toBe(1);
+    const parsed = JSON.parse(calls[0].body) as HeartbeatWireBody;
+    expect(parsed.activeAgents).toBe(7);
 
     controller.stop();
   });

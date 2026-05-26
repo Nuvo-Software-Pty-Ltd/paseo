@@ -147,8 +147,10 @@ import {
   type WorkspaceAuthCallback,
 } from "./auth.js";
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
+import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
+import { FileBackedPermissionStore } from "./agent/permission-store.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
 import {
   startHeartbeatLoop,
@@ -389,11 +391,18 @@ export async function createPaseoDaemon(
   // Internal HMAC-auth'd routes (auth-service → daemon RPC). Mounted BEFORE
   // the workspace-token middleware so they use their own auth mechanism.
   // Only enabled in cloud mode; on-host daemon ignores these routes.
+  // Capture the internal HMAC key + flag so the post-service route
+  // mount (T-15 / T-16, after scheduleService is built below) reuses
+  // the same value. clone-repo is registered here (pre-service) as in
+  // the D-2 deploy; schedule-fire and file-download-internal mount
+  // later in the boot sequence once scheduleService exists.
+  let internalHmacKeyForLateMount: string | null = null;
   if (isPaseoCloudMode()) {
     const internalHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY;
     if (internalHmacKey && internalHmacKey.trim().length > 0) {
       app.use(createInternalRoutes({ hmacKey: internalHmacKey, logger }));
-      logger.info("Internal HMAC-auth'd routes registered (cloud mode)");
+      internalHmacKeyForLateMount = internalHmacKey;
+      logger.info("Internal HMAC-auth'd clone-repo route registered (cloud mode)");
     } else {
       logger.warn(
         "ORCHESTRA_INTERNAL_HMAC_KEY not set — internal routes (clone-repo) disabled. " +
@@ -589,6 +598,16 @@ export async function createPaseoDaemon(
     workspaceGitService,
     isDev: config.isDev === true,
   });
+  // T-4 (D-3) — durable permission queue. On-host gets
+  // FileBackedPermissionStore for parity (new directory under
+  // $PASEO_HOME/permissions/). Cloud-mode (DynamoPermissionStore)
+  // would be wired here once the AWS SDK dep lands; for now the
+  // file-backed store works in both environments and persists
+  // cross-restart.
+  const permissionStore = new FileBackedPermissionStore({
+    paseoHome: config.paseoHome,
+    logger,
+  });
   const agentManager = new AgentManager({
     clients: {
       ...createClientsFromRegistry(providerRegistry, logger),
@@ -596,6 +615,8 @@ export async function createPaseoDaemon(
     },
     providerDefinitions: providerRegistry,
     registry: agentStorage,
+    onAgentTurnEnd: buildCloudTurnEndHook(logger),
+    permissionStore,
     logger,
   });
 
@@ -640,8 +661,20 @@ export async function createPaseoDaemon(
   });
   await scheduleService.start();
   logger.info({ elapsed: elapsed() }, "Schedule service initialized");
+
+  // T-15 / T-16 (D-3): mount the schedule-fire + file-download-internal
+  // routes now that scheduleService is constructed. Extracted helper
+  // keeps createPaseoDaemon under the per-function complexity ceiling.
+  mountLateInternalRoutes(app, logger, internalHmacKeyForLateMount, scheduleService);
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
   const persistedRecords = await agentStorage.list();
+  // T-5 (D-3) — container-boot rehydration. Cloud-mode rehydrates
+  // the in-memory state of services from durable stores BEFORE the
+  // wsServer accepts connections. On-host: ChatService /
+  // LoopService / ScheduleService load lazily on first list/inspect
+  // call; permission queue rehydrates from FileBacked store. On-host
+  // call is effectively a no-op for empty state.
+  await runCloudBootRehydration({ agentManager, chatService, loopService, logger });
   logger.info(
     { elapsed: elapsed() },
     `Agent registry loaded (${persistedRecords.length} record${persistedRecords.length === 1 ? "" : "s"}); agents will initialize on demand`,
@@ -1036,6 +1069,8 @@ export async function createPaseoDaemon(
             heartbeatController = maybeStartCloudHeartbeat({
               wsServer,
               agentManager,
+              loopService,
+              scheduleService,
               logger,
             });
           }
@@ -1134,9 +1169,107 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
 // PLAN-cdk-infra sets PASEO_WORKSPACE_ID in the per-workspace ECS task
 // definition; without it the daemon does not know which workspace's
 // heartbeat to write, so we warn-and-skip rather than write a wrong row.
+/**
+ * T-5 (D-3) — container-boot rehydration. Runs after services are
+ * constructed and before `wsServer.start()` accepts connections.
+ *
+ * What rehydrates:
+ *   - `agentManager.rehydratePendingPermissions()` — reads the
+ *     durable PermissionStore (FileBacked or Dynamo) and re-populates
+ *     each agent's `pendingPermissions: Map`.
+ *   - `chatService.initialize()` + `loopService.initialize()` — these
+ *     already exist on-host and lazy-load the store; calling them at
+ *     boot warms the cache.
+ *
+ * Bounded time: if the rehydration takes >10s, log warn and continue
+ * (the heartbeat lateness is preferable to never starting). Today's
+ * stores are bounded by per-workspace data size so this should be a
+ * sub-second operation in practice.
+ *
+ * Schedule service rehydration is implicit — `scheduleService.start()`
+ * (already called above) recovers interrupted runs.
+ */
+async function runCloudBootRehydration(deps: {
+  agentManager: AgentManager;
+  chatService: ChatService;
+  loopService: LoopService;
+  logger: Logger;
+}): Promise<void> {
+  const started = Date.now();
+  try {
+    await deps.agentManager.rehydratePendingPermissions();
+  } catch (err) {
+    deps.logger.warn({ err }, "rehydratePendingPermissions failed (continuing)");
+  }
+  // chatService + loopService already initialize lazily — call them
+  // here so the first WS RPC doesn't pay the I/O latency. Both are
+  // idempotent (already-initialized = no-op).
+  try {
+    await deps.chatService.initialize();
+  } catch (err) {
+    deps.logger.warn({ err }, "chatService.initialize at boot failed (continuing)");
+  }
+  try {
+    await deps.loopService.initialize();
+  } catch (err) {
+    deps.logger.warn({ err }, "loopService.initialize at boot failed (continuing)");
+  }
+  const elapsedMs = Date.now() - started;
+  if (elapsedMs > 10_000) {
+    deps.logger.warn({ elapsedMs }, "Boot rehydration took >10s");
+  } else {
+    deps.logger.info({ elapsedMs }, "Boot rehydration completed");
+  }
+}
+
+function mountLateInternalRoutes(
+  app: express.Express,
+  logger: Logger,
+  internalHmacKeyForLateMount: string | null,
+  scheduleService: ScheduleService,
+): void {
+  if (!internalHmacKeyForLateMount) return;
+  const workspaceIdForLateRoutes = process.env.PASEO_WORKSPACE_ID?.trim();
+  app.use(
+    createInternalRoutes({
+      hmacKey: internalHmacKeyForLateMount,
+      logger,
+      scheduleService,
+      scheduleStore: scheduleService.getStore(),
+      ...(workspaceIdForLateRoutes ? { expectedWorkspaceId: workspaceIdForLateRoutes } : {}),
+      ...(workspaceIdForLateRoutes
+        ? { workspaceRoot: `/workspace/${workspaceIdForLateRoutes}` }
+        : {}),
+      ...(process.env.ORCHESTRA_AUTH_INTERNAL_URL
+        ? { authInternalUrl: process.env.ORCHESTRA_AUTH_INTERNAL_URL }
+        : {}),
+    }),
+  );
+  logger.info(
+    "Internal HMAC-auth'd schedule-fire + file-download-internal routes registered (cloud mode)",
+  );
+}
+
+// T-8 (synthesis A5 / OQ7 / A8) — cloud-mode turn-end hook. Fires
+// agent.turn_completed / agent.turn_failed webhooks to
+// ORCHESTRA_AUTH_WEBHOOK_SINK_URL. Undefined in on-host mode (AGPL
+// self-host operators get no cloud-side fan-out). Extracted to keep
+// the top-level createPaseoDaemon under the per-function complexity
+// ceiling.
+function buildCloudTurnEndHook(logger: Logger) {
+  return createCloudTurnEndHook({
+    webhookSinkUrl: process.env.ORCHESTRA_AUTH_WEBHOOK_SINK_URL?.trim(),
+    hmacKey: process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim(),
+    authInternalUrl: process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim(),
+    logger,
+  });
+}
+
 function maybeStartCloudHeartbeat(deps: {
   wsServer: VoiceAssistantWebSocketServer;
   agentManager: AgentManager;
+  loopService: LoopService;
+  scheduleService: ScheduleService;
   logger: Logger;
 }): HeartbeatLoopController | null {
   if (!isPaseoCloudMode()) return null;
@@ -1154,11 +1287,21 @@ function maybeStartCloudHeartbeat(deps: {
     );
     return null;
   }
-  const { wsServer, agentManager, logger } = deps;
+  const { wsServer, agentManager, loopService, scheduleService, logger } = deps;
+  // T-17 / synthesis A6: activeAgents spans agents + running loops +
+  // pending schedules. Field name is unchanged per the operator's
+  // 2026-05-26 decision (lifecycle-worker's R7 invariant depends on
+  // the count, not the discriminator name).
   const sessionRegistry: HeartbeatSessionRegistry = {
     countConnectedClients: () => wsServer.listActiveSessions().length,
-    countActiveAgents: () =>
-      agentManager.listAgents().filter((a) => a.lifecycle === "running").length,
+    countActiveAgents: async () => {
+      const runningAgents = agentManager
+        .listAgents()
+        .filter((a) => a.lifecycle === "running").length;
+      const runningLoops = loopService.runningCount();
+      const pendingSchedules = await scheduleService.pendingCount();
+      return runningAgents + runningLoops + pendingSchedules;
+    },
   };
   const controller = startHeartbeatLoop({
     authServiceBaseUrl: heartbeatAuthUrl,

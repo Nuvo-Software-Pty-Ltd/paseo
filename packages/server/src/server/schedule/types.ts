@@ -60,6 +60,22 @@ export const ScheduleRunSchema = z.object({
 });
 export type ScheduleRun = z.infer<typeof ScheduleRunSchema>;
 
+// T-7 (synthesis carryover, 2026-05-26) — cloud-owner fields.
+//
+// In cloud mode the schedule's fire-time spawn site needs the workspace +
+// account claims to bind workspaceAuthStorage before the agent run. The
+// claims are sourced from getCurrentWorkspaceAuth() at create-time and
+// persisted alongside the rest of the record (F3 design-out: NEVER from
+// a caller; ALWAYS from the ALS at the create-call-site).
+//
+// On-host records have both fields null — the FileBackedScheduleStore
+// continues to work unchanged for self-host operators (the ALS is empty
+// outside cloud mode; service.ts:create writes null).
+//
+// Both fields are `.nullable().default(null)` so a pre-D-3 schedule
+// file loaded after the upgrade parses cleanly (forward-compat with
+// existing on-disk records). New writes always set both fields
+// explicitly (null on-host; claims-derived in cloud).
 export const StoredScheduleSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -75,6 +91,9 @@ export const StoredScheduleSchema = z.object({
   expiresAt: z.string().nullable(),
   maxRuns: z.number().int().positive().nullable(),
   runs: z.array(ScheduleRunSchema),
+  // T-7 cloud-owner persisted claims.
+  cloudOwnerWorkspaceId: z.string().nullable().default(null),
+  cloudOwnerAccountId: z.string().nullable().default(null),
 });
 export type StoredSchedule = z.infer<typeof StoredScheduleSchema>;
 

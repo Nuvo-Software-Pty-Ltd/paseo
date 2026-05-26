@@ -48,6 +48,11 @@ import type {
   AgentTimelineStore,
 } from "./agent-timeline-store-types.js";
 import {
+  recordFromRequest,
+  type AgentPermissionRequestRecord,
+  type PermissionStore,
+} from "./permission-store.js";
+import {
   AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
   AgentStreamCoalescer,
 } from "./agent-stream-coalescer.js";
@@ -162,12 +167,83 @@ interface ProviderEnabledFlag {
 type ProviderEnabledMap = Partial<Record<AgentProvider, ProviderEnabledFlag>>;
 type ProviderClientMap = Partial<Record<AgentProvider, AgentClient>>;
 
+/**
+ * Per-turn telemetry surfaced to the AGPL daemon's webhook emit + the
+ * cloud spend-row writer (T-8 / T-18). The shape matches AgentUsage
+ * from agent-sdk-types.ts but exposes nullable cost so the webhook
+ * payload is well-typed for providers that don't surface cost.
+ *
+ * Wiring is via an optional callback injected at AgentManagerOptions.
+ * On-host (and cloud-without-cloud-mode-on) callers omit it; the
+ * cloud-mode bootstrap path provides one that fans out to the webhook
+ * emit (T-8) and the spend-row writer (T-18).
+ */
+export interface AgentTurnEndContext {
+  agentId: string;
+  provider: string;
+  model: string | null;
+  /**
+   * The terminal state of the turn. The webhook + spend writers fire
+   * on both shapes; the spend writer always records token telemetry
+   * (the rate table on the aggregator side handles failed-turn pricing).
+   */
+  outcome: "completed" | "failed";
+  /**
+   * Usage telemetry from the provider session. Nullable on failed
+   * turns where the provider returned no usage block.
+   */
+  usage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    totalCostUsd: number | null;
+  } | null;
+  /**
+   * Failure error message (free-form, provider-specific). Empty
+   * string on `outcome:"completed"`.
+   */
+  error: string;
+  /**
+   * ISO 8601 wall-clock timestamp at the turn-end hook.
+   */
+  endedAt: string;
+}
+
+export type AgentTurnEndCallback = (context: AgentTurnEndContext) => void;
+
 export interface AgentManagerOptions {
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
+  /**
+   * Optional turn-end hook (T-8 webhook emit + T-18 spend-row writer
+   * fan out here in cloud mode). Fired AFTER the turn's terminal
+   * lifecycle update; warn-and-continue on throw — never blocks the
+   * agent's own state transition.
+   */
+  onAgentTurnEnd?: AgentTurnEndCallback;
+  /**
+   * Optional durable permission store (T-4 D-3). When injected, every
+   * mutation to `agent.pendingPermissions` is mirrored to the store
+   * (write-through-cache pattern). On boot, `rehydratePendingPermissions`
+   * reads the store and re-populates the in-memory map.
+   *
+   * On-host parity: `FileBackedPermissionStore` writes to
+   * `<paseoHome>/permissions/<agentId>.json`.
+   * Cloud mode: `DynamoPermissionStore` writes to DDB.
+   * Tests / default: store omitted → behavior unchanged from pre-D-3.
+   *
+   * F9 design-out: this store is the SINGLE persistence layer behind
+   * `pendingPermissions`. Every mutation site goes through the helper
+   * `setPendingPermission` / `deletePendingPermission` methods.
+   *
+   * Write posture: fire-and-forget. The in-memory map is the live
+   * source; store failures warn and continue. Cross-restart resume
+   * reads from the store at boot.
+   */
+  permissionStore?: PermissionStore;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
@@ -437,6 +513,8 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private onAgentAttention?: AgentAttentionCallback;
+  private onAgentTurnEnd?: AgentTurnEndCallback;
+  private permissionStore?: PermissionStore;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
 
@@ -445,6 +523,8 @@ export class AgentManager {
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
+    this.onAgentTurnEnd = options?.onAgentTurnEnd;
+    this.permissionStore = options?.permissionStore;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     this.rescueTimeouts = {
@@ -1749,6 +1829,7 @@ export class AgentManager {
     try {
       const result = await agent.session.respondToPermission(requestId, response);
       agent.pendingPermissions.delete(requestId);
+      this.persistPermissionDelete(agent.id, requestId);
 
       try {
         await this.refreshSessionState(agent);
@@ -1861,6 +1942,7 @@ export class AgentManager {
         });
       }
       agent.pendingPermissions.clear();
+      this.persistPermissionClearAgent(agent.id);
       this.touchUpdatedAt(agent);
       this.emitState(agent);
     }
@@ -1900,6 +1982,83 @@ export class AgentManager {
   private peekPendingPermission(agent: ManagedAgent): AgentPermissionRequest | null {
     const iterator = agent.pendingPermissions.values().next();
     return iterator.done ? null : iterator.value;
+  }
+
+  // T-4 (D-3) — fire-and-forget mirror to the durable permission store.
+  // Called from every pendingPermissions mutation site so cross-restart
+  // resume sees the same set as the in-memory map.
+  private persistPermissionPut(agentId: string, request: AgentPermissionRequest): void {
+    if (!this.permissionStore) return;
+    const record = recordFromRequest(agentId, request);
+    void this.permissionStore.put(record).catch((err) => {
+      this.logger.warn(
+        { err, agentId, requestId: request.id },
+        "permissionStore.put failed (in-memory state still correct)",
+      );
+    });
+  }
+
+  private persistPermissionDelete(agentId: string, requestId: string): void {
+    if (!this.permissionStore) return;
+    void this.permissionStore.delete(agentId, requestId).catch((err) => {
+      this.logger.warn(
+        { err, agentId, requestId },
+        "permissionStore.delete failed (in-memory state still correct)",
+      );
+    });
+  }
+
+  private persistPermissionClearAgent(agentId: string): void {
+    if (!this.permissionStore) return;
+    void this.permissionStore.deleteAllForAgent(agentId).catch((err) => {
+      this.logger.warn(
+        { err, agentId },
+        "permissionStore.deleteAllForAgent failed (in-memory state still correct)",
+      );
+    });
+  }
+
+  /**
+   * T-4 (D-3) rehydration helper. Called by bootstrap.ts at boot
+   * (after services are constructed, before wsServer.start) to
+   * re-populate the in-memory map from the durable store. Cross-
+   * restart agents that had pending permissions before respawn see
+   * them again on `fetch_agents_request`.
+   *
+   * The caller resolves the agent (via agentStorage / agentManager)
+   * before this is invoked; this method only populates the map for
+   * agents the manager already knows about. Records for unknown
+   * agents are logged and skipped.
+   */
+  async rehydratePendingPermissions(): Promise<void> {
+    if (!this.permissionStore) return;
+    let records: AgentPermissionRequestRecord[];
+    try {
+      records = await this.permissionStore.loadAll();
+    } catch (err) {
+      this.logger.warn({ err }, "rehydratePendingPermissions: store.loadAll failed");
+      return;
+    }
+    for (const record of records) {
+      const agent = this.agents.get(record.agentId);
+      if (!agent) {
+        this.logger.debug(
+          { agentId: record.agentId, requestId: record.request.id },
+          "rehydratePendingPermissions: skipping record for unknown agent",
+        );
+        continue;
+      }
+      // record.request is the AgentPermissionRequest mirror; coerce
+      // input from `unknown` to `AgentMetadata`-shaped record (the
+      // wire shape allows any record; the schema in permission-store.ts
+      // stores `z.unknown()` so a runtime cast is safe).
+      const request = record.request as unknown as AgentPermissionRequest;
+      agent.pendingPermissions.set(record.request.id, request);
+    }
+    this.logger.info(
+      { count: records.length },
+      "rehydratePendingPermissions: loaded pending permissions from durable store",
+    );
   }
 
   /**
@@ -2475,8 +2634,15 @@ export class AgentManager {
     try {
       const pending = agent.session.getPendingPermissions();
       agent.pendingPermissions = new Map(pending.map((request) => [request.id, request]));
+      // Mirror to store: clear-then-set so the store matches the
+      // session's view post-reload.
+      this.persistPermissionClearAgent(agent.id);
+      for (const request of pending) {
+        this.persistPermissionPut(agent.id, request);
+      }
     } catch {
       agent.pendingPermissions.clear();
+      this.persistPermissionClearAgent(agent.id);
     }
 
     this.syncFeaturesFromSession(agent);
@@ -2760,6 +2926,10 @@ export class AgentManager {
       this.emitState(agent);
     }
     void this.refreshRuntimeInfo(agent);
+    // T-8 / T-18 turn-end hook (synthesis A7). Warn-and-continue on
+    // throw — the agent's own state transition is final regardless of
+    // the webhook + spend-row outcomes.
+    this.fireTurnEndCallback(agent, "completed", event.usage, "");
   }
 
   private async onStreamTurnFailed(params: {
@@ -2800,6 +2970,55 @@ export class AgentManager {
     this.resolvePendingPermissionsForAgent(agent, event.provider, options, "Turn failed");
     if (!isForegroundEvent) {
       this.emitState(agent);
+    }
+    // T-8 / T-18 turn-end hook for failed turns. Usage may be present
+    // (provider partially streamed before failing) or null (provider
+    // returned no usage block).
+    this.fireTurnEndCallback(
+      agent,
+      "failed",
+      agent.lastUsage,
+      typeof event.error === "string" ? event.error : String(event.error ?? "Turn failed"),
+    );
+  }
+
+  private fireTurnEndCallback(
+    agent: ActiveManagedAgent,
+    outcome: "completed" | "failed",
+    usage:
+      | {
+          inputTokens?: number;
+          cachedInputTokens?: number;
+          outputTokens?: number;
+          totalCostUsd?: number;
+        }
+      | undefined,
+    error: string,
+  ): void {
+    if (!this.onAgentTurnEnd) return;
+    try {
+      this.onAgentTurnEnd({
+        agentId: agent.id,
+        provider: agent.provider,
+        model: agent.config?.model ?? null,
+        outcome,
+        usage:
+          usage === undefined
+            ? null
+            : {
+                inputTokens: usage.inputTokens ?? 0,
+                cachedInputTokens: usage.cachedInputTokens ?? 0,
+                outputTokens: usage.outputTokens ?? 0,
+                totalCostUsd: usage.totalCostUsd ?? null,
+              },
+        error,
+        endedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      this.logger.warn(
+        { err, agentId: agent.id, outcome },
+        "onAgentTurnEnd callback threw — webhook + spend-row writes may be lost for this turn",
+      );
     }
   }
 
@@ -2861,6 +3080,7 @@ export class AgentManager {
   ): void {
     const hadPendingPermissions = agent.pendingPermissions.size > 0;
     agent.pendingPermissions.set(event.request.id, event.request);
+    this.persistPermissionPut(agent.id, event.request);
     if (!hadPendingPermissions && !agent.internal) {
       this.broadcastAgentAttention(agent, "permission");
     }
@@ -2875,6 +3095,7 @@ export class AgentManager {
   }): void {
     const { agent, event, options, flags } = params;
     agent.pendingPermissions.delete(event.requestId);
+    this.persistPermissionDelete(agent.id, event.requestId);
     if (!options?.fromHistory && agent.inFlightPermissionResponses.has(event.requestId)) {
       agent.bufferedPermissionResolutions.set(event.requestId, event);
       flags.shouldDispatchEvent = false;
@@ -2891,6 +3112,7 @@ export class AgentManager {
   ): void {
     for (const [requestId] of agent.pendingPermissions) {
       agent.pendingPermissions.delete(requestId);
+      this.persistPermissionDelete(agent.id, requestId);
       if (!options?.fromHistory) {
         this.dispatchStream(agent.id, {
           type: "permission_resolved",
