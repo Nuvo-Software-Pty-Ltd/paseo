@@ -390,11 +390,18 @@ export async function createPaseoDaemon(
   // Internal HMAC-auth'd routes (auth-service → daemon RPC). Mounted BEFORE
   // the workspace-token middleware so they use their own auth mechanism.
   // Only enabled in cloud mode; on-host daemon ignores these routes.
+  // Capture the internal HMAC key + flag so the post-service route
+  // mount (T-15 / T-16, after scheduleService is built below) reuses
+  // the same value. clone-repo is registered here (pre-service) as in
+  // the D-2 deploy; schedule-fire and file-download-internal mount
+  // later in the boot sequence once scheduleService exists.
+  let internalHmacKeyForLateMount: string | null = null;
   if (isPaseoCloudMode()) {
     const internalHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY;
     if (internalHmacKey && internalHmacKey.trim().length > 0) {
       app.use(createInternalRoutes({ hmacKey: internalHmacKey, logger }));
-      logger.info("Internal HMAC-auth'd routes registered (cloud mode)");
+      internalHmacKeyForLateMount = internalHmacKey;
+      logger.info("Internal HMAC-auth'd clone-repo route registered (cloud mode)");
     } else {
       logger.warn(
         "ORCHESTRA_INTERNAL_HMAC_KEY not set — internal routes (clone-repo) disabled. " +
@@ -642,6 +649,11 @@ export async function createPaseoDaemon(
   });
   await scheduleService.start();
   logger.info({ elapsed: elapsed() }, "Schedule service initialized");
+
+  // T-15 / T-16 (D-3): mount the schedule-fire + file-download-internal
+  // routes now that scheduleService is constructed. Extracted helper
+  // keeps createPaseoDaemon under the per-function complexity ceiling.
+  mountLateInternalRoutes(app, logger, internalHmacKeyForLateMount, scheduleService);
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
   const persistedRecords = await agentStorage.list();
   logger.info(
@@ -1138,6 +1150,34 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
 // PLAN-cdk-infra sets PASEO_WORKSPACE_ID in the per-workspace ECS task
 // definition; without it the daemon does not know which workspace's
 // heartbeat to write, so we warn-and-skip rather than write a wrong row.
+function mountLateInternalRoutes(
+  app: express.Express,
+  logger: Logger,
+  internalHmacKeyForLateMount: string | null,
+  scheduleService: ScheduleService,
+): void {
+  if (!internalHmacKeyForLateMount) return;
+  const workspaceIdForLateRoutes = process.env.PASEO_WORKSPACE_ID?.trim();
+  app.use(
+    createInternalRoutes({
+      hmacKey: internalHmacKeyForLateMount,
+      logger,
+      scheduleService,
+      scheduleStore: scheduleService.getStore(),
+      ...(workspaceIdForLateRoutes ? { expectedWorkspaceId: workspaceIdForLateRoutes } : {}),
+      ...(workspaceIdForLateRoutes
+        ? { workspaceRoot: `/workspace/${workspaceIdForLateRoutes}` }
+        : {}),
+      ...(process.env.ORCHESTRA_AUTH_INTERNAL_URL
+        ? { authInternalUrl: process.env.ORCHESTRA_AUTH_INTERNAL_URL }
+        : {}),
+    }),
+  );
+  logger.info(
+    "Internal HMAC-auth'd schedule-fire + file-download-internal routes registered (cloud mode)",
+  );
+}
+
 // T-8 (synthesis A5 / OQ7 / A8) — cloud-mode turn-end hook. Fires
 // agent.turn_completed / agent.turn_failed webhooks to
 // ORCHESTRA_AUTH_WEBHOOK_SINK_URL. Undefined in on-host mode (AGPL

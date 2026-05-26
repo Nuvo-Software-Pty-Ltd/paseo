@@ -223,6 +223,16 @@ export class ScheduleService {
   }
 
   /**
+   * Public store accessor. Used by the bootstrap caller to wire the
+   * same store into the T-15 `/api/internal/schedule-fire` route — so
+   * the route looks the schedule up via the same DDB / file path the
+   * service itself uses.
+   */
+  getStore(): ScheduleStore {
+    return this.store;
+  }
+
+  /**
    * Count of schedules whose `nextRunAt` falls within the next
    * `lookaheadMs` ms (default 30s — one heartbeat window). Consumed by
    * the cloud-mode heartbeat (T-17, synthesis A6) so the lifecycle
