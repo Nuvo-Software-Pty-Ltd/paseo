@@ -222,6 +222,43 @@ These are operator-side because they cannot be exercised inside this worktree:
 - Total source delta: ~5200 lines added across ~30 files; 4 INTEGRATION-NOTE entries filed inline + here.
 - Zero downstream regressions: 182 D-3 tests + 127 schedule/loop/agent-manager existing tests + 8 bootstrap smoke + 18 workspace-binding all pass.
 
+## Round 3 cleanup
+
+After the resumed run, sibling streams' parallel patches (auth-and-shared P2/P4/P6/P7 + lifecycle-worker schedule-fire-callback) introduced cross-stream divergences that the resumed-run audit table did not yet reflect. The integration-audit pattern repeated: parallel patches → name-only or shape-only drift → re-alignment commits. Five round-3 fixes commit on `d-3-plan-daemon`:
+
+| Fix   | Title                                                    | Commit     | Closes                | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----- | -------------------------------------------------------- | ---------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FIX 1 | Re-align webhook envelope with auth's canonical SinkBody | `77420641` | INTEGRATION-NOTE 2 v2 | Auth's P2 patch (`cb4def1`) finalized the SinkBody as `{eventId, eventType, eventTime, eventSchemaVersion: "1", workspaceId?, accountId?, data}`. The daemon was emitting `{eventId, eventType, payload, emittedAt, workspaceId, accountId}` after the resumed-run fix (`7e9934b5`) — identical info under different names. Renamed `payload→data`, `emittedAt→eventTime`, added `eventSchemaVersion`. 18 webhook + turn-end tests pass.                                              |
+| FIX 2 | Rename QuotaClass literals to match cloud-shared         | `f8893189` | integration-audit B3  | `archived_workspace_count → workspace_archived_count`, `outbound_api_spend → outbound_spend`, `push_token → push_token_count`. Two test fixtures updated (cloud-quota.test.ts + cloud-spend-writer.test.ts). `QuotaClass` is `string`-intersected so unknown literals don't crash the parser. 11 quota tests pass.                                                                                                                                                                    |
+| FIX 3 | Clarify provider snapshot is daemon-internal shape       | `8d57ba7d` | integration-audit B5  | Doc-only — corrected the file-header comment block in `cloud-provider-snapshot.ts`. The file ships `ProviderSnapshotEntry[]` (daemon-internal, per-cwd availability); cloud-shared's `providers.ts` ships `Provider[]` (app-facing UI manifest). They are NOT mirrors. Removed the "anti-drift CI enforces equality" claim. 32 provider-snapshot-manager tests still pass.                                                                                                            |
+| FIX 4 | Align `workspaceAgentTimeline` shape with cloud-shared   | `24fe00e4` | INTEGRATION-NOTE 1    | Auth-and-shared P4 patch (`88f3895`) added `keys.agentTimeline` + `AgentTimelineEntrySchema`. Renamed daemon's `workspaceAgentTimeline → agentTimeline`; changed sort-key padding from 16 → 12 (matches cloud-shared's `LOOP_STEP_SEQ_WIDTH`); rewrote the DDB row body to `{workspaceId, agentId, epoch, seq, eventType, payload, emittedAt}` with on-write/on-read translation to the daemon's internal `AgentTimelineRow`. New `deriveEventType(item)` helper. 8 store tests pass. |
+| FIX 5 | Pin schedule-fire body shape contract                    | `cd12fba4` | INTEGRATION-NOTE 4    | Verified against `lifecycle-worker @ 7788692/.../schedule-fire-callback.ts:148`: the worker POSTs `{scheduleId}` only. Daemon's `ScheduleFireBody` schema now uses `.strict()` so any future drift on the worker side (e.g., adds `workspaceId`) fails loudly with 400 at the daemon's contract surface. New regression test asserts a `{scheduleId, workspaceId}` body returns 400. 7 schedule-fire tests pass (6 existing + 1 new).                                                 |
+
+### What round-3 left untouched
+
+- **INTEGRATION-NOTE 3** (`ORCHESTRA_LIFECYCLE_INTERNAL_URL` missing in CDK) — operator dispatched a separate CDK patch in parallel; daemon side already defaults to warn-and-skip per the original wiring.
+
+### Round-3 test tally
+
+Full D-3 file sweep at round-3 closeout: **183 tests pass across 18 files** (+1 vs. resumed run: the new strict-rejection test for schedule-fire). Typecheck + lint + format clean on every fix commit. Lefthook pre-commit ran on every commit and never blocked.
+
+### Round-3 commits in order
+
+1. `77420641` D-3 daemon: re-align webhook envelope with auth's canonical SinkBody (eventTime+data)
+2. `f8893189` D-3 daemon: rename QuotaClass literals to match cloud-shared (closes integration-audit B3)
+3. `8d57ba7d` D-3 daemon: clarify provider snapshot is daemon-internal shape (closes integration-audit B5)
+4. `24fe00e4` D-3 daemon: align workspaceAgentTimeline shape with cloud-shared (closes INTEGRATION-NOTE 1)
+5. `cd12fba4` D-3 daemon: pin schedule-fire body shape contract (closes INTEGRATION-NOTE 4)
+
+### Updated integration-mismatch status
+
+| INTEGRATION-NOTE                                          | Resumed-run state               | Round-3 state                                                                                        |
+| --------------------------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 1: `workspaceAgentTimeline` key missing from cloud-shared | Daemon defines locally; pending | **Closed** at `24fe00e4` (FIX 4) — daemon mirror now matches cloud-shared P4 (`88f3895`) verbatim.   |
+| 2: Webhook sink envelope shape                            | Fixed at `7e9934b5`             | **Closed** at `77420641` (FIX 1) — second round of re-alignment after auth's P2 finalized the shape. |
+| 3: `ORCHESTRA_LIFECYCLE_INTERNAL_URL` not yet injected    | Pending (CDK side)              | Pending — separate CDK patch in flight; daemon defaults to warn-and-skip already.                    |
+| 4: Schedule-fire body shape                               | Documented (daemon accepts)     | **Closed** at `cd12fba4` (FIX 5) — daemon contract is now `.strict()`-locked + regression test.      |
+
 ## Closing note
 
-This STATUS is the canonical handoff to the operator. Every D-3 task is DONE; every cross-stream contract this stream owes or consumes is wired against the actual sibling-side shape (with four documented INTEGRATION-NOTE entries for mismatches that surfaced during the resumed-run audit). Per the D-2 LEARNINGS pattern, each contract is shipped on both producer and consumer sides — schema mirror + emit site + test coverage + consumer-side reference — so the post-merge integration audit has no surprises. The D-3 hands-on gate is now exercisable once the four sibling branches land in the operator's environment together.
+This STATUS is the canonical handoff to the operator. Every D-3 task is DONE; every cross-stream contract this stream owes or consumes is wired against the actual sibling-side shape after three rounds of integration-audit + re-alignment. Per the D-2 LEARNINGS pattern, each contract is shipped on both producer and consumer sides — schema mirror + emit site + test coverage + consumer-side reference. Round-3 closed three of the four resumed-run INTEGRATION-NOTE entries with verifiable code changes (the fourth is owned by a sibling stream). The D-3 hands-on gate is now exercisable once the sibling branches land in the operator's environment together.
