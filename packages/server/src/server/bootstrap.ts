@@ -668,6 +668,13 @@ export async function createPaseoDaemon(
   mountLateInternalRoutes(app, logger, internalHmacKeyForLateMount, scheduleService);
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
   const persistedRecords = await agentStorage.list();
+  // T-5 (D-3) — container-boot rehydration. Cloud-mode rehydrates
+  // the in-memory state of services from durable stores BEFORE the
+  // wsServer accepts connections. On-host: ChatService /
+  // LoopService / ScheduleService load lazily on first list/inspect
+  // call; permission queue rehydrates from FileBacked store. On-host
+  // call is effectively a no-op for empty state.
+  await runCloudBootRehydration({ agentManager, chatService, loopService, logger });
   logger.info(
     { elapsed: elapsed() },
     `Agent registry loaded (${persistedRecords.length} record${persistedRecords.length === 1 ? "" : "s"}); agents will initialize on demand`,
@@ -1162,6 +1169,59 @@ async function closeAllAgents(logger: Logger, agentManager: AgentManager): Promi
 // PLAN-cdk-infra sets PASEO_WORKSPACE_ID in the per-workspace ECS task
 // definition; without it the daemon does not know which workspace's
 // heartbeat to write, so we warn-and-skip rather than write a wrong row.
+/**
+ * T-5 (D-3) — container-boot rehydration. Runs after services are
+ * constructed and before `wsServer.start()` accepts connections.
+ *
+ * What rehydrates:
+ *   - `agentManager.rehydratePendingPermissions()` — reads the
+ *     durable PermissionStore (FileBacked or Dynamo) and re-populates
+ *     each agent's `pendingPermissions: Map`.
+ *   - `chatService.initialize()` + `loopService.initialize()` — these
+ *     already exist on-host and lazy-load the store; calling them at
+ *     boot warms the cache.
+ *
+ * Bounded time: if the rehydration takes >10s, log warn and continue
+ * (the heartbeat lateness is preferable to never starting). Today's
+ * stores are bounded by per-workspace data size so this should be a
+ * sub-second operation in practice.
+ *
+ * Schedule service rehydration is implicit — `scheduleService.start()`
+ * (already called above) recovers interrupted runs.
+ */
+async function runCloudBootRehydration(deps: {
+  agentManager: AgentManager;
+  chatService: ChatService;
+  loopService: LoopService;
+  logger: Logger;
+}): Promise<void> {
+  const started = Date.now();
+  try {
+    await deps.agentManager.rehydratePendingPermissions();
+  } catch (err) {
+    deps.logger.warn({ err }, "rehydratePendingPermissions failed (continuing)");
+  }
+  // chatService + loopService already initialize lazily — call them
+  // here so the first WS RPC doesn't pay the I/O latency. Both are
+  // idempotent (already-initialized = no-op).
+  try {
+    await deps.chatService.initialize();
+  } catch (err) {
+    deps.logger.warn({ err }, "chatService.initialize at boot failed (continuing)");
+  }
+  try {
+    await deps.loopService.initialize();
+  } catch (err) {
+    deps.logger.warn({ err }, "loopService.initialize at boot failed (continuing)");
+  }
+  const elapsedMs = Date.now() - started;
+  if (elapsedMs > 10_000) {
+    deps.logger.warn({ elapsedMs }, "Boot rehydration took >10s");
+  } else {
+    deps.logger.info({ elapsedMs }, "Boot rehydration completed");
+  }
+}
+
 function mountLateInternalRoutes(
   app: express.Express,
   logger: Logger,
