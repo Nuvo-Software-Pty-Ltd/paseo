@@ -20,7 +20,7 @@ import {
   type WorkspaceRecord,
 } from "@/lib/orchestra-cloud-client";
 import { createWorkspaceTokenTransportFactory } from "@/lib/orchestra-cloud-transport";
-import { connectAndProbe } from "@/utils/test-daemon-connection";
+import { connectAndProbe, DaemonConnectionTestError } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
 import { resolveAppVersion } from "@/utils/app-version";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
@@ -370,6 +370,15 @@ export function OrchestraSetupScreen() {
       if (err instanceof OrchestraSessionExpiredError) {
         // Same as handleCreateWorkspace: defer to the global session-expired
         // bounce; don't paint an inline error the user would see one-frame.
+        return;
+      }
+      // D-3.9: surface the underlying transport-close reason (e.g. "code 1006")
+      // in the inline error so a support session can read it without DevTools.
+      // See paseo-cloud-daemon/D-3-9-investigation.md.
+      if (err instanceof DaemonConnectionTestError) {
+        setError(
+          `${err.message}${err.lastError && err.lastError !== err.message ? ` (${err.lastError})` : ""}`,
+        );
         return;
       }
       setError(err instanceof Error ? err.message : String(err));

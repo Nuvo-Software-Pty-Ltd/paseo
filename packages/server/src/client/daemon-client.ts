@@ -976,10 +976,31 @@ export class DaemonClient {
       );
       this.resetConnectTimeout();
       const timeoutMs = Math.max(1, this.config.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+      // D-3.9 diagnostic logging: chronological trace of the connect path so a
+      // Chrome failure mode where the WS `open` event never reaches JS is
+      // distinguishable from a transport/send failure. See
+      // paseo-cloud-daemon/D-3-9-investigation.md "Diagnostic-logging
+      // recommendation".
+      this.logger.info(
+        {
+          timeoutMs,
+          url: this.config.url,
+          clientType: this.config.clientType ?? "cli",
+          hasTransportFactory: this.config.transportFactory != null,
+        },
+        "DaemonClient.attemptConnect armed",
+      );
       this.connectTimeout = setTimeout(() => {
         if (this.connectionState.status !== "connecting") {
           return;
         }
+        this.logger.warn(
+          {
+            lastError: this.lastErrorValue,
+            connState: this.connectionState.status,
+          },
+          "DaemonClient.connectTimeout fired — no server_info received",
+        );
         this.lastErrorValue = "Connection timed out";
         this.disposeTransport(1001, "Connection timed out");
         this.scheduleReconnect({
@@ -991,6 +1012,7 @@ export class DaemonClient {
 
       this.transportCleanup = [
         transport.onOpen(() => {
+          this.logger.info({}, "DaemonClient.transport.onOpen fired");
           if (this.pendingGenericTransportErrorTimeout) {
             clearTimeout(this.pendingGenericTransportErrorTimeout);
             this.pendingGenericTransportErrorTimeout = null;
@@ -4003,6 +4025,17 @@ export class DaemonClient {
   }
 
   private sendHelloMessage(): void {
+    // D-3.9 diagnostic logging — emitted on entry so a successful
+    // `transport.onOpen fired` line followed by no `sendHelloMessage` line
+    // would indicate a synchronous transport-state failure between onOpen
+    // and here. See paseo-cloud-daemon/D-3-9-investigation.md.
+    this.logger.info(
+      {
+        clientType: this.config.clientType ?? "cli",
+        appVersion: this.config.appVersion ?? null,
+      },
+      "DaemonClient.sendHelloMessage",
+    );
     if (!this.transport) {
       this.scheduleReconnect({
         reason: "Transport unavailable before hello",

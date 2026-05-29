@@ -197,6 +197,18 @@ export function connectAndProbe(
   return new Promise<{ client: DaemonProbeClient; serverId: string; hostname: string | null }>(
     (resolve, reject) => {
       const timer = setTimeout(() => {
+        // D-3.9 diagnostic logging — when the probe times out, surface the
+        // transport-side context so an operator can distinguish "WS upgrade
+        // succeeded but `open` event never fired" from "hello sent, no
+        // server_info response." See
+        // paseo-cloud-daemon/D-3-9-investigation.md.
+        console.warn("[orchestra-setup] connectAndProbe timeout", {
+          timeoutMs,
+          lastError: client.lastError ?? null,
+          serverInfoSeen: client.getLastServerInfoMessage() !== null,
+          url: config.url,
+          clientType: config.clientType ?? null,
+        });
         void client.close().catch(() => undefined);
         reject(
           new DaemonConnectionTestError("Connection timed out", {
