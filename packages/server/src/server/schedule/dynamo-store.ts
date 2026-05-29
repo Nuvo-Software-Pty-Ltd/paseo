@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Logger } from "pino";
 
 import { cloudHmacFetch } from "../cloud-hmac-fetch.js";
-import { resolveCloudStateTableName, type DynamoLike } from "../cloud-dynamo-client.js";
+import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
 import { StoredScheduleSchema, type StoredSchedule, type ScheduleRun } from "./types.js";
 import type { ScheduleStore } from "./store.js";
@@ -72,7 +72,7 @@ export class DynamoScheduleStore implements ScheduleStore {
   constructor(options: DynamoScheduleStoreOptions) {
     this.client = options.client;
     this.workspaceId = options.workspaceId;
-    this.tableName = options.tableName ?? resolveCloudStateTableName();
+    this.tableName = options.tableName ?? resolveDaemonDataTableName();
     this.keys = options.keys ?? createCloudSharedKeys();
     this.logger = options.logger.child({ component: "dynamo-schedule-store" });
     if (options.lifecycleInternalUrl) this.lifecycleInternalUrl = options.lifecycleInternalUrl;
