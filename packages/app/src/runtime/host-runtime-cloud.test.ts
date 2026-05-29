@@ -22,7 +22,11 @@ vi.mock("@/desktop/daemon/desktop-daemon-transport", () => ({
 const hoisted = vi.hoisted(() => {
   return {
     mintWorkspaceToken: vi.fn(() =>
-      Promise.resolve({ token: "minted-jwt", expiresAt: Date.now() + 3600_000 }),
+      Promise.resolve({
+        status: "active" as const,
+        token: "minted-jwt",
+        expiresAt: Date.now() + 3600_000,
+      }),
     ),
     daemonClientCalls: [] as Array<Record<string, unknown>>,
   };
