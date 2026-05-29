@@ -242,6 +242,38 @@ function createNodeWebSocketFactory() {
 }
 
 /**
+ * Logger for the CLI's DaemonClient instances.
+ *
+ * The default consoleLogger in daemon-client.ts routes `info` to console.log,
+ * which writes to stdout. That contract is fine for non-CLI contexts (desktop
+ * app, server-side) but it breaks the CLI's `--json` output contract: any CLI
+ * command that connects to the daemon must emit *only* JSON on stdout so
+ * callers can `JSON.parse(stdout)`.
+ *
+ * Pre-D-3.9 this was latent because daemon-client.ts emitted no `info` calls
+ * during `connect()`. D-3.9 added intentional connect-path diagnostic logging
+ * (DaemonClient.attemptConnect armed / transport.onOpen fired /
+ * sendHelloMessage / connectTimeout fired), which is the correct production
+ * change — but those lines must not land on CLI stdout. Route them to stderr
+ * so `--json` output stays clean.
+ *
+ * Errors and warnings already go to stderr via the default logger, but we
+ * mirror them here for consistency and to keep the contract explicit.
+ */
+const cliDaemonClientLogger = {
+  debug: () => {},
+  info: (obj: object, msg?: string) => {
+    process.stderr.write(`${msg ?? ""} ${JSON.stringify(obj)}\n`);
+  },
+  warn: (obj: object, msg?: string) => {
+    process.stderr.write(`${msg ?? ""} ${JSON.stringify(obj)}\n`);
+  },
+  error: (obj: object, msg?: string) => {
+    process.stderr.write(`${msg ?? ""} ${JSON.stringify(obj)}\n`);
+  },
+};
+
+/**
  * Create and connect a daemon client
  * Returns the connected client or throws if connection fails
  */
@@ -260,6 +292,7 @@ async function tryConnectHost(
     appVersion: resolveCliVersion(),
     password,
     connectTimeoutMs: timeout,
+    logger: cliDaemonClientLogger,
     webSocketFactory: (
       url: string,
       config?: { headers?: Record<string, string>; protocols?: string[] },
@@ -300,6 +333,7 @@ async function connectViaRelayOffer(
     clientType: "cli",
     appVersion: resolveCliVersion(),
     connectTimeoutMs: timeout,
+    logger: cliDaemonClientLogger,
     webSocketFactory: (
       target: string,
       config?: { headers?: Record<string, string>; protocols?: string[] },
