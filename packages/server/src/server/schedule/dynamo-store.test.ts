@@ -131,7 +131,12 @@ describe("DynamoScheduleStore (T-2, synthesis C1)", () => {
     expect(body).toEqual({ workspaceId: WS, scheduleId: created.id });
   });
 
-  test("notify warn-and-continues on non-2xx (Day-1 posture; mirrors D-2 T-4 heartbeat)", async () => {
+  test("D-3.10 follow-up 3: notify failure rolls back meta row + re-throws", async () => {
+    // The lifecycle-worker returns 500 on register-schedule. put()
+    // should DELETE the meta row it just wrote and re-throw so the
+    // caller (ScheduleService.create) surfaces the failure to the
+    // WS client. The DDB partition is left empty — the schedule is
+    // never observable.
     const fetchImpl = vi.fn(
       async () => new Response("nope", { status: 500 }),
     ) as unknown as typeof fetch;
@@ -145,9 +150,104 @@ describe("DynamoScheduleStore (T-2, synthesis C1)", () => {
       hmacKey: "hmac-key",
       fetchImpl,
     });
-    // Should NOT throw — the schedule is still created in DDB.
+    // Should THROW — transactional posture per follow-up 3.
+    await expect(store.create(baseInput())).rejects.toThrow(/register-schedule notify failed/);
+    // Meta row is gone after rollback (no orphan).
+    expect(await store.list()).toEqual([]);
+    // Raw partition is empty — neither meta nor run rows remain.
+    const snapshot = ddb._snapshot();
+    const partitionRows = Array.from(snapshot.values()).filter(
+      (row) => row.pk === `${WS}#schedule`,
+    );
+    expect(partitionRows).toEqual([]);
+  });
+
+  test("D-3.10 follow-up 3: notify failure also rolls back run rows written in same put()", async () => {
+    // When put() is invoked with runs[] (e.g. ScheduleService.fire
+    // appends a running run before calling put()), the rollback must
+    // remove the run rows too — not just the meta row. Otherwise an
+    // orphan run lingers in the partition.
+    let callCount = 0;
+    const fetchImpl = vi.fn(async () => {
+      callCount += 1;
+      // First call (create's notify) succeeds so the schedule lands.
+      // Second call (put with run) fails so we exercise rollback
+      // with runs[] in play.
+      return callCount === 1
+        ? new Response("{}", { status: 200 })
+        : new Response("nope", { status: 500 });
+    }) as unknown as typeof fetch;
+    const ddb = new InMemoryDynamoClient();
+    const store = new DynamoScheduleStore({
+      client: ddb,
+      workspaceId: WS,
+      logger,
+      tableName: TABLE,
+      lifecycleInternalUrl: "https://lifecycle.example.com",
+      hmacKey: "hmac-key",
+      fetchImpl,
+    });
     const created = await store.create(baseInput());
-    expect(created.id).toMatch(/^[0-9a-f]{8}$/);
+    const run: ScheduleRun = {
+      id: "00000000-0000-0000-0000-000000000040",
+      scheduledFor: "2026-05-26T00:01:00.000Z",
+      startedAt: "2026-05-26T00:01:00.000Z",
+      endedAt: null,
+      status: "running",
+      agentId: null,
+      output: null,
+      error: null,
+    };
+    // Attempt to update the schedule with a run inline — notify will
+    // fail and rollback fires.
+    await expect(
+      store.put({
+        ...created,
+        runs: [run],
+      }),
+    ).rejects.toThrow(/register-schedule notify failed/);
+    // After rollback the partition contains NO meta and NO run rows
+    // for this schedule (the rollback removed every row this put()
+    // wrote — both meta and run).
+    const snapshot = ddb._snapshot();
+    const partitionRows = Array.from(snapshot.values()).filter(
+      (row) => row.pk === `${WS}#schedule`,
+    );
+    expect(partitionRows).toEqual([]);
+  });
+
+  test("D-3.10 follow-up 3: notify failure + delete failure logs + re-throws original error", async () => {
+    // Edge case: the rollback DELETE itself fails (e.g. transient DDB
+    // outage). We log loudly, do NOT loop forever, and re-throw the
+    // ORIGINAL notify error so the caller still gets the actionable
+    // failure cause.
+    const fetchImpl = vi.fn(
+      async () => new Response("nope", { status: 500 }),
+    ) as unknown as typeof fetch;
+    const ddb = new InMemoryDynamoClient();
+    // Spy on delete to make it reject.
+    const deleteSpy = vi.spyOn(ddb, "delete").mockRejectedValue(new Error("ddb delete blew up"));
+    const store = new DynamoScheduleStore({
+      client: ddb,
+      workspaceId: WS,
+      logger,
+      tableName: TABLE,
+      lifecycleInternalUrl: "https://lifecycle.example.com",
+      hmacKey: "hmac-key",
+      fetchImpl,
+    });
+    // The thrown error MUST be the original notify error, not the
+    // delete failure — operators read this to understand why the
+    // schedule didn't persist.
+    await expect(store.create(baseInput())).rejects.toThrow(/register-schedule notify failed/);
+    // The rollback DELETE was attempted (deleteSpy called at least
+    // once for the meta row), but failed and we did not loop on it.
+    expect(deleteSpy).toHaveBeenCalled();
+    expect(deleteSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // No more than 5 delete attempts — we do not retry-loop on the
+    // rollback failure (best-effort cleanup, then bail).
+    expect(deleteSpy.mock.calls.length).toBeLessThan(5);
+    deleteSpy.mockRestore();
   });
 
   test("putRun appends a run row + get returns runs sorted by startedAt", async () => {

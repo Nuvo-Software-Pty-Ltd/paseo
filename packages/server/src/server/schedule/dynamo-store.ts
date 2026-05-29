@@ -155,6 +155,16 @@ export class DynamoScheduleStore implements ScheduleStore {
     // The meta record stores the full schedule shape minus runs[] so
     // `loadAll` can reconstruct via Zod parse (the on-disk format is
     // augmented with runs: [] on read, then joined from per-run rows).
+    //
+    // D-3.10 follow-up 3 — transactional rollback on lifecycle-worker
+    // notify failure: if `notifyRegister` rejects we MUST roll back
+    // the DDB writes (meta + run rows just written) so the daemon
+    // never leaves an orphaned schedule row without a backing
+    // EventBridge rule. The original notify error is re-thrown so the
+    // caller (ScheduleService.create / update / pause / resume / fire)
+    // surfaces the failure. If the rollback DELETE itself fails, we
+    // log loudly and re-throw the ORIGINAL notify error — we do NOT
+    // retry-loop on rollback failure (best-effort cleanup).
     const key = this.keys.workspaceSchedule(this.workspaceId, schedule.id);
     const { runs, ...rest } = schedule;
     const recordWithRuns = { ...rest, runs: [] as ScheduleRun[] };
@@ -171,14 +181,60 @@ export class DynamoScheduleStore implements ScheduleStore {
     // The on-host ScheduleStore stores runs[] inline; the cloud layout
     // shards each run as its own row. Compose by writing every run via
     // putRun. This re-writes existing rows idempotently.
+    const writtenRunKeys: { pk: string; sk: string }[] = [];
     for (const run of runs) {
       await this.putRun(schedule.id, run);
+      writtenRunKeys.push(this.keys.workspaceScheduleRun(this.workspaceId, schedule.id, run.id));
     }
     // Notify lifecycle worker so EventBridge picks up the new
     // cadence / nextRunAt (the worker dedupes by scheduleId).
     // Single notify per put — create() calls put(), so there's
     // exactly one notify per public mutation.
-    await this.notifyRegister(schedule);
+    try {
+      await this.notifyRegister(schedule);
+    } catch (err) {
+      await this.rollbackPutOrLog(schedule.id, key, writtenRunKeys, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Best-effort rollback for `put()` when `notifyRegister` rejects.
+   * Deletes the meta row + every run row written in the same `put()`
+   * call. If a delete itself errors, log loudly and CONTINUE deleting
+   * the rest — we do NOT loop forever; the operator gets a clear
+   * "rollback partially failed" signal in the logs and the original
+   * notify error is still re-thrown by the caller.
+   */
+  private async rollbackPutOrLog(
+    scheduleId: string,
+    metaKey: { pk: string; sk: string },
+    runKeys: { pk: string; sk: string }[],
+    originalError: unknown,
+  ): Promise<void> {
+    const deletes: Promise<void>[] = [
+      this.client.delete(this.tableName, metaKey).catch((deleteErr) => {
+        this.logger.error(
+          { err: deleteErr, scheduleId, pk: metaKey.pk, sk: metaKey.sk },
+          "D-3.10 follow-up 3: rollback DELETE of schedule meta row FAILED — orphan row may remain",
+        );
+      }),
+    ];
+    for (const runKey of runKeys) {
+      deletes.push(
+        this.client.delete(this.tableName, runKey).catch((deleteErr) => {
+          this.logger.error(
+            { err: deleteErr, scheduleId, pk: runKey.pk, sk: runKey.sk },
+            "D-3.10 follow-up 3: rollback DELETE of schedule run row FAILED — orphan row may remain",
+          );
+        }),
+      );
+    }
+    await Promise.all(deletes);
+    this.logger.warn(
+      { err: originalError, scheduleId },
+      "D-3.10 follow-up 3: schedule put rolled back after notifyRegister failure",
+    );
   }
 
   async delete(id: string): Promise<void> {
@@ -223,6 +279,10 @@ export class DynamoScheduleStore implements ScheduleStore {
 
   private async notifyRegister(schedule: StoredSchedule): Promise<void> {
     if (!this.lifecycleInternalUrl || !this.hmacKey) {
+      // Skip case: lifecycle-worker integration not configured (dev
+      // without `ORCHESTRA_LIFECYCLE_INTERNAL_URL`). Logged at debug;
+      // no rollback triggered — the put() succeeds with no EventBridge
+      // backing, which is the dev-environment behavior.
       this.logger.debug(
         { scheduleId: schedule.id },
         "register-schedule notify skipped (no ORCHESTRA_LIFECYCLE_INTERNAL_URL / HMAC key)",
@@ -245,11 +305,15 @@ export class DynamoScheduleStore implements ScheduleStore {
       failureLogLabel: "register-schedule",
     });
     if (!result.ok) {
-      // Warn-and-continue posture per D-2 T-4 heartbeat: a transient
-      // lifecycle-worker outage must not block schedule creation.
-      this.logger.warn(
-        { scheduleId: schedule.id, status: result.status },
-        "register-schedule notify non-2xx",
+      // D-3.10 follow-up 3 — throw so `put()` rolls back the meta row
+      // it just wrote. Previously this was warn-and-continue (matching
+      // the D-2 T-4 heartbeat posture) but that left the DDB row
+      // orphaned without an EventBridge rule; the operator chose
+      // transactional semantics over no-op-on-transient-failure.
+      throw new Error(
+        `register-schedule notify failed (status=${result.status ?? "network"}, scheduleId=${
+          schedule.id
+        })`,
       );
     }
   }
