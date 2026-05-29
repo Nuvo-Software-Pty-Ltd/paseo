@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react";
-import { useRouter } from "expo-router";
+import { useRouter, type Href } from "expo-router";
 import { clearSession, onOrchestraSessionExpired } from "@/lib/orchestra-cloud-client";
 import { createSessionExpiredBounce } from "./orchestra-session-bounce";
 
@@ -9,7 +9,7 @@ export function OrchestraSessionProvider({ children }: { children: ReactNode }) 
   useEffect(() => {
     const bounce = createSessionExpiredBounce({
       clearSession,
-      replace: (route) => router.replace(route),
+      replace: (route) => router.replace(route as Href),
     });
     const unsubscribe = onOrchestraSessionExpired(() => {
       bounce.trigger();

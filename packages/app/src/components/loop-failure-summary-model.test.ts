@@ -99,6 +99,8 @@ const ROUND_19_CAP_LOOP: LoopRecord = {
   activeIteration: null,
   activeWorkerAgentId: null,
   activeVerifierAgentId: null,
+  cloudOwnerWorkspaceId: null,
+  cloudOwnerAccountId: null,
 };
 
 describe("buildLoopFailureSummaryModel", () => {
