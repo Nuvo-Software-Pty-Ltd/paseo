@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { isWeb } from "@/constants/platform";
+import { deriveDaemonWsUrlForWorkspace } from "@/utils/orchestra-daemon-url";
 
 const SESSION_TOKEN_KEY = "orchestra:session_token";
 
@@ -7,13 +8,6 @@ const DEFAULT_AUTH_URL = "http://orchestra-dev-1104346820.ap-southeast-2.elb.ama
 
 function getAuthBaseUrl(): string {
   return process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL?.trim() || DEFAULT_AUTH_URL;
-}
-
-function getDaemonWsUrl(): string {
-  const base = process.env.EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL?.trim() || DEFAULT_AUTH_URL;
-  const wsScheme = base.startsWith("https") ? "wss" : "ws";
-  const httpStripped = base.replace(/^https?:\/\//, "");
-  return `${wsScheme}://${httpStripped}/ws`;
 }
 
 export type CloudWorkspaceState = "active" | "suspended" | "billing_locked" | "archived";
@@ -356,8 +350,13 @@ export async function listGithubRepos(): Promise<
   return (await res.json()) as Array<{ full_name: string; private: boolean; updated_at: string }>;
 }
 
-export function getOrchestraDaemonWsUrl(): string {
-  return getDaemonWsUrl();
+// D-3.4: Derive the per-workspace daemon WebSocket URL from the workspaceId.
+// Replaces the single-workspace `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL` fallback —
+// every workspace's WS URL is now derived at probe time, so a single app build
+// can reach any workspace the user owns. See utils/orchestra-daemon-url.ts for
+// the env-var contract (hostname suffix + dev override).
+export function getOrchestraDaemonWsUrl(workspaceId: string): string {
+  return deriveDaemonWsUrlForWorkspace(workspaceId);
 }
 
 export function getOrchestraAuthUrl(): string {

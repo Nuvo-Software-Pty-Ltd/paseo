@@ -324,7 +324,10 @@ export function OrchestraSetupScreen() {
         return;
       }
       const token = mintResult.token;
-      const wsUrl = getOrchestraDaemonWsUrl();
+      // D-3.4: WS URL is derived from the workspaceId so a single app build
+      // can address every workspace the user owns. EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL
+      // remains as a dev-only single-workspace override.
+      const wsUrl = getOrchestraDaemonWsUrl(fresh.workspaceId);
       const clientId = await getOrCreateClientId();
       const transportFactory = createWorkspaceTokenTransportFactory(token);
 

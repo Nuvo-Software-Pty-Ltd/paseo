@@ -22,11 +22,12 @@ npm run build:web      # Output in dist/
 
 ## Environment variables
 
-| Variable                              | Purpose                                          | Default                                                             |
-| ------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------- |
-| `EXPO_PUBLIC_ORCHESTRA_AUTH_URL`      | Orchestra auth service base URL                  | `http://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com`  |
-| `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL` | Orchestra daemon WebSocket URL                   | `ws://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com/ws` |
-| `EXPO_PUBLIC_ENABLE_AUDIO_DEBUG`      | Set to `1` to render the in-app audio debug card | (unset)                                                             |
+| Variable                                       | Purpose                                                                                                                                                                                                      | Default                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `EXPO_PUBLIC_ORCHESTRA_AUTH_URL`               | Orchestra auth service base URL                                                                                                                                                                              | `http://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com` |
+| `EXPO_PUBLIC_ORCHESTRA_DAEMON_HOSTNAME_SUFFIX` | Per-workspace daemon hostname suffix. Each workspace's WS URL is derived as `wss://<wsId-with-underscores-replaced-by->.SUFFIX/ws`. Set per environment (dev / staging / prod).                              | `dev.orchestra.nuvo.software`                                      |
+| `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL`          | **Dev-only override.** Bypasses workspace-based derivation and uses a single fixed URL — useful for pointing at a local daemon. Only one workspace is reachable while this is set; do not use in production. | (unset)                                                            |
+| `EXPO_PUBLIC_ENABLE_AUDIO_DEBUG`               | Set to `1` to render the in-app audio debug card                                                                                                                                                             | (unset)                                                            |
 
 ## Orchestra cloud mode (D-1)
 
@@ -39,7 +40,9 @@ At D-1, the Orchestra auth service and daemon run behind an HTTP-only ALB. Cloud
 Workarounds for local testing:
 
 - Run the web client locally via `npx expo start --web` (served over HTTP)
-- Use `EXPO_PUBLIC_ORCHESTRA_AUTH_URL` / `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL` to point at the ALB
+- Use `EXPO_PUBLIC_ORCHESTRA_AUTH_URL` to point at the ALB
+- For production/staging, set `EXPO_PUBLIC_ORCHESTRA_DAEMON_HOSTNAME_SUFFIX` so per-workspace WS URLs derive against the right environment (e.g. `orchestra.nuvo.software` for prod)
+- For a single-workspace local-daemon dev loop, set `EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL=ws://localhost:6767/ws` to bypass derivation
 
 This limitation is resolved in D-2 when the ALB gets TLS termination.
 
