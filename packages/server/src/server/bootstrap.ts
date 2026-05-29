@@ -107,12 +107,12 @@ import {
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
 import { ChatService } from "./chat/chat-service.js";
-import { FileBackedChatStore } from "./chat/chat-store.js";
+import { FileBackedChatStore, type ChatStore } from "./chat/chat-store.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { LoopService } from "./loop-service.js";
-import { FileBackedLoopStore } from "./loop-store.js";
+import { FileBackedLoopStore, type LoopStore } from "./loop-store.js";
 import { ScheduleService } from "./schedule/service.js";
-import { FileBackedScheduleStore } from "./schedule/store.js";
+import { FileBackedScheduleStore, type ScheduleStore } from "./schedule/store.js";
 import { DaemonConfigStore } from "./daemon-config-store.js";
 import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 import { archivePersistedWorkspaceRecord } from "./workspace-archive-service.js";
@@ -150,7 +150,17 @@ import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
-import { FileBackedPermissionStore } from "./agent/permission-store.js";
+import {
+  DynamoPermissionStore,
+  FileBackedPermissionStore,
+  type PermissionStore,
+} from "./agent/permission-store.js";
+import { DynamoChatStore } from "./chat/dynamo-chat-store.js";
+import { DynamoLoopStore } from "./dynamo-loop-store.js";
+import { DynamoScheduleStore } from "./schedule/dynamo-store.js";
+import { buildCloudModeDynamoLike } from "./cloud-dynamo-adapter.js";
+import { resolveCloudStateTableName, type DynamoLike } from "./cloud-dynamo-client.js";
+import { createCloudSharedKeys } from "./cloud-shared-mirror.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
 import {
   startHeartbeatLoop,
@@ -576,13 +586,24 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
-  const chatService = new ChatService({
-    store: new FileBackedChatStore({
-      paseoHome: config.paseoHome,
-      logger,
-    }),
+  // D-3.10 — cloud-mode daemon persistence. Each of the four Day-1
+  // surfaces (chat, permission, loop, schedule) picks DynamoStore in
+  // cloud mode and FileBacked* on-host. See `buildD3DaemonStores` for
+  // the construction and the schema doc at
+  // paseo-cloud-daemon/30-state/dynamo-store-schema.md.
+  //
+  // D-3.10 follow-up 2: in cloud mode the bootstrap hard-fails if
+  // either (a) `buildD3DaemonStores` throws (SDK/credential failure)
+  // or (b) the post-construction self-probe rejects with
+  // AccessDeniedException / transport error. Helper logs the FATAL
+  // line at the source then re-throws; daemon-worker's main() catch
+  // calls exitAfterPinoFlush() → process.exit(1). On-host mode skips
+  // both gates entirely.
+  const d3Stores = await buildAndProbeD3DaemonStores({
+    paseoHome: config.paseoHome,
     logger,
   });
+  const chatService = new ChatService({ store: d3Stores.chat, logger });
   const terminalManager = createConfiguredTerminalManager();
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({
@@ -600,14 +621,14 @@ export async function createPaseoDaemon(
   });
   // T-4 (D-3) — durable permission queue. On-host gets
   // FileBackedPermissionStore for parity (new directory under
-  // $PASEO_HOME/permissions/). Cloud-mode (DynamoPermissionStore)
-  // would be wired here once the AWS SDK dep lands; for now the
-  // file-backed store works in both environments and persists
-  // cross-restart.
-  const permissionStore = new FileBackedPermissionStore({
-    paseoHome: config.paseoHome,
-    logger,
-  });
+  // $PASEO_HOME/permissions/). Cloud-mode (D-3.10) gets
+  // DynamoPermissionStore routing writes to the `<ws>#permission`
+  // partition; survives container restart and works across instance
+  // replacement. (Pre-D-3.10 the bootstrap unconditionally wired
+  // FileBackedPermissionStore — see paseo-cloud-daemon LEARNINGS
+  // 2026-05-29 for the gap and D-3.10 fix.) Constructed by
+  // `buildD3DaemonStores` above.
+  const permissionStore = d3Stores.permission;
   const agentManager = new AgentManager({
     clients: {
       ...createClientsFromRegistry(providerRegistry, logger),
@@ -643,18 +664,24 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     workspaceGitService,
   });
+  // D-3.10 — cloud-mode loops persist to DDB under <ws>#loop. Meta
+  // row carries the full LoopRecord; per-step rows mirror logs[] in
+  // the cloud-shared canonical shape. See
+  // paseo-cloud-daemon/30-state/dynamo-store-schema.md § Loop.
   const loopService = new LoopService({
-    store: new FileBackedLoopStore({
-      paseoHome: config.paseoHome,
-      logger,
-    }),
+    store: d3Stores.loop,
     logger,
     agentManager,
   });
   await loopService.initialize();
   logger.info({ elapsed: elapsed() }, "Loop service initialized");
+  // D-3.10 — cloud-mode schedules persist to DDB under <ws>#schedule
+  // (meta + per-run rows) and notify lifecycle-worker on create/delete
+  // so EventBridge Scheduler picks up the cadence. Sub-minute every
+  // cadences are rejected at the daemon edge (D-3 synthesis OQ1).
+  // See paseo-cloud-daemon/30-state/dynamo-store-schema.md § Schedule.
   const scheduleService = new ScheduleService({
-    store: new FileBackedScheduleStore(path.join(config.paseoHome, "schedules")),
+    store: d3Stores.schedule,
     logger,
     agentManager,
     agentStorage,
@@ -1248,6 +1275,177 @@ function mountLateInternalRoutes(
   logger.info(
     "Internal HMAC-auth'd schedule-fire + file-download-internal routes registered (cloud mode)",
   );
+}
+
+// D-3.10 — cloud-mode-aware factory for the four Day-1 daemon stores
+// (chat, permission, loop, schedule). Extracted from createPaseoDaemon
+// to keep the top-level under the per-function complexity ceiling and
+// to make the cloud-mode vs on-host swap testable in isolation.
+//
+// F3 design-out: workspaceId is sourced from PASEO_WORKSPACE_ID at
+// boot — validated for cloud mode upstream. Callers never pass it;
+// cross-tenant writes are impossible by construction.
+//
+// Construction-failure posture (D-3.10 follow-up 2): in cloud mode the
+// factory throws if `buildCloudModeDynamoLike()` fails. The previous
+// warn-and-fall-back posture made a critical failure mode invisible:
+// a missing AWS credential / SDK config issue silently routed writes
+// to container-ephemeral FileBacked storage, which next restart would
+// discard. The bootstrap caller catches the throw, logs FATAL, and
+// process-exits — matching the existing daemon-worker bootstrap-error
+// path. On-host mode never enters the cloud branch so its FileBacked*
+// construction is unchanged.
+interface D3DaemonStores {
+  chat: ChatStore;
+  permission: PermissionStore;
+  loop: LoopStore;
+  schedule: ScheduleStore;
+  /**
+   * The DynamoLike client backing the four stores in cloud mode.
+   * `null` in on-host mode (no DDB construction). The caller uses
+   * this to issue the boot-time self-probe (`selfProbeDdb`).
+   */
+  dynamoLike: DynamoLike | null;
+}
+
+async function buildD3DaemonStores(deps: {
+  paseoHome: string;
+  logger: Logger;
+}): Promise<D3DaemonStores> {
+  const { paseoHome, logger } = deps;
+  const cloudWorkspaceId = isPaseoCloudMode() ? process.env.PASEO_WORKSPACE_ID?.trim() : undefined;
+  // On-host mode (or cloud mode with no workspace id, which is an
+  // error that surfaces in the upstream auth check) → FileBacked*.
+  if (!isPaseoCloudMode() || !cloudWorkspaceId) {
+    return {
+      chat: new FileBackedChatStore({ paseoHome, logger }),
+      permission: new FileBackedPermissionStore({ paseoHome, logger }),
+      loop: new FileBackedLoopStore({ paseoHome, logger }),
+      schedule: new FileBackedScheduleStore(path.join(paseoHome, "schedules")),
+      dynamoLike: null,
+    };
+  }
+  // Cloud mode: bubble construction failures out. The caller logs
+  // FATAL and exits non-zero; we do NOT fall back to FileBacked* in
+  // cloud mode because that would silently regress persistence.
+  const dynamoLike = await buildCloudModeDynamoLike();
+  logger.info(
+    { workspaceId: cloudWorkspaceId },
+    "Cloud-mode DynamoDB client constructed (Dynamo* stores will route here)",
+  );
+  const lifecycleInternalUrl = process.env.ORCHESTRA_LIFECYCLE_INTERNAL_URL?.trim();
+  const hmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim();
+  return {
+    chat: new DynamoChatStore({ client: dynamoLike, workspaceId: cloudWorkspaceId, logger }),
+    permission: new DynamoPermissionStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+    }),
+    loop: new DynamoLoopStore({ client: dynamoLike, workspaceId: cloudWorkspaceId, logger }),
+    schedule: new DynamoScheduleStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+      ...(lifecycleInternalUrl ? { lifecycleInternalUrl } : {}),
+      ...(hmacKey ? { hmacKey } : {}),
+    }),
+    dynamoLike,
+  };
+}
+
+// D-3.10 follow-up 2 — synchronous boot-time self-probe for cloud-mode
+// DDB connectivity. Issues a single GetItem on the daemon's own
+// workspace-metadata row (`pk=<wsId>#metadata, sk=meta`) and asserts
+// no `AccessDeniedException` / transport error. The row is written by
+// the auth service at workspace provisioning; the daemon's per-workspace
+// task role has read access on it (verified by the D-2 cross-tenant
+// isolation gate — Test 9 confirms a sibling-workspace GetItem fails
+// with AccessDenied, implying same-workspace GetItem is allowed).
+//
+// Probe semantics:
+//   - "no Item returned" → OK (the IAM grant is in place; the row may
+//     be absent if the metadata write hasn't propagated yet, but that
+//     is a control-plane race we don't crash on)
+//   - AccessDeniedException → throw (IAM grant missing — refusing to
+//     start is preferable to writing to a partition the daemon can't
+//     read back)
+//   - any transport-level error (timeout, DNS, network) → throw
+//
+// Only called in cloud mode; on-host path skips this entirely.
+async function selfProbeDdb(deps: {
+  client: DynamoLike;
+  table: string;
+  workspaceId: string;
+  logger: Logger;
+}): Promise<void> {
+  const { client, table, workspaceId, logger } = deps;
+  const key = createCloudSharedKeys().workspaceMetadata(workspaceId);
+  try {
+    await client.get(table, key);
+    logger.info(
+      { workspaceId, table, pk: key.pk, sk: key.sk },
+      "D-3.10 boot probe ok (workspace-metadata GetItem succeeded)",
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`D-3.10 boot probe failed: ${table} ${message}; refusing to start`, {
+      cause: err,
+    });
+  }
+}
+
+// D-3.10 follow-up 2 — bootstrap wrapper that combines store construction
+// + cloud-mode self-probe behind one call so `createPaseoDaemon` stays
+// under its complexity ceiling. Logs FATAL at the source on either
+// failure path and re-throws; daemon-worker.ts's main() catch handles
+// the process-exit. On-host mode skips both gates.
+async function buildAndProbeD3DaemonStores(deps: {
+  paseoHome: string;
+  logger: Logger;
+}): Promise<D3DaemonStores> {
+  const { paseoHome, logger } = deps;
+  const cloudTable = resolveCloudStateTableName();
+  let stores: D3DaemonStores;
+  try {
+    stores = await buildD3DaemonStores({ paseoHome, logger });
+  } catch (err) {
+    logger.fatal(
+      { err, table: cloudTable },
+      `D-3.10 boot probe failed: ${cloudTable} ${
+        err instanceof Error ? err.message : String(err)
+      }; refusing to start`,
+    );
+    throw err;
+  }
+  if (!isPaseoCloudMode() || !stores.dynamoLike) {
+    return stores;
+  }
+  const probeWorkspaceId = process.env.PASEO_WORKSPACE_ID?.trim();
+  if (!probeWorkspaceId) {
+    // Should never happen — the upstream auth-mode check throws if
+    // PASEO_WORKSPACE_ID is missing in cloud mode, and the inner
+    // factory skips DynamoLike construction without it. Safety net.
+    const msg =
+      "D-3.10 boot probe failed: PASEO_WORKSPACE_ID empty in cloud mode; refusing to start";
+    logger.fatal({ table: cloudTable }, msg);
+    throw new Error(msg);
+  }
+  try {
+    await selfProbeDdb({
+      client: stores.dynamoLike,
+      table: cloudTable,
+      workspaceId: probeWorkspaceId,
+      logger,
+    });
+  } catch (err) {
+    logger.fatal(
+      { err, table: cloudTable, workspaceId: probeWorkspaceId },
+      err instanceof Error ? err.message : String(err),
+    );
+    throw err;
+  }
+  return stores;
 }
 
 // T-8 (synthesis A5 / OQ7 / A8) — cloud-mode turn-end hook. Fires

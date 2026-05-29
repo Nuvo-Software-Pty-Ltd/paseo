@@ -162,9 +162,45 @@ export class InMemoryDynamoClient implements DynamoLike {
 }
 
 /**
- * Resolve the DDB table name. Single source — every store reads from
- * the same env var so a stage swap touches one place.
+ * Resolve the DDB table name for **control-plane** rows (workspace
+ * metadata, account index, keypair, spend, webhook-event). Sourced
+ * from `ORCHESTRA_DDB_TABLE` with `orchestra-dev-state` as the dev
+ * fallback.
+ *
+ * D-3.10 follow-up split: daemon-data stores (chat / permission /
+ * loop / schedule) route through `resolveDaemonDataTableName()`
+ * instead, so a future CDK split (separate
+ * `orchestra-prod-daemon-data` table) is a deploy-config flip rather
+ * than a code change. See 30-state/dynamo-store-schema.md §
+ * "Env-var table split".
  */
 export function resolveCloudStateTableName(): string {
   return process.env.ORCHESTRA_DDB_TABLE ?? "orchestra-dev-state";
+}
+
+/**
+ * Resolve the DDB table name for **daemon-data** rows (chat,
+ * permission, loop, schedule — the four surfaces wired in D-3.10).
+ *
+ * Resolution order:
+ *   1. `ORCHESTRA_DDB_DAEMON_TABLE` if set (production split path)
+ *   2. fall back to `ORCHESTRA_DDB_TABLE` (single-table dev default)
+ *   3. `orchestra-dev-state` as the ultimate fallback (matches the
+ *      control-plane default so the two tables collapse to one when
+ *      neither override is set)
+ *
+ * Why the split: in production we want daemon-data on its own DDB
+ * table so per-tenant chat write rate (the dominant write driver)
+ * doesn't share throughput / cost-attribution / hot-partition risk
+ * with control-plane reads. D-3.10 ships the env-var seam so a
+ * future CDK change deploys the second table by flipping
+ * `ORCHESTRA_DDB_DAEMON_TABLE` on the per-workspace task def —
+ * no daemon code change required.
+ */
+export function resolveDaemonDataTableName(): string {
+  return (
+    process.env.ORCHESTRA_DDB_DAEMON_TABLE ??
+    process.env.ORCHESTRA_DDB_TABLE ??
+    "orchestra-dev-state"
+  );
 }

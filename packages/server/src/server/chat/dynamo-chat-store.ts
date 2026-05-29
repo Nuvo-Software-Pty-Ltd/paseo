@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
-import { resolveCloudStateTableName, type DynamoLike } from "../cloud-dynamo-client.js";
+import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
 import type { ChatMessage, ChatRoom } from "./chat-types.js";
 import type { ChatStore, ChatStorePayload } from "./chat-store.js";
 
@@ -43,7 +43,7 @@ export class DynamoChatStore implements ChatStore {
   constructor(options: DynamoChatStoreOptions) {
     this.client = options.client;
     this.workspaceId = options.workspaceId;
-    this.tableName = options.tableName ?? resolveCloudStateTableName();
+    this.tableName = options.tableName ?? resolveDaemonDataTableName();
     this.keys = options.keys ?? createCloudSharedKeys();
     this.logger = options.logger.child({ component: "dynamo-chat-store" });
   }

@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 
-import { resolveCloudStateTableName, type DynamoLike } from "./cloud-dynamo-client.js";
+import { resolveDaemonDataTableName, type DynamoLike } from "./cloud-dynamo-client.js";
 import { createCloudSharedKeys, type CloudSharedKeys } from "./cloud-shared-mirror.js";
 import { LoopRecordSchema, type LoopRecord } from "./loop-types.js";
 import type { LoopStore } from "./loop-store.js";
@@ -49,7 +49,7 @@ export class DynamoLoopStore implements LoopStore {
   constructor(options: DynamoLoopStoreOptions) {
     this.client = options.client;
     this.workspaceId = options.workspaceId;
-    this.tableName = options.tableName ?? resolveCloudStateTableName();
+    this.tableName = options.tableName ?? resolveDaemonDataTableName();
     this.keys = options.keys ?? createCloudSharedKeys();
     this.logger = options.logger.child({ component: "dynamo-loop-store" });
   }
