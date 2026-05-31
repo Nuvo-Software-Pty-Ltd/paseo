@@ -160,7 +160,6 @@ import { DynamoLoopStore } from "./dynamo-loop-store.js";
 import { DynamoScheduleStore } from "./schedule/dynamo-store.js";
 import { buildCloudModeDynamoLike } from "./cloud-dynamo-adapter.js";
 import { resolveCloudStateTableName, type DynamoLike } from "./cloud-dynamo-client.js";
-import { createCloudSharedKeys } from "./cloud-shared-mirror.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
 import {
   startHeartbeatLoop,
@@ -1355,18 +1354,27 @@ async function buildD3DaemonStores(deps: {
 }
 
 // D-3.10 follow-up 2 — synchronous boot-time self-probe for cloud-mode
-// DDB connectivity. Issues a single GetItem on the daemon's own
-// workspace-metadata row (`pk=<wsId>#metadata, sk=meta`) and asserts
-// no `AccessDeniedException` / transport error. The row is written by
-// the auth service at workspace provisioning; the daemon's per-workspace
-// task role has read access on it (verified by the D-2 cross-tenant
-// isolation gate — Test 9 confirms a sibling-workspace GetItem fails
-// with AccessDenied, implying same-workspace GetItem is allowed).
+// DDB connectivity. Issues a single GetItem on a known-covered chat
+// partition (`pk=<wsId>#chat, sk=__d3_10_boot_probe__`) and asserts no
+// `AccessDeniedException` / transport error. The pk is a daemon-owned
+// surface per the D-3.11 inline-policy LeadingKeys list; the sk is a
+// sentinel that never matches a real chat row, so GetItem returns
+// empty (no Item). That return shape proves DDB connectivity + IAM
+// grant + table name in one round trip without reading a row the
+// daemon doesn't own.
+//
+// Historical note: an earlier revision of this probe used
+// `<wsId>#metadata` (the auth-owned workspace-metadata row). That worked
+// pre-D-3.11 when the inline policy had a wildcard `<wsId>#*` grant,
+// but D-3.11 narrowed LeadingKeys to daemon-owned partitions only
+// (chat / permission / loop / schedule / agent#timeline). Control-plane
+// rows (#metadata, #state, etc.) are intentionally denied to the daemon
+// per the workspace-role-template comment — a compromised daemon must
+// not forge them. The probe was rewritten to live inside the daemon's
+// own grant.
 //
 // Probe semantics:
-//   - "no Item returned" → OK (the IAM grant is in place; the row may
-//     be absent if the metadata write hasn't propagated yet, but that
-//     is a control-plane race we don't crash on)
+//   - "no Item returned" → OK (expected — sentinel sk never exists)
 //   - AccessDeniedException → throw (IAM grant missing — refusing to
 //     start is preferable to writing to a partition the daemon can't
 //     read back)
@@ -1380,12 +1388,12 @@ async function selfProbeDdb(deps: {
   logger: Logger;
 }): Promise<void> {
   const { client, table, workspaceId, logger } = deps;
-  const key = createCloudSharedKeys().workspaceMetadata(workspaceId);
+  const key = { pk: `${workspaceId}#chat`, sk: "__d3_10_boot_probe__" };
   try {
     await client.get(table, key);
     logger.info(
       { workspaceId, table, pk: key.pk, sk: key.sk },
-      "D-3.10 boot probe ok (workspace-metadata GetItem succeeded)",
+      "D-3.10 boot probe ok (chat-partition GetItem succeeded)",
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
