@@ -35,7 +35,13 @@ const TEST_TABLE = "orchestra-test-state";
 
 describe("D-3.10 boot probe — DAEMON_OWNED_PARTITION_PREFIXES contract", () => {
   test("includes the daemon Dynamo*Store surfaces (chat / permission / loop / schedule / agent#timeline)", () => {
-    expect(DAEMON_OWNED_PARTITION_PREFIXES).toEqual(["chat", "permission", "loop", "schedule", "agent#timeline"]);
+    expect(DAEMON_OWNED_PARTITION_PREFIXES).toEqual([
+      "chat",
+      "permission",
+      "loop",
+      "schedule",
+      "agent#timeline",
+    ]);
   });
 
   test("does NOT include any control-plane prefix (auth/lifecycle-worker-owned)", () => {
