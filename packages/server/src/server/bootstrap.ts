@@ -1353,25 +1353,45 @@ async function buildD3DaemonStores(deps: {
   };
 }
 
+// D-3.10 / D-3.11 contract — partition prefixes the daemon's per-workspace
+// IAM role is allowed to read/write under DynamoDB:LeadingKeys. Mirrors the
+// `WorkspaceDynamoDb` LeadingKeys list in `orchestra-cloud-private`'s
+// `packages/cloud-shared/src/workspace-role-template.ts`. Control-plane
+// prefixes (#metadata, #state, #download-token, #webhook-event, #spend,
+// #quota) are intentionally NOT included — they are auth/lifecycle-worker-
+// owned, and a compromised daemon must not be able to forge them.
+//
+// The boot probe MUST use one of these prefixes; anything else will
+// AccessDeniedException at runtime against the D-3.11 inline policy. The
+// constant lives next to the probe so `bootstrap.boot-probe.test.ts` can
+// pin the contract by static reference; if you add a new Dynamo*Store
+// surface, add the prefix here AND in the IAM template — together.
+export const DAEMON_OWNED_PARTITION_PREFIXES = [
+  "chat",
+  "permission",
+  "loop",
+  "schedule",
+  "agent#timeline",
+] as const;
+
+export type DaemonOwnedPartitionPrefix = (typeof DAEMON_OWNED_PARTITION_PREFIXES)[number];
+
 // D-3.10 follow-up 2 — synchronous boot-time self-probe for cloud-mode
 // DDB connectivity. Issues a single GetItem on a known-covered chat
 // partition (`pk=<wsId>#chat, sk=__d3_10_boot_probe__`) and asserts no
-// `AccessDeniedException` / transport error. The pk is a daemon-owned
-// surface per the D-3.11 inline-policy LeadingKeys list; the sk is a
-// sentinel that never matches a real chat row, so GetItem returns
-// empty (no Item). That return shape proves DDB connectivity + IAM
-// grant + table name in one round trip without reading a row the
-// daemon doesn't own.
+// `AccessDeniedException` / transport error. The pk is the first daemon-
+// owned prefix in `DAEMON_OWNED_PARTITION_PREFIXES`; the sk is a
+// sentinel that never matches a real row, so GetItem returns empty
+// (no Item). That return shape proves DDB connectivity + IAM grant +
+// table name in one round trip without reading a row the daemon
+// doesn't own.
 //
 // Historical note: an earlier revision of this probe used
 // `<wsId>#metadata` (the auth-owned workspace-metadata row). That worked
 // pre-D-3.11 when the inline policy had a wildcard `<wsId>#*` grant,
-// but D-3.11 narrowed LeadingKeys to daemon-owned partitions only
-// (chat / permission / loop / schedule / agent#timeline). Control-plane
-// rows (#metadata, #state, etc.) are intentionally denied to the daemon
-// per the workspace-role-template comment — a compromised daemon must
-// not forge them. The probe was rewritten to live inside the daemon's
-// own grant.
+// but D-3.11 narrowed LeadingKeys to daemon-owned partitions only.
+// Control-plane rows are intentionally denied to the daemon. The probe
+// was rewritten to live inside the daemon's own grant.
 //
 // Probe semantics:
 //   - "no Item returned" → OK (expected — sentinel sk never exists)
@@ -1380,20 +1400,23 @@ async function buildD3DaemonStores(deps: {
 //     read back)
 //   - any transport-level error (timeout, DNS, network) → throw
 //
+// Exported so `bootstrap.boot-probe.test.ts` can exercise the
+// AccessDenied path in isolation without spinning up a full daemon.
 // Only called in cloud mode; on-host path skips this entirely.
-async function selfProbeDdb(deps: {
+export async function selfProbeDdb(deps: {
   client: DynamoLike;
   table: string;
   workspaceId: string;
   logger: Logger;
 }): Promise<void> {
   const { client, table, workspaceId, logger } = deps;
-  const key = { pk: `${workspaceId}#chat`, sk: "__d3_10_boot_probe__" };
+  const partitionPrefix: DaemonOwnedPartitionPrefix = DAEMON_OWNED_PARTITION_PREFIXES[0];
+  const key = { pk: `${workspaceId}#${partitionPrefix}`, sk: "__d3_10_boot_probe__" };
   try {
     await client.get(table, key);
     logger.info(
-      { workspaceId, table, pk: key.pk, sk: key.sk },
-      "D-3.10 boot probe ok (chat-partition GetItem succeeded)",
+      { workspaceId, table, pk: key.pk, sk: key.sk, partitionPrefix },
+      "D-3.10 boot probe ok (daemon-owned partition GetItem succeeded)",
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
