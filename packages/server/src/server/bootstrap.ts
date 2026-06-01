@@ -109,7 +109,9 @@ import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js"
 import {
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  InMemoryWorkspaceRegistry,
   type ProjectRegistry,
+  type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { DynamoProjectStore } from "./project/dynamo-project-store.js";
 import { ChatService } from "./chat/chat-service.js";
@@ -333,7 +335,7 @@ export async function createPaseoDaemon(
 
   const app = express();
   let boundListenTarget: ListenTarget | null = null;
-  let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
+  let workspaceRegistry: WorkspaceRegistry | null = null;
 
   const scriptRouteStore = new ScriptRouteStore();
   const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
@@ -584,10 +586,7 @@ export async function createPaseoDaemon(
   });
   httpServer.on("upgrade", scriptProxyUpgradeHandler);
 
-  workspaceRegistry = new FileBackedWorkspaceRegistry(
-    path.join(config.paseoHome, "projects", "workspaces.json"),
-    logger,
-  );
+  workspaceRegistry = buildWorkspaceRegistry(config.paseoHome, logger);
   // D-3.10 — cloud-mode daemon persistence. Each of the original four
   // Day-1 surfaces (chat, permission, loop, schedule) picks DynamoStore
   // in cloud mode and FileBacked* on-host. See `buildD3DaemonStores`
@@ -1287,6 +1286,23 @@ function mountLateInternalRoutes(
   );
   logger.info(
     "Internal HMAC-auth'd schedule-fire + file-download-internal routes registered (cloud mode)",
+  );
+}
+
+// D-3.12 follow-up — cloud mode uses InMemoryWorkspaceRegistry.
+// The workspace registry is a derived cache rebuilt from agent
+// storage on every boot (bootstrapWorkspaceRegistries). Unlike
+// chat/permission/loop/schedule/agent/project, it holds no state
+// that isn't reconstructible from the (now DDB-backed) agent store.
+// existsOnDisk() → false ensures reconstruction runs on every
+// container start; read-your-writes holds within the session.
+function buildWorkspaceRegistry(paseoHome: string, logger: Logger): WorkspaceRegistry {
+  if (isPaseoCloudMode()) {
+    return new InMemoryWorkspaceRegistry();
+  }
+  return new FileBackedWorkspaceRegistry(
+    path.join(paseoHome, "projects", "workspaces.json"),
+    logger,
   );
 }
 
