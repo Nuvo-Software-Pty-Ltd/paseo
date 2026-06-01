@@ -10,6 +10,7 @@ import {
   createPersistedWorkspaceRecord,
   FileBackedProjectRegistry,
   FileBackedWorkspaceRegistry,
+  InMemoryWorkspaceRegistry,
 } from "./workspace-registry.js";
 
 describe("workspace registries", () => {
@@ -102,5 +103,114 @@ describe("workspace registries", () => {
     await workspaceRegistry.remove("/tmp/repo");
     expect(await workspaceRegistry.get("/tmp/repo")).toBeNull();
     expect(await workspaceRegistry.list()).toEqual([]);
+  });
+});
+
+describe("InMemoryWorkspaceRegistry (cloud-mode variant)", () => {
+  let registry: InMemoryWorkspaceRegistry;
+
+  beforeEach(() => {
+    registry = new InMemoryWorkspaceRegistry();
+  });
+
+  test("existsOnDisk always returns false", async () => {
+    expect(await registry.existsOnDisk()).toBe(false);
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_1",
+        projectId: "proj_1",
+        cwd: "/work",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    expect(await registry.existsOnDisk()).toBe(false);
+  });
+
+  test("upsert → get round-trips a workspace record", async () => {
+    await registry.initialize();
+    const record = createPersistedWorkspaceRecord({
+      workspaceId: "ws_abc",
+      projectId: "proj_xyz",
+      cwd: "/work/repo",
+      kind: "local_checkout",
+      displayName: "main",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    await registry.upsert(record);
+    expect(await registry.get("ws_abc")).toEqual(record);
+  });
+
+  test("list returns all upserted records", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_1",
+        projectId: "proj_1",
+        cwd: "/a",
+        kind: "local_checkout",
+        displayName: "a",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_2",
+        projectId: "proj_1",
+        cwd: "/b",
+        kind: "worktree",
+        displayName: "b",
+        createdAt: "2026-01-02T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      }),
+    );
+    expect(await registry.list()).toHaveLength(2);
+  });
+
+  test("archive sets archivedAt and updatedAt", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_arch",
+        projectId: "proj_1",
+        cwd: "/work",
+        kind: "directory",
+        displayName: "work",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await registry.archive("ws_arch", "2026-02-01T00:00:00.000Z");
+    const archived = await registry.get("ws_arch");
+    expect(archived?.archivedAt).toBe("2026-02-01T00:00:00.000Z");
+    expect(archived?.updatedAt).toBe("2026-02-01T00:00:00.000Z");
+  });
+
+  test("archive is a no-op for unknown workspace", async () => {
+    await registry.archive("ws_nonexistent", "2026-02-01T00:00:00.000Z");
+    expect(await registry.get("ws_nonexistent")).toBeNull();
+  });
+
+  test("remove deletes the record", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_rm",
+        projectId: "proj_1",
+        cwd: "/work",
+        kind: "local_checkout",
+        displayName: "main",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await registry.remove("ws_rm");
+    expect(await registry.get("ws_rm")).toBeNull();
+    expect(await registry.list()).toEqual([]);
+  });
+
+  test("get returns null for unknown workspace", async () => {
+    expect(await registry.get("ws_unknown")).toBeNull();
   });
 });

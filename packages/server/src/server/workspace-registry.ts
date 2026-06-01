@@ -197,6 +197,53 @@ export class FileBackedWorkspaceRegistry
   }
 }
 
+// D-3.12 follow-up — cloud-mode workspace registry. The workspace
+// registry is a derived cache rebuilt from agent storage on every boot
+// via `bootstrapWorkspaceRegistries`. In cloud mode (single workspace
+// per ECS task, pinned by PASEO_WORKSPACE_ID) there is no need for
+// DynamoDB-backed persistence — the in-memory variant provides
+// read-your-writes within a session and `existsOnDisk() → false`
+// ensures reconstruction runs on every container start.
+export class InMemoryWorkspaceRegistry implements WorkspaceRegistry {
+  private readonly cache = new Map<string, PersistedWorkspaceRecord>();
+
+  async initialize(): Promise<void> {}
+
+  async existsOnDisk(): Promise<boolean> {
+    return false;
+  }
+
+  async list(): Promise<PersistedWorkspaceRecord[]> {
+    return Array.from(this.cache.values());
+  }
+
+  async get(workspaceId: string): Promise<PersistedWorkspaceRecord | null> {
+    return this.cache.get(workspaceId) ?? null;
+  }
+
+  async upsert(record: PersistedWorkspaceRecord): Promise<void> {
+    const parsed = PersistedWorkspaceRecordSchema.parse(record);
+    this.cache.set(parsed.workspaceId, parsed);
+  }
+
+  async archive(workspaceId: string, archivedAt: string): Promise<void> {
+    const existing = this.cache.get(workspaceId);
+    if (!existing) return;
+    this.cache.set(
+      workspaceId,
+      PersistedWorkspaceRecordSchema.parse({
+        ...existing,
+        updatedAt: archivedAt,
+        archivedAt,
+      }),
+    );
+  }
+
+  async remove(workspaceId: string): Promise<void> {
+    this.cache.delete(workspaceId);
+  }
+}
+
 export function createPersistedProjectRecord(input: {
   projectId: string;
   rootPath: string;
