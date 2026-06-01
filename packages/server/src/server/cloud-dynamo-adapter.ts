@@ -129,7 +129,12 @@ export async function getSharedDocumentClient(): Promise<DynamoDBDocumentClient>
   const { DynamoDBDocumentClient: DocClient } = await import("@aws-sdk/lib-dynamodb");
   const region = process.env.AWS_REGION?.trim() || "ap-southeast-2";
   const raw = new DynamoDBClient({ region });
-  cachedDocumentClient = DocClient.from(raw);
+  // removeUndefinedValues: StoredAgentRecord has many optional fields that
+  // can be undefined in practice; the AWS SDK v3 default rejects undefined
+  // values unless this opt-in is set.
+  cachedDocumentClient = DocClient.from(raw, {
+    marshallOptions: { removeUndefinedValues: true },
+  });
   return cachedDocumentClient;
 }
 

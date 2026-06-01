@@ -1,6 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
 
-import { createDynamoLikeFromDocumentClient } from "./cloud-dynamo-adapter.js";
+import {
+  createDynamoLikeFromDocumentClient,
+  getSharedDocumentClient,
+} from "./cloud-dynamo-adapter.js";
 
 // Verify the adapter delegates each method to client.send() exactly
 // once. Production correctness is end-to-end-tested via the
@@ -39,6 +42,18 @@ function buildMockClient(): {
   );
   return { client: { send } as { send: typeof send }, calls, responses };
 }
+
+describe("getSharedDocumentClient", () => {
+  test("configures removeUndefinedValues:true so StoredAgentRecord optional fields do not throw during marshalling", async () => {
+    const client = await getSharedDocumentClient();
+    // @aws-sdk/lib-dynamodb stores translateConfig at client.config.translateConfig at runtime
+    // (not in the public TypeScript type). Cast to read it back for assertion.
+    const cfg = client.config as {
+      translateConfig?: { marshallOptions?: { removeUndefinedValues?: boolean } };
+    };
+    expect(cfg.translateConfig?.marshallOptions?.removeUndefinedValues).toBe(true);
+  });
+});
 
 describe("cloud-dynamo-adapter", () => {
   test("get delegates to GetCommand and returns Item when present", async () => {
