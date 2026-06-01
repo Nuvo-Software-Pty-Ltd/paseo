@@ -158,6 +158,8 @@ import {
 import { DynamoChatStore } from "./chat/dynamo-chat-store.js";
 import { DynamoLoopStore } from "./dynamo-loop-store.js";
 import { DynamoScheduleStore } from "./schedule/dynamo-store.js";
+import { DynamoAgentTimelineStore } from "./agent/dynamo-agent-timeline-store.js";
+import type { AgentTimelineStore } from "./agent/agent-timeline-store-types.js";
 import { buildCloudModeDynamoLike } from "./cloud-dynamo-adapter.js";
 import { resolveCloudStateTableName, type DynamoLike } from "./cloud-dynamo-client.js";
 import { fireDaemonVersionBeacon, resolveDaemonImageTag } from "./cloud-version-beacon.js";
@@ -637,6 +639,7 @@ export async function createPaseoDaemon(
     registry: agentStorage,
     onAgentTurnEnd: buildCloudTurnEndHook(logger),
     permissionStore,
+    durableTimelineStore: d3Stores.agentTimeline,
     logger,
   });
 
@@ -1294,11 +1297,19 @@ function mountLateInternalRoutes(
 // process-exits — matching the existing daemon-worker bootstrap-error
 // path. On-host mode never enters the cloud branch so its FileBacked*
 // construction is unchanged.
-interface D3DaemonStores {
+export interface D3DaemonStores {
   chat: ChatStore;
   permission: PermissionStore;
   loop: LoopStore;
   schedule: ScheduleStore;
+  /**
+   * Durable AgentTimelineStore for cloud mode (`<ws>#agent#timeline`
+   * partition). `undefined` on-host — AgentManager falls back to the
+   * in-memory store. The cloud value is consumed at AgentManager
+   * construction via `durableTimelineStore`; append/fetch/replay are
+   * already plumbed by the manager.
+   */
+  agentTimeline: AgentTimelineStore | undefined;
   /**
    * The DynamoLike client backing the four stores in cloud mode.
    * `null` in on-host mode (no DDB construction). The caller uses
@@ -1307,7 +1318,7 @@ interface D3DaemonStores {
   dynamoLike: DynamoLike | null;
 }
 
-async function buildD3DaemonStores(deps: {
+export async function buildD3DaemonStores(deps: {
   paseoHome: string;
   logger: Logger;
 }): Promise<D3DaemonStores> {
@@ -1321,6 +1332,7 @@ async function buildD3DaemonStores(deps: {
       permission: new FileBackedPermissionStore({ paseoHome, logger }),
       loop: new FileBackedLoopStore({ paseoHome, logger }),
       schedule: new FileBackedScheduleStore(path.join(paseoHome, "schedules")),
+      agentTimeline: undefined,
       dynamoLike: null,
     };
   }
@@ -1348,6 +1360,11 @@ async function buildD3DaemonStores(deps: {
       logger,
       ...(lifecycleInternalUrl ? { lifecycleInternalUrl } : {}),
       ...(hmacKey ? { hmacKey } : {}),
+    }),
+    agentTimeline: new DynamoAgentTimelineStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
     }),
     dynamoLike,
   };
