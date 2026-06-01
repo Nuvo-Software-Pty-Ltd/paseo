@@ -44,6 +44,16 @@ export interface CloudSharedKeys {
   // LOOP_STEP_SEQ_WIDTH constant) are wire-shape contracts — any drift
   // breaks cross-restart catchup or cross-tenant isolation.
   agentTimeline(workspaceId: string, agentId: string, epoch: string, seq: number): DdbKey;
+  // ANTI-DRIFT: D-3.12 mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:workspaceAgentMetadata`. The
+  // DynamoAgentStore one-row-per-agent partition (distinct from
+  // agent#timeline). pk = `<ws>#agent#metadata`, sk = `<agentId>`.
+  workspaceAgentMetadata(workspaceId: string, agentId: string): DdbKey;
+  // ANTI-DRIFT: D-3.12 mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:workspaceProject`. The
+  // DynamoProjectStore one-row-per-project partition.
+  // pk = `<ws>#project`, sk = `<projectId>`.
+  workspaceProject(workspaceId: string, projectId: string): DdbKey;
 }
 
 // ANTI-DRIFT: matches `LOOP_STEP_SEQ_WIDTH` in cloud-shared keys.ts.
@@ -88,6 +98,12 @@ export function createCloudSharedKeys(): CloudSharedKeys {
         pk: `${workspaceId}#agent#timeline`,
         sk: `${agentId}#${epoch}#${padded}`,
       };
+    },
+    workspaceAgentMetadata(workspaceId: string, agentId: string): DdbKey {
+      return { pk: `${workspaceId}#agent#metadata`, sk: agentId };
+    },
+    workspaceProject(workspaceId: string, projectId: string): DdbKey {
+      return { pk: `${workspaceId}#project`, sk: projectId };
     },
   };
 }

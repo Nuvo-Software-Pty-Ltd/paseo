@@ -2,7 +2,7 @@ import type { Logger } from "pino";
 
 import type { AgentPromptInput, AgentRunOptions } from "./agent-sdk-types.js";
 import type { AgentManager } from "./agent-manager.js";
-import type { AgentStorage } from "./agent-storage.js";
+import type { AgentStore } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 
 export interface StartAgentRunOptions {
@@ -46,7 +46,7 @@ export function startAgentRun(
  * an archived agent unarchives it the same way.
  */
 export async function unarchiveAgentState(
-  agentStorage: AgentStorage,
+  agentStorage: AgentStore,
   agentManager: AgentManager,
   agentId: string,
 ): Promise<boolean> {
@@ -75,7 +75,7 @@ export function formatSystemNotificationPrompt(reason: string): string {
 
 export interface SendPromptToAgentParams {
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   agentId: string;
   /** Prompt to dispatch to the provider (may include image blocks or wrapped text). */
   prompt: AgentPromptInput;
@@ -158,7 +158,7 @@ export async function sendPromptToAgent(
 
 export interface SetupFinishNotificationParams {
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   childAgentId: string;
   callerAgentId: string;
   logger: Logger;

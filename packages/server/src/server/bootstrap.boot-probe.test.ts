@@ -33,14 +33,16 @@ const silentLogger = pino({ level: "silent" });
 const TEST_WORKSPACE_ID = "ws_test_d3_10_probe";
 const TEST_TABLE = "orchestra-test-state";
 
-describe("D-3.10 boot probe — DAEMON_OWNED_PARTITION_PREFIXES contract", () => {
-  test("includes the daemon Dynamo*Store surfaces (chat / permission / loop / schedule / agent#timeline)", () => {
+describe("D-3.10 / D-3.12 boot probe — DAEMON_OWNED_PARTITION_PREFIXES contract", () => {
+  test("includes the daemon Dynamo*Store surfaces (D-3.10 chat / permission / loop / schedule / agent#timeline + D-3.12 agent#metadata / project)", () => {
     expect(DAEMON_OWNED_PARTITION_PREFIXES).toEqual([
       "chat",
       "permission",
       "loop",
       "schedule",
       "agent#timeline",
+      "agent#metadata",
+      "project",
     ]);
   });
 
@@ -187,16 +189,21 @@ describe("D-3.10 boot probe — failure semantics", () => {
   });
 });
 
-describe("D-3.10 boot probe — type contract", () => {
+describe("D-3.10 / D-3.12 boot probe — type contract", () => {
   test("DaemonOwnedPartitionPrefix narrows to the constant's union", () => {
     const chat: DaemonOwnedPartitionPrefix = "chat";
     const perm: DaemonOwnedPartitionPrefix = "permission";
     const loop: DaemonOwnedPartitionPrefix = "loop";
     const sched: DaemonOwnedPartitionPrefix = "schedule";
-    const agent: DaemonOwnedPartitionPrefix = "agent#timeline";
-    expect([chat, perm, loop, sched, agent]).toHaveLength(5);
+    const agentTimeline: DaemonOwnedPartitionPrefix = "agent#timeline";
+    const agentMetadata: DaemonOwnedPartitionPrefix = "agent#metadata";
+    const project: DaemonOwnedPartitionPrefix = "project";
+    expect([chat, perm, loop, sched, agentTimeline, agentMetadata, project]).toHaveLength(7);
 
     // @ts-expect-error — "metadata" is intentionally not assignable
+    //   (the workspace-metadata control-plane partition is auth-owned;
+    //   `agent#metadata` is the daemon's agent-record partition and is
+    //   spelled out in full).
     const metadata: DaemonOwnedPartitionPrefix = "metadata";
     expect(metadata).toBe("metadata"); // runtime assertion; type-check is the real assertion
   });
@@ -205,7 +212,10 @@ describe("D-3.10 boot probe — type contract", () => {
     // If you're adding a new Dynamo*Store surface, update the IAM template at
     // orchestra-cloud-private/packages/cloud-shared/src/workspace-role-template.ts
     // FIRST, then bump this expected length AND DAEMON_OWNED_PARTITION_PREFIXES.
-    expect(DAEMON_OWNED_PARTITION_PREFIXES.length).toBe(5);
+    // D-3.10 shipped 5; D-3.12 added agent#metadata + project for the
+    // file-backed AgentStorage + FileBackedProjectRegistry cloud-mode
+    // replacement.
+    expect(DAEMON_OWNED_PARTITION_PREFIXES.length).toBe(7);
   });
 });
 

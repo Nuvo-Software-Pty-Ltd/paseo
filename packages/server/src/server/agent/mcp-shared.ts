@@ -5,7 +5,7 @@ import type { AgentPermissionRequest } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent, WaitForAgentResult } from "./agent-manager.js";
 import { curateAgentActivity } from "./activity-curator.js";
 import { selectItemsByProjectedLimit } from "./timeline-projection.js";
-import type { AgentStorage } from "./agent-storage.js";
+import type { AgentStore } from "./agent-storage.js";
 import { serializeAgentSnapshot } from "../messages.js";
 import { StoredScheduleSchema } from "../schedule/types.js";
 import type { AgentProvider } from "./agent-sdk-types.js";
@@ -187,7 +187,7 @@ export function sanitizePermissionRequest(
 }
 
 export async function resolveAgentTitle(
-  agentStorage: AgentStorage,
+  agentStorage: AgentStore,
   agentId: string,
   logger: Logger,
 ): Promise<string | null> {
@@ -201,7 +201,7 @@ export async function resolveAgentTitle(
 }
 
 export async function serializeSnapshotWithMetadata(
-  agentStorage: AgentStorage,
+  agentStorage: AgentStore,
   snapshot: ManagedAgent,
   logger: Logger,
 ) {

@@ -36,7 +36,7 @@ import type {
   PersistedAgentDescriptor,
 } from "./agent-sdk-types.js";
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
-import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
+import type { StoredAgentRecord, AgentStore } from "./agent-storage.js";
 import {
   InMemoryAgentTimelineStore,
   type SeedAgentTimelineOptions,
@@ -215,7 +215,7 @@ export interface AgentManagerOptions {
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
   idFactory?: () => string;
-  registry?: AgentStorage;
+  registry?: AgentStore;
   onAgentAttention?: AgentAttentionCallback;
   /**
    * Optional turn-end hook (T-8 webhook emit + T-18 spend-row writer
@@ -506,7 +506,7 @@ export class AgentManager {
   private readonly foregroundRuns = new ForegroundRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
   private readonly idFactory: () => string;
-  private readonly registry?: AgentStorage;
+  private readonly registry?: AgentStore;
   private readonly durableTimelineStore?: AgentTimelineStore;
   private readonly previousStatuses = new Map<string, AgentLifecycleStatus>();
   private readonly backgroundTasks = new Set<Promise<void>>();
@@ -2610,7 +2610,7 @@ export class AgentManager {
     await this.registry.applySnapshot(agent, options);
   }
 
-  private requireRegistry(): AgentStorage {
+  private requireRegistry(): AgentStore {
     if (!this.registry) {
       throw new Error("Agent storage unavailable");
     }

@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { Logger } from "pino";
 import type { ProviderDefinition } from "./provider-registry.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
-import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
+import type { AgentStore, StoredAgentRecord } from "./agent-storage.js";
 import type {
   AgentPersistenceHandle,
   AgentProvider,
@@ -47,7 +47,7 @@ export class ImportSessionsRequestError extends Error {
 export interface ListImportableProviderSessionsInput {
   request: FetchRecentProviderSessionsRequestMessage;
   agentManager: Pick<AgentManager, "listAgents" | "listImportablePersistedAgents">;
-  agentStorage: Pick<AgentStorage, "list">;
+  agentStorage: Pick<AgentStore, "list">;
   providerRegistry: Record<string, Pick<ProviderDefinition, "label"> | undefined>;
 }
 
@@ -59,7 +59,7 @@ export interface ListImportableProviderSessionsResult {
 export interface ImportProviderSessionInput {
   request: NormalizedImportAgentRequest;
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   paseoHome?: string;
   logger: Logger;
@@ -186,7 +186,7 @@ export async function importProviderSession(
 }
 
 async function unarchiveAgentByHandle(
-  agentStorage: AgentStorage,
+  agentStorage: AgentStore,
   agentManager: AgentManager,
   handle: AgentPersistenceHandle,
 ): Promise<void> {
@@ -296,7 +296,7 @@ function getFirstUserMessageText(timeline: readonly AgentTimelineItem[]): string
 
 async function collectImportedProviderSessionHandles(
   agentManager: Pick<AgentManager, "listAgents">,
-  agentStorage: Pick<AgentStorage, "list">,
+  agentStorage: Pick<AgentStore, "list">,
 ): Promise<Set<string>> {
   const handles = new Set<string>();
 

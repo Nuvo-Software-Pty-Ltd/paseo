@@ -83,6 +83,25 @@ export function parseStoredAgentRecord(value: unknown): StoredAgentRecord {
   return STORED_AGENT_SCHEMA.parse(value);
 }
 
+// D-3.12 (UAT follow-ups #3 + #4) — public storage surface consumed by
+// AgentManager, Session, WebsocketServer, and the bootstrap snapshot-
+// persistence hook. On-host mode constructs `AgentStorage` (file-backed,
+// below) and cloud mode constructs `DynamoAgentStore` (in
+// `agent/dynamo-agent-store.ts`); both satisfy this interface. Any
+// new public method MUST be added to BOTH implementations.
+export type AgentStore = Pick<
+  AgentStorage,
+  | "initialize"
+  | "list"
+  | "get"
+  | "upsert"
+  | "beginDelete"
+  | "remove"
+  | "applySnapshot"
+  | "setTitle"
+  | "flush"
+>;
+
 export class AgentStorage {
   private cache: Map<string, StoredAgentRecord> = new Map();
   private pathById: Map<string, string> = new Map();
