@@ -35,6 +35,7 @@ import {
   getCloudProvidersSnapshot,
   normalizeCloudProvidersSnapshot,
   OrchestraSessionExpiredError,
+  getAuthBaseUrl,
 } from "./orchestra-cloud-client";
 
 const TOKEN = "test-session-jwt";
@@ -57,6 +58,21 @@ function mockFetch(status: number, body: unknown): void {
     text: () => Promise.resolve(JSON.stringify(body)),
   });
 }
+
+describe("getAuthBaseUrl", () => {
+  it("defaults to the HTTPS auth subdomain when env var is unset", () => {
+    const saved = process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL;
+    delete process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL;
+    expect(getAuthBaseUrl()).toBe("https://auth.dev.orchestra.nuvo.software");
+    process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL = saved;
+  });
+
+  it("uses the env var when set", () => {
+    process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL = "https://auth.staging.orchestra.nuvo.software";
+    expect(getAuthBaseUrl()).toBe("https://auth.staging.orchestra.nuvo.software");
+    delete process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL;
+  });
+});
 
 describe("session management", () => {
   it("stores and retrieves a session token", async () => {
