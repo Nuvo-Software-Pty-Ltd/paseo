@@ -4,9 +4,9 @@ import { deriveDaemonWsUrlForWorkspace } from "@/utils/orchestra-daemon-url";
 
 const SESSION_TOKEN_KEY = "orchestra:session_token";
 
-const DEFAULT_AUTH_URL = "http://orchestra-dev-1104346820.ap-southeast-2.elb.amazonaws.com";
+const DEFAULT_AUTH_URL = "https://auth.dev.orchestra.nuvo.software";
 
-function getAuthBaseUrl(): string {
+export function getAuthBaseUrl(): string {
   return process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL?.trim() || DEFAULT_AUTH_URL;
 }
 
