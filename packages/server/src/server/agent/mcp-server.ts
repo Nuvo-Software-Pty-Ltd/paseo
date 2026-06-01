@@ -21,7 +21,7 @@ import {
 } from "./agent-projections.js";
 import { curateAgentActivity } from "./activity-curator.js";
 import { selectItemsByProjectedLimit } from "./timeline-projection.js";
-import type { AgentStorage } from "./agent-storage.js";
+import type { AgentStore } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStoredAgentProviderAvailable } from "../persistence-hooks.js";
 import {
@@ -73,7 +73,7 @@ import { join } from "node:path";
 
 export interface AgentMcpServerOptions {
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   terminalManager?: TerminalManager | null;
   getDaemonTcpPort?: () => number | null;
   scheduleService?: ScheduleService | null;

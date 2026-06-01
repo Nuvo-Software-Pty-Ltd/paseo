@@ -134,7 +134,7 @@ import type {
   ProviderSnapshotEntry,
 } from "./agent/agent-sdk-types.js";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
-import type { AgentStorage } from "./agent/agent-storage.js";
+import type { AgentStore } from "./agent/agent-storage.js";
 import {
   ImportSessionsRequestError,
   importProviderSession,
@@ -384,11 +384,11 @@ function clientSupportsFlexibleEditorIds(appVersion: string | null): boolean {
   return isAppVersionAtLeast(appVersion, MIN_VERSION_FLEXIBLE_EDITOR_IDS);
 }
 
-type DeleteFencedAgentStorage = AgentStorage & {
+type DeleteFencedAgentStorage = AgentStore & {
   beginDelete(agentId: string): void;
 };
 
-function beginAgentDeleteIfSupported(agentStorage: AgentStorage, agentId: string): void {
+function beginAgentDeleteIfSupported(agentStorage: AgentStore, agentId: string): void {
   if ("beginDelete" in agentStorage && typeof agentStorage.beginDelete === "function") {
     (agentStorage as DeleteFencedAgentStorage).beginDelete(agentId);
   }
@@ -531,7 +531,7 @@ export interface SessionOptions {
   pushTokenStore: PushTokenStore;
   paseoHome: string;
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
   chatService: ChatService;
@@ -726,7 +726,7 @@ export class Session {
   private agentMcpClient: Awaited<ReturnType<typeof experimental_createMCPClient>> | null = null;
   private agentTools: ToolSet | null = null;
   private agentManager: AgentManager;
-  private readonly agentStorage: AgentStorage;
+  private readonly agentStorage: AgentStore;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly chatService: ChatService;

@@ -4,7 +4,7 @@ import type {
   AgentProvider,
   AgentSessionConfig,
 } from "./agent/agent-sdk-types.js";
-import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
+import type { AgentStore, StoredAgentRecord } from "./agent/agent-storage.js";
 import { buildProviderRegistry } from "./agent/provider-registry.js";
 
 interface LoggerLike {
@@ -17,7 +17,7 @@ function getLogger(logger: LoggerLike): LoggerLike {
   return logger.child({ module: "persistence" });
 }
 
-type AgentStoragePersistence = Pick<AgentStorage, "applySnapshot" | "list">;
+type AgentStoragePersistence = Pick<AgentStore, "applySnapshot" | "list">;
 type AgentManagerStateSource = Pick<AgentManager, "subscribe">;
 
 interface BuildSessionConfigOptions {
@@ -37,7 +37,7 @@ function isProviderRegistry(
 }
 
 /**
- * Attach AgentStorage persistence to an AgentManager instance so every
+ * Attach AgentStore persistence to an AgentManager instance so every
  * agent_state snapshot is flushed to disk.
  */
 export function attachAgentStoragePersistence(

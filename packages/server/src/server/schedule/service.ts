@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { AgentManager } from "../agent/agent-manager.js";
-import type { AgentStorage } from "../agent/agent-storage.js";
+import type { AgentStore } from "../agent/agent-storage.js";
 import type { AgentSessionConfig } from "../agent/agent-sdk-types.js";
 import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
@@ -138,7 +138,7 @@ export interface ScheduleServiceOptions {
   store: ScheduleStore;
   logger: Logger;
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
@@ -147,7 +147,7 @@ export class ScheduleService {
   private readonly store: ScheduleStore;
   private readonly logger: Logger;
   private readonly agentManager: AgentManager;
-  private readonly agentStorage: AgentStorage;
+  private readonly agentStorage: AgentStore;
   private readonly now: () => Date;
   private readonly runner: (
     schedule: StoredSchedule,

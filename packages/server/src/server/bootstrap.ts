@@ -96,7 +96,8 @@ import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
-import { AgentStorage } from "./agent/agent-storage.js";
+import { AgentStorage, type AgentStore } from "./agent/agent-storage.js";
+import { DynamoAgentStore } from "./agent/dynamo-agent-store.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -105,7 +106,12 @@ import {
   shutdownProviders,
 } from "./agent/provider-registry.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
-import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
+import {
+  FileBackedProjectRegistry,
+  FileBackedWorkspaceRegistry,
+  type ProjectRegistry,
+} from "./workspace-registry.js";
+import { DynamoProjectStore } from "./project/dynamo-project-store.js";
 import { ChatService } from "./chat/chat-service.js";
 import { FileBackedChatStore, type ChatStore } from "./chat/chat-store.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
@@ -279,7 +285,7 @@ export interface PaseoDaemonConfig {
 export interface PaseoDaemon {
   config: PaseoDaemonConfig;
   agentManager: AgentManager;
-  agentStorage: AgentStorage;
+  agentStorage: AgentStore;
   terminalManager: TerminalManager;
   scriptRouteStore: ScriptRouteStore;
   scriptRuntimeStore: WorkspaceScriptRuntimeStore;
@@ -578,19 +584,14 @@ export async function createPaseoDaemon(
   });
   httpServer.on("upgrade", scriptProxyUpgradeHandler);
 
-  const agentStorage = new AgentStorage(config.agentStoragePath, logger);
-  const projectRegistry = new FileBackedProjectRegistry(
-    path.join(config.paseoHome, "projects", "projects.json"),
-    logger,
-  );
   workspaceRegistry = new FileBackedWorkspaceRegistry(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
-  // D-3.10 — cloud-mode daemon persistence. Each of the four Day-1
-  // surfaces (chat, permission, loop, schedule) picks DynamoStore in
-  // cloud mode and FileBacked* on-host. See `buildD3DaemonStores` for
-  // the construction and the schema doc at
+  // D-3.10 — cloud-mode daemon persistence. Each of the original four
+  // Day-1 surfaces (chat, permission, loop, schedule) picks DynamoStore
+  // in cloud mode and FileBacked* on-host. See `buildD3DaemonStores`
+  // for the construction and the schema doc at
   // paseo-cloud-daemon/30-state/dynamo-store-schema.md.
   //
   // D-3.10 follow-up 2: in cloud mode the bootstrap hard-fails if
@@ -600,10 +601,20 @@ export async function createPaseoDaemon(
   // line at the source then re-throws; daemon-worker's main() catch
   // calls exitAfterPinoFlush() → process.exit(1). On-host mode skips
   // both gates entirely.
+  //
+  // D-3.12 (UAT follow-ups #3 + #4) — buildD3DaemonStores now also
+  // owns construction of agent + project stores. On-host: AgentStorage
+  // + FileBackedProjectRegistry (file-backed). Cloud: DynamoAgentStore
+  // + DynamoProjectStore (`<ws>#agent#metadata` + `<ws>#project`
+  // partitions). The previous file-backed wiring at this site lost
+  // agent metadata + project lists on every ECS task replacement.
   const d3Stores = await buildAndProbeD3DaemonStores({
     paseoHome: config.paseoHome,
+    agentStoragePath: config.agentStoragePath,
     logger,
   });
+  const agentStorage = d3Stores.agent;
+  const projectRegistry = d3Stores.project;
   const chatService = new ChatService({ store: d3Stores.chat, logger });
   const terminalManager = createConfiguredTerminalManager();
   const github = createGitHubService();
@@ -1311,6 +1322,21 @@ export interface D3DaemonStores {
    */
   agentTimeline: AgentTimelineStore | undefined;
   /**
+   * D-3.12 (UAT follow-ups #3 + #4) — per-agent record store. On-host
+   * this is `AgentStorage` (file-backed under `$PASEO_HOME/agents/...`);
+   * cloud mode swaps in `DynamoAgentStore` (partition `<ws>#agent#metadata`).
+   * Both satisfy the `AgentStore` interface so consumer code (AgentManager,
+   * Session, etc.) is unchanged.
+   */
+  agent: AgentStore;
+  /**
+   * D-3.12 (UAT follow-ups #3 + #4) — workspace project list store.
+   * On-host this is `FileBackedProjectRegistry` (single JSON file);
+   * cloud mode swaps in `DynamoProjectStore` (partition `<ws>#project`).
+   * Both satisfy the `ProjectRegistry` interface.
+   */
+  project: ProjectRegistry;
+  /**
    * The DynamoLike client backing the four stores in cloud mode.
    * `null` in on-host mode (no DDB construction). The caller uses
    * this to issue the boot-time self-probe (`selfProbeDdb`).
@@ -1320,9 +1346,10 @@ export interface D3DaemonStores {
 
 export async function buildD3DaemonStores(deps: {
   paseoHome: string;
+  agentStoragePath: string;
   logger: Logger;
 }): Promise<D3DaemonStores> {
-  const { paseoHome, logger } = deps;
+  const { paseoHome, agentStoragePath, logger } = deps;
   const cloudWorkspaceId = isPaseoCloudMode() ? process.env.PASEO_WORKSPACE_ID?.trim() : undefined;
   // On-host mode (or cloud mode with no workspace id, which is an
   // error that surfaces in the upstream auth check) → FileBacked*.
@@ -1333,6 +1360,11 @@ export async function buildD3DaemonStores(deps: {
       loop: new FileBackedLoopStore({ paseoHome, logger }),
       schedule: new FileBackedScheduleStore(path.join(paseoHome, "schedules")),
       agentTimeline: undefined,
+      agent: new AgentStorage(agentStoragePath, logger),
+      project: new FileBackedProjectRegistry(
+        path.join(paseoHome, "projects", "projects.json"),
+        logger,
+      ),
       dynamoLike: null,
     };
   }
@@ -1366,6 +1398,16 @@ export async function buildD3DaemonStores(deps: {
       workspaceId: cloudWorkspaceId,
       logger,
     }),
+    agent: new DynamoAgentStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+    }),
+    project: new DynamoProjectStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+    }),
     dynamoLike,
   };
 }
@@ -1389,6 +1431,8 @@ export const DAEMON_OWNED_PARTITION_PREFIXES = [
   "loop",
   "schedule",
   "agent#timeline",
+  "agent#metadata",
+  "project",
 ] as const;
 
 export type DaemonOwnedPartitionPrefix = (typeof DAEMON_OWNED_PARTITION_PREFIXES)[number];
@@ -1450,13 +1494,14 @@ export async function selfProbeDdb(deps: {
 // the process-exit. On-host mode skips both gates.
 async function buildAndProbeD3DaemonStores(deps: {
   paseoHome: string;
+  agentStoragePath: string;
   logger: Logger;
 }): Promise<D3DaemonStores> {
-  const { paseoHome, logger } = deps;
+  const { paseoHome, agentStoragePath, logger } = deps;
   const cloudTable = resolveCloudStateTableName();
   let stores: D3DaemonStores;
   try {
-    stores = await buildD3DaemonStores({ paseoHome, logger });
+    stores = await buildD3DaemonStores({ paseoHome, agentStoragePath, logger });
   } catch (err) {
     logger.fatal(
       { err, table: cloudTable },
