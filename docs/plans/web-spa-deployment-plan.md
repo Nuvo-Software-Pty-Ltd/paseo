@@ -6,11 +6,13 @@ Design source of truth: [`paseo-cloud-daemon/90-cloud-considerations/web-spa-dep
 
 Out of scope (covered by a sibling planning agent against `orchestra-cloud-private`): `packages/infra/lib/web-stack.ts`, the vendoring CI step (`aws s3 cp ... vendor/`), and the helper `npm run fetch:vendored-packages`. Cross-references in this plan name the Orchestra-side dependency where it touches the fork's deliverable but do not specify the Orchestra-side implementation.
 
-## Day-1 scope: dev environment only
+## Day-1 scope
 
-Day-1 deploys **only the dev SPA** at `dev.app.orchestra.nuvo.software`. The production domain `app.orchestra.nuvo.software` is **out of scope** for Day-1 — it will be wired up by a future change against `orchestra-cloud-private/packages/infra/lib/web-stack.ts`. The fork's `deploy-web` CI job is the canonical writer of the dev SPA: it deploys the construct to nuvo-ai on every release tag, producing a live, user-facing dev environment (not merely a "construct-exercise" smoke deploy as earlier drafts of this plan implied).
+**The fork's CI publishes the construct tarball; it does NOT deploy the SPA.** Both the dev and prod SPA deploys are owned by `orchestra-cloud-private` — Orchestra's CI consumes the published tarball, wraps it in `packages/infra/lib/web-stack.ts`, and runs `cdk deploy`. The dev SPA at `dev.app.orchestra.nuvo.software` and the future prod SPA at `app.orchestra.nuvo.software` are both Orchestra-side concerns.
 
-Both CI jobs (`deploy-web` and `package-infra-web`) run against the **single nuvo-ai AWS account, `437906455141`, in `ap-southeast-2`** — the same account the daemon ECR push (`build-and-publish-daemon.yml`) targets today. The earlier "fork-owned test account" framing is dropped; there is no separate test account.
+The fork's `bin/web-deploy.ts` runnable CDK app stays in the repo for **self-host operators** to run manually — `git clone <fork>` → `cd packages/infra-web` → `npx cdk deploy`. The fork's CI does **not** exercise it beyond `typecheck`/`build`. Drift in `bin/web-deploy.ts` is caught by, in order of likelihood: (a) the workspace typecheck at PR time, (b) Orchestra's CI breaking when the construct under it changes shape, (c) a self-host operator reporting a problem. Day-1 accepts this exposure for simplicity; revisit if any of the three signals proves slow.
+
+The fork's CI runs against the **single nuvo-ai AWS account, `437906455141`, in `ap-southeast-2`** — the same account the daemon ECR push (`build-and-publish-daemon.yml`) targets today. The earlier "fork-owned test account" framing is dropped; there is no separate test account.
 
 ## Why this file is not under `D-N-plans/`
 
@@ -22,17 +24,17 @@ The repo's existing plan convention is `D-N-plans/PLAN-{stream}.md`, where `D-N`
 
 This plan owns:
 
-1. **New `packages/infra-web/` package** — CDK v2 reusable construct (`lib/static-spa-site.ts`) + runnable CDK app (`bin/web-deploy.ts`) + package metadata + README.
-2. **Workflow replacement** — `.github/workflows/deploy-app.yml` replaced wholesale; two jobs, both in the nuvo-ai account (`437906455141`, `ap-southeast-2`): `deploy-web` deploys the dev SPA to `dev.app.orchestra.nuvo.software`; `package-infra-web` publishes the construct tarball to `s3://orchestra-internal-packages/infra-web-static/`.
+1. **New `packages/infra-web/` package** — CDK v2 reusable construct (`lib/static-spa-site.ts`) + runnable CDK app (`bin/web-deploy.ts`, self-host-only) + package metadata + README.
+2. **Workflow replacement** — `.github/workflows/deploy-app.yml` is **deleted**; a new single-job workflow `.github/workflows/publish-infra-web.yml` runs in nuvo-ai (`437906455141`, `ap-southeast-2`) to publish the construct tarball to `s3://orchestra-internal-packages/infra-web-static/`.
 3. **Cleanup of upstream Cloudflare config in the fork** — `wrangler` devDep + `deploy:web` script removed from `packages/app/package.json`; `wrangler` removed from `knip.json` `ignoreBinaries`; secrets removed from GH Actions.
 4. **Workspace plumbing** — root `package.json` workspace addition; `knip.json` workspace entry; lefthook ergonomics; release scripts updated for the new workspace.
 5. **FORK-NOTES.md divergence entry** — under a new "Cloud-mode additions (web SPA deployment)" section.
-6. **IAM / OIDC** — reuses the existing GH OIDC trust in nuvo-ai (`437906455141`). Two new IAM roles in that single account: `gh-actions-paseo-fork-deploy-web` (CDK deploy of `StaticSpaSite`) and `gh-actions-paseo-fork-infra-web-publisher` (least-privilege `s3:PutObject` on the `infra-web-static/` key prefix only, with deny-overwrite).
+6. **IAM / OIDC** — reuses the existing GH OIDC trust in nuvo-ai (`437906455141`). **One** new IAM role in that account: `gh-actions-paseo-fork-infra-web-publisher` (least-privilege `s3:PutObject` on the `infra-web-static/` key prefix only, with deny-overwrite).
 
 This plan does **not** own:
 
 - `packages/infra/lib/web-stack.ts` in `orchestra-cloud-private` — sibling planning agent.
-- The production `app.orchestra.nuvo.software` SPA — Day-N, out of scope.
+- The dev SPA at `dev.app.orchestra.nuvo.software` and the future prod SPA at `app.orchestra.nuvo.software` — both are deployed by Orchestra's CI; out of scope here.
 - `packages/website/` (marketing site) — stays on Cloudflare Workers per design doc § "Out of scope".
 
 ---
@@ -276,7 +278,7 @@ Notes on the sketch:
 
 ### NEW: `packages/infra-web/bin/web-deploy.ts`
 
-Runnable CDK app — the entry point both `cdk deploy` and the GH Actions `deploy-web` job invoke. Reads config from env so self-host operators and CI use the same code path (design doc § "Self-host operator deploy path").
+Runnable CDK app for **self-host operators only**. The fork's CI does NOT invoke this file beyond typecheck/build (see § "Day-1 scope"). Reads config from env per the design doc § "Self-host operator deploy path"; the same env-var contract applies if Orchestra ever wraps `bin/web-deploy.ts` directly (Orchestra is expected to use the construct via `web-stack.ts` instead).
 
 ```ts
 #!/usr/bin/env node
@@ -472,32 +474,36 @@ Add a workspace entry; remove `wrangler` from `ignoreBinaries`.
 
 Adding `cdk` to `ignoreBinaries`: the `cdk` binary appears in `packages/infra-web/package.json` scripts but knip cannot resolve it through CDK's monorepo packaging without noise. Pattern matches existing `tsx`/`vitest`/`playwright` entries.
 
-### EDITED: `.github/workflows/deploy-app.yml` (replacement, not diff)
+### DELETED: `.github/workflows/deploy-app.yml`
 
-Full file content sketch:
+The upstream Cloudflare-Pages workflow is removed in the same PR. There is no replacement-in-place — its functions are split: SPA deploys move to Orchestra's CI (out of scope here); the construct-tarball publish moves to a new workflow below.
+
+### NEW: `.github/workflows/publish-infra-web.yml`
+
+Single-job workflow. Builds the construct and publishes the tarball to S3. No SPA deploy, no CDK deploy. Runs in nuvo-ai (`437906455141`, `ap-southeast-2`).
 
 ```yaml
-# Deploy the Expo web SPA to AWS (S3 + CloudFront) via the StaticSpaSite construct,
-# and publish the construct tarball to s3://orchestra-internal-packages/infra-web-static/.
-# Both jobs run in the single nuvo-ai account (437906455141, ap-southeast-2).
+# Build the @orchestra/infra-web-static CDK construct and publish the tarball to
+# s3://orchestra-internal-packages/infra-web-static/<version>.tgz so orchestra-cloud-private
+# can vendor it pre-`npm install`.
 #
-# Two jobs:
-#  - deploy-web:        builds the SPA, runs `cdk deploy` to host dev.app.orchestra.nuvo.software.
-#                       This is the Day-1 user-facing dev environment (NOT just a smoke deploy).
-#                       The stack is forced to us-east-1 because WEB_DOMAIN is set (CloudFront cert
-#                       must live in us-east-1; the construct auto-creates the cert in the stack region).
-#  - package-infra-web: `npm pack` the construct, then `aws s3api put-object --if-none-match '*'`
-#                       to the internal-packages bucket. Orchestra's CI vendors the tarball.
+# Single job — the fork does NOT deploy the SPA; Orchestra's CI does that, by consuming
+# this tarball. The fork's `bin/web-deploy.ts` runnable CDK app stays in the repo for
+# self-host operators to run manually; it is not exercised by this workflow beyond the
+# typecheck on every PR (via lefthook + repo-root `npm run typecheck`).
 #
-# Auth: GitHub OIDC. Both jobs assume IAM roles by ARN, no long-lived AWS keys.
+# Auth: GitHub OIDC. The job assumes the `gh-actions-paseo-fork-infra-web-publisher`
+# role by ARN. No long-lived AWS keys.
 
-name: Deploy App
+name: Publish infra-web tarball
 
 on:
   push:
     tags:
-      - "v*"
-      - "!v*-beta.*"
+      # Construct release cadence: only `app-v*` tags trigger a publish. Daemon-only releases
+      # (`v*`) do not touch the SPA construct, so they don't fire this workflow — this also
+      # avoids cross-fire with daemon/relay/desktop release workflows (closes O-1 from the
+      # earlier draft).
       - "app-v*"
       - "!app-v*-beta.*"
   workflow_dispatch:
@@ -507,20 +513,13 @@ permissions:
   contents: read
 
 env:
-  AWS_ACCOUNT_ID: "437906455141" # nuvo-ai — the same account daemon ECR uses
   AWS_REGION_BUCKET: ap-southeast-2 # region for orchestra-internal-packages (matches daemon ECR region)
-  AWS_REGION_STACK: us-east-1 # forced for the SPA stack because WEB_DOMAIN is set (CF cert constraint)
-  OIDC_ROLE_ARN_DEPLOY_WEB: arn:aws:iam::437906455141:role/gh-actions-paseo-fork-deploy-web
-  OIDC_ROLE_ARN_PACKAGE_PUBLISH: arn:aws:iam::437906455141:role/gh-actions-paseo-fork-infra-web-publisher
+  OIDC_ROLE_ARN: arn:aws:iam::437906455141:role/gh-actions-paseo-fork-infra-web-publisher
   INFRA_WEB_PACKAGE_BUCKET: orchestra-internal-packages
   INFRA_WEB_PACKAGE_PREFIX: infra-web-static
-  WEB_DOMAIN_DEV: dev.app.orchestra.nuvo.software
-  HOSTED_ZONE_NAME: orchestra.nuvo.software
-  # HOSTED_ZONE_ID is read from a GH Actions variable so the workflow stays portable across forks.
-  # See § 3 — set vars.ORCHESTRA_HOSTED_ZONE_ID to the existing zone's ID in nuvo-ai.
 
 jobs:
-  deploy-web:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -533,50 +532,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build highlight dependency
-        run: npm run build --workspace=@getpaseo/highlight
-
-      - name: Typecheck app + infra-web
-        run: |
-          npm run typecheck --workspace=@getpaseo/app
-          npm run typecheck --workspace=@orchestra/infra-web-static
-
-      - name: Build SPA
-        run: npm run build:web --workspace=@getpaseo/app
-
-      - name: Build infra-web construct
-        run: npm run build --workspace=@orchestra/infra-web-static
-
-      - name: Configure AWS credentials (OIDC, nuvo-ai)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.OIDC_ROLE_ARN_DEPLOY_WEB }}
-          aws-region: ${{ env.AWS_REGION_STACK }}
-
-      - name: CDK deploy (nuvo-ai, dev domain)
-        working-directory: packages/infra-web
-        env:
-          CDK_DEPLOY_ACCOUNT: ${{ env.AWS_ACCOUNT_ID }}
-          CDK_DEPLOY_REGION: ${{ env.AWS_REGION_STACK }}
-          SPA_DIST_PATH: ${{ github.workspace }}/packages/app/dist
-          WEB_STACK_NAME: PaseoWebSpaDev
-          WEB_DOMAIN: ${{ env.WEB_DOMAIN_DEV }}
-          HOSTED_ZONE_ID: ${{ vars.ORCHESTRA_HOSTED_ZONE_ID }}
-          HOSTED_ZONE_NAME: ${{ env.HOSTED_ZONE_NAME }}
-        run: npx cdk deploy --require-approval never
-
-  package-infra-web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm ci
+      - name: Typecheck infra-web
+        run: npm run typecheck --workspace=@orchestra/infra-web-static
 
       - name: Build infra-web construct
         run: npm run build --workspace=@orchestra/infra-web-static
@@ -597,7 +554,7 @@ jobs:
       - name: Configure AWS credentials (OIDC, nuvo-ai)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ env.OIDC_ROLE_ARN_PACKAGE_PUBLISH }}
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION_BUCKET }}
 
       - name: Upload tarball to internal-packages bucket (immutable; refuses overwrite)
@@ -626,9 +583,8 @@ jobs:
 
 Notes:
 
-- The two jobs are independent — they can run in parallel.
-- `deploy-web` sets `WEB_DOMAIN=dev.app.orchestra.nuvo.software`. The construct creates an ACM cert (DNS-validated against `orchestra.nuvo.software`) and a Route53 A-alias under that zone. CloudFront serves the dev SPA at the dev subdomain.
-- The version-overwrite guard is **explicit**: the workflow calls `aws s3api put-object --if-none-match '*'`. S3 returns `412 Precondition Failed` if the object already exists. The IAM role's deny statement enforces that this header is always present (so an alternate caller cannot bypass the guard).
+- Trigger is restricted to `app-v*` (not `v*`); daemon-only releases don't touch the construct. This closes the cross-fire concern from the earlier draft.
+- The version-overwrite guard is **explicit**: `aws s3api put-object --if-none-match '*'` returns `412 Precondition Failed` if the object exists. The IAM role's deny statement enforces the header is always present, so no alternate caller (a one-off `aws s3 cp` from a laptop) can bypass.
 
 ### EDITED: `FORK-NOTES.md`
 
@@ -646,9 +602,8 @@ The Expo web SPA (`packages/app`) is deployed via AWS S3 + CloudFront in the for
 
 ### Files modified in the fork
 
-- `.github/workflows/deploy-app.yml` — replaces upstream's Cloudflare Pages deploy with two AWS-native jobs, both in the nuvo-ai account (`437906455141`, `ap-southeast-2`):
-  - `deploy-web` — runs `cdk deploy bin/web-deploy.ts` on every release tag to host the **Day-1 dev SPA at `dev.app.orchestra.nuvo.software`**. The stack is forced to `us-east-1` because the ACM cert must live there (CloudFront constraint). Production `app.orchestra.nuvo.software` is Day-N, out of scope.
-  - `package-infra-web` — `npm pack`s the construct and uploads the tarball via `aws s3api put-object --if-none-match '*'` to `s3://orchestra-internal-packages/infra-web-static/<version>.tgz`. Immutable: re-uploads of the same version fail with 412. Orchestra's CI vendors the tarball pre-`npm install`.
+- `.github/workflows/deploy-app.yml` — **deleted**. The upstream Cloudflare Pages workflow has no successor in the fork's CI; SPA deploys are owned by `orchestra-cloud-private`.
+- `.github/workflows/publish-infra-web.yml` — **new**. Single-job workflow in nuvo-ai (`437906455141`, `ap-southeast-2`): builds the construct, `npm pack`s, and uploads the tarball via `aws s3api put-object --if-none-match '*'` to `s3://orchestra-internal-packages/infra-web-static/<version>.tgz`. Immutable — re-uploads of the same version fail with 412. Triggered only on `app-v*` release tags. Orchestra's CI vendors the tarball pre-`npm install`.
 - `packages/app/package.json` — `deploy:web` script removed; `wrangler` devDep removed.
 - `package.json` (root) — workspace list includes `packages/infra-web`.
 - `knip.json` — workspace entry for `packages/infra-web`; `wrangler` removed from `ignoreBinaries`; `cdk` added.
@@ -668,7 +623,7 @@ The `paseo-app` Cloudflare Pages project consumes a slot in the CF account but t
 
 ### Upstream-merge conflict policy
 
-`packages/infra-web/` is **fork-only**; upstream merges cannot delete it (per `paseo-cloud-daemon/90-cloud-considerations/repo-topology.md` § (3) row "File present only in our fork"). `.github/workflows/deploy-app.yml` is "present in both, our diff is substantive (cloud-mode logic)" — ours wins on conflicts; integrate upstream changes only if they are security/correctness fixes. `packages/app/package.json` — the `deploy:web` and `wrangler` deletions stand; upstream's `wrangler` upgrades during a merge are dropped.
+`packages/infra-web/` and `.github/workflows/publish-infra-web.yml` are **fork-only**; upstream merges cannot resurrect them or delete them (per `paseo-cloud-daemon/90-cloud-considerations/repo-topology.md` § (3) row "File present only in our fork"). `.github/workflows/deploy-app.yml` is **deleted in the fork**; if upstream changes that file, drop the upstream-side change on merge (the fork has no equivalent). `packages/app/package.json` — the `deploy:web` and `wrangler` deletions stand; upstream's `wrangler` upgrades during a merge are dropped.
 ```
 
 ### EDITED: lefthook & root scripts
@@ -726,12 +681,12 @@ Apply the diff in § 1. Run `npm install` to drop `wrangler` from the lockfile. 
 **Depends on:** nothing (independent of `packages/infra-web/`).
 **Parallel with:** T-1 through T-3, T-7, T-8.
 
-### T-5 — Replace `.github/workflows/deploy-app.yml`
+### T-5 — Delete `.github/workflows/deploy-app.yml`; add `.github/workflows/publish-infra-web.yml`
 
-Apply the wholesale replacement in § 1. The workflow references `vars.NUVO_AI_ACCOUNT_ID` — that variable must exist in GH Actions before the workflow is exercised (T-7 covers).
+Delete the upstream Cloudflare-Pages workflow file (single `git rm`). Add the new single-job workflow per § 1.
 
 **Size:** S.
-**Depends on:** T-3 (the workflow invokes `bin/web-deploy.ts`); T-7 (the IAM roles and GH `vars.NUVO_AI_ACCOUNT_ID` must exist before the workflow runs successfully — landing the workflow file before the IAM is fine; the workflow simply fails until the IAM is in place, which is the normal sequencing on the next release tag).
+**Depends on:** T-7 (the publisher role + `ORCHESTRA_HOSTED_ZONE_ID` are no longer used; the only required GH-side artifact is the publisher role itself — landing the workflow file before the role exists is fine; the workflow simply fails until the role is in place).
 
 ### T-6 — Update `knip.json`
 
@@ -742,10 +697,10 @@ Apply the diff in § 1. Run `npm run knip` to verify no new dead-code warnings.
 
 ### T-7 — IAM / OIDC / GH Actions vars
 
-See § 3 below. This is the long pole of the project because it crosses AWS accounts.
+See § 3 below. Single IAM role; single OIDC trust (already exists). Much shorter than earlier drafts of this plan.
 
-**Size:** M.
-**Depends on:** the fork-owned test account being available (already exists — `437906455141`); the nuvo-ai account ID (cross-stream).
+**Size:** S.
+**Depends on:** nothing; can run on day 1.
 **Parallel with:** T-1, T-2, T-3, T-4, T-8.
 
 ### T-8 — Update `FORK-NOTES.md`
@@ -757,18 +712,19 @@ Apply the diff in § 1. Skip the "Cloudflare project decommissioning" note's "Do
 
 ### T-9 — Acceptance run
 
-Tag a fork release (`v0.1.X` or `app-v0.1.X`, NOT beta) and watch both workflow jobs. Verify:
+Tag a fork release (`app-vX.Y.Z`, NOT beta) and watch the workflow. Verify:
 
-- `deploy-web` produces CloudFormation stack `PaseoWebSpaDev` in `437906455141`/`us-east-1`, the bucket has the SPA artifacts, Route53 has the A-alias, and `https://dev.app.orchestra.nuvo.software/` serves the SPA.
-- `package-infra-web` produces `s3://orchestra-internal-packages/infra-web-static/<version>.tgz` (whatever `packages/infra-web/package.json` `version` is at tag time).
+- `publish-infra-web.yml` job `publish` succeeds and uploads `s3://orchestra-internal-packages/infra-web-static/<version>.tgz` (whatever `packages/infra-web/package.json` `version` is at tag time).
+- A local `npx cdk synth` of `bin/web-deploy.ts` succeeds (the construct synthesizes cleanly). See § 4.1.
+- Re-running the workflow without bumping the construct version fails with `412 Precondition Failed`. See § 4.4.
 
 **Size:** S.
-**Depends on:** T-1–T-8 all landed; T-7 IAM in place; `cdk bootstrap` (§ 3.5) executed in nuvo-ai/us-east-1.
+**Depends on:** T-1–T-8 all landed; T-7 IAM in place.
 
 ### Parallelism summary
 
 - T-1, T-4, T-7, T-8 can run in parallel from day 1.
-- T-2 unblocks once T-1 lands; T-3 unblocks once T-2 lands; T-5 unblocks once T-3 lands; T-6 unblocks once T-2/T-3/T-4 land.
+- T-2 unblocks once T-1 lands; T-3 unblocks once T-2 lands; T-5 unblocks once T-7 lands (workflow file references the role); T-6 unblocks once T-2/T-3/T-4 land.
 - T-9 is the acceptance gate; it depends on everything.
 
 A reasonable single-author sequencing is: (T-1 → T-2 → T-3) in series, with (T-4, T-7, T-8) interleaved opportunistically, finishing on T-5 → T-6 → T-9.
@@ -777,29 +733,15 @@ A reasonable single-author sequencing is: (T-1 → T-2 → T-3) in series, with 
 
 ## 3. Infra / IAM setup tasks
 
-All resources live in the single nuvo-ai account (`437906455141`). The GH OIDC provider already exists in this account (created for `build-and-publish-daemon.yml`'s `gh-actions-paseo-fork` role) — both new roles attach to the same provider; no new OIDC trust to create.
+All resources live in the single nuvo-ai account (`437906455141`). The GH OIDC provider already exists in this account (created for `build-and-publish-daemon.yml`'s `gh-actions-paseo-fork` role); the one new role attaches to the same provider — no new OIDC trust to create.
 
-### 3.1 IAM role: `gh-actions-paseo-fork-deploy-web`
+The fork no longer runs `cdk deploy` from CI, so there is no need to bootstrap CDK in nuvo-ai/us-east-1 for fork-CI purposes (Orchestra's CI handles its own bootstrap in `orchestra-cloud-private`'s scope).
 
-Used by the `deploy-web` job to `cdk deploy` the SPA stack to `us-east-1`.
+### 3.1 IAM role: `gh-actions-paseo-fork-infra-web-publisher`
 
-- **Trust policy:** `token.actions.githubusercontent.com` with `sub` claim matched to `repo:Nuvo-Software-Pty-Ltd/paseo:ref:refs/tags/v*` and `repo:Nuvo-Software-Pty-Ltd/paseo:ref:refs/tags/app-v*` (mirrors the existing `gh-actions-paseo-fork` role's pattern). During development, also accept `repo:Nuvo-Software-Pty-Ltd/paseo:ref:refs/heads/plan-web-spa-deployment` so the workflow can be exercised with `workflow_dispatch` before any tag is cut.
-- **Permissions:** minimum required for `cdk deploy` of `StaticSpaSite` with WEB_DOMAIN set:
-  - `cloudformation:*` on stacks matching `PaseoWebSpaDev*` and `CDKToolkit*` (the bootstrap stack).
-  - `s3:*` on `cdk-*-assets-437906455141-us-east-1` (CDK assets bucket — region matches stack region per § 3.5) and on buckets created by the stack (best expressed via tag-based conditions: CDK tags created buckets with `aws-cdk:auto-delete-objects` when applicable).
-  - `cloudfront:*` on distributions (no resource-level ARN support for most CF actions; this is a known CDK pain).
-  - `route53:ChangeResourceRecordSets`, `route53:GetChange`, `route53:ListHostedZonesByName` — scoped to the `orchestra.nuvo.software` hosted zone (resource ARN form: `arn:aws:route53:::hostedzone/<ZONE_ID>`).
-  - `acm:RequestCertificate`, `acm:DescribeCertificate`, `acm:DeleteCertificate`, `acm:AddTagsToCertificate`, `acm:ListCertificates` — in `us-east-1` (the only region the construct creates certs in).
-  - `iam:PassRole` only on roles tagged `aws-cdk:bootstrap-role` (CDK bootstrap pattern).
-  - `lambda:*` + `iam:CreateRole`/`iam:AttachRolePolicy` for the `BucketDeployment` custom-resource Lambda (CDK creates these on first deploy).
-  - `sts:GetCallerIdentity` (always).
-- **Recommended scoping mechanism:** scope via `cdk bootstrap`'s `--trust` flag rather than hand-rolling the policy. The CDK bootstrap stack creates five typed roles (`deploy`, `lookup`, `file-publishing`, `image-publishing`, `cfn-exec`) and grants them on the assets bucket; the workflow's GH OIDC role merely needs `sts:AssumeRole` on the `deploy` role plus `iam:PassRole` on `cfn-exec`. See § 3.5 for the bootstrap command.
+Used by the `publish` job in `publish-infra-web.yml`. Least-privilege: **`s3:PutObject` on `arn:aws:s3:::orchestra-internal-packages/infra-web-static/*` only**, with an immutable-upload guarantee.
 
-### 3.2 IAM role: `gh-actions-paseo-fork-infra-web-publisher`
-
-Used by the `package-infra-web` job. Least-privilege: **`s3:PutObject` on `arn:aws:s3:::orchestra-internal-packages/infra-web-static/*` only**, with an immutable-upload guarantee.
-
-- **Trust policy:** identical to § 3.1's tag-pattern trust.
+- **Trust policy:** `token.actions.githubusercontent.com` with `sub` claim matched to `repo:Nuvo-Software-Pty-Ltd/paseo:ref:refs/tags/app-v*` (mirrors the existing `gh-actions-paseo-fork` role's pattern, but narrowed to the SPA construct's release cadence — daemon `v*` tags do not fire this workflow). During development, also accept `repo:Nuvo-Software-Pty-Ltd/paseo:ref:refs/heads/plan-web-spa-deployment` so the workflow can be exercised with `workflow_dispatch` before any tag is cut.
 - **Permissions policy:**
   ```json
   {
@@ -829,37 +771,21 @@ Used by the `package-infra-web` job. Least-privilege: **`s3:PutObject` on `arn:a
   The deny statement requires every upload to carry an `If-None-Match` header; combined with the workflow's `aws s3api put-object --if-none-match '*'`, this means S3 returns `412 Precondition Failed` when the version already exists. No alternate caller (a one-off `aws s3 cp` from an operator's laptop, for example) can bypass the guard via this role.
 - **Bucket policy on `orchestra-internal-packages`:** since the bucket and role live in the same account, the IAM allow is sufficient by default — no bucket-policy edit is required unless the bucket has an explicit deny that excludes this principal. Verify the current bucket policy posture before T-9; add an allow only if a deny is in the way.
 
-### 3.3 GH Actions repository variables / secrets
+### 3.2 GH Actions repository variables / secrets
 
 In `Nuvo-Software-Pty-Ltd/paseo` repo settings:
 
-- **Add variable** `ORCHESTRA_HOSTED_ZONE_ID` = `<the existing zone ID for orchestra.nuvo.software>` — used by `deploy-web` to pass `HOSTED_ZONE_ID` to the CDK app. Variable (not secret) — zone IDs are not sensitive.
-- **No** `NUVO_AI_ACCOUNT_ID` variable needed (single account is hardcoded to `437906455141` in the workflow `env:` block).
+- **No** new variables or secrets required (single account hardcoded; no hosted-zone, cert, or stack params used by `publish-infra-web.yml`).
 - **Remove secret** `CLOUDFLARE_API_TOKEN` only after `deploy-website.yml` is audited — if it still references the secret, leave it (the marketing site stays on Cloudflare per design doc § "Out of scope").
-- The `CLOUDFLARE_ACCOUNT_ID` value was inlined in the workflow, not stored as a secret; deletion is mechanical.
+- The `CLOUDFLARE_ACCOUNT_ID` value was inlined in the deleted `deploy-app.yml`, not stored as a secret; deletion is mechanical when the workflow file is removed.
 
-### 3.4 S3 bucket sanity check
+### 3.3 S3 bucket sanity check
 
 `orchestra-internal-packages` exists in nuvo-ai per design doc § "Distribution mechanism". Before T-9, verify:
 
-- Bucket region: the workflow's `aws-region` is set to `ap-southeast-2` (the value used in § 3.1). `aws s3api put-object` works across-region transparently, but matching the region avoids cross-region request latency. If the bucket is actually in a different region, set `AWS_REGION_BUCKET` in the workflow `env:` block to match.
+- Bucket region: the workflow's `aws-region` is set to `ap-southeast-2`. `aws s3api put-object` works across-region transparently, but matching the region avoids cross-region request latency. If the bucket is actually in a different region, set `AWS_REGION_BUCKET` in the workflow `env:` block to match.
 - Versioning enabled (recommended; not required for correctness — the IAM deny-overwrite is the primary guard).
 - `BlockPublicAccess: BLOCK_ALL`.
-
-### 3.5 `cdk bootstrap` in nuvo-ai/us-east-1 (pre-acceptance)
-
-CDK requires a one-time `cdk bootstrap` per `account+region` pair to create the assets bucket and the five typed bootstrap roles. The SPA stack deploys to `us-east-1`, so that region must be bootstrapped in nuvo-ai. **This is a pre-T-9 operator action.**
-
-Run once, from an operator's machine with admin credentials in nuvo-ai:
-
-```bash
-npx cdk@^2.170 bootstrap aws://437906455141/us-east-1 \
-  --trust arn:aws:iam::437906455141:role/gh-actions-paseo-fork-deploy-web \
-  --trust-for-lookup arn:aws:iam::437906455141:role/gh-actions-paseo-fork-deploy-web \
-  --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
-```
-
-The `cfn-exec` policy is the standard CDK bootstrap default; tighten if/when nuvo-ai's security posture requires it.
 
 ---
 
@@ -898,24 +824,15 @@ Expected: an `AWS::CertificateManager::Certificate` and `AWS::Route53::RecordSet
 
 ### 4.3 First end-to-end CI run (acceptance)
 
-1. Push a release tag (`vX.Y.Z` or `app-vX.Y.Z`, non-beta).
-2. Watch `deploy-app.yml` in GH Actions UI:
-   - `deploy-web` should complete in ~10–15 minutes (CDK deploy + ACM cert DNS validation on first run; subsequent runs ~5 min).
-   - `package-infra-web` should complete in ~1–2 minutes.
-3. Verify `deploy-web` outputs in the AWS Console:
-   - CloudFormation stack `PaseoWebSpaDev` is `UPDATE_COMPLETE` (or `CREATE_COMPLETE` on first run) in `us-east-1`.
-   - The S3 bucket contains `index.html`, `_expo/static/js/web/<hash>.js`, etc.
-   - A Route53 A-alias for `dev.app.orchestra.nuvo.software` points at the CloudFront distribution.
-   - `curl -sI https://dev.app.orchestra.nuvo.software/` returns `200` with `Content-Type: text/html`.
-   - `curl -sI https://dev.app.orchestra.nuvo.software/some-nonexistent-route` returns `200` (SPA routing).
-   - `curl -sI https://dev.app.orchestra.nuvo.software/_expo/static/js/web/<hash>.js` returns a `Cache-Control: public, max-age=...` header consistent with `CACHING_OPTIMIZED`.
-4. Verify `package-infra-web` outputs:
+1. Push a release tag (`app-vX.Y.Z`, non-beta).
+2. Watch `publish-infra-web.yml` in GH Actions UI; the `publish` job should complete in ~1–2 minutes.
+3. Verify outputs:
    - `aws s3 ls s3://orchestra-internal-packages/infra-web-static/` shows `<version>.tgz` with the expected version.
    - `aws s3 cp s3://orchestra-internal-packages/infra-web-static/<version>.tgz - | tar -tzf - | head` reveals `package/dist/lib/static-spa-site.js`, `package/dist/lib/static-spa-site.d.ts`, `package/package.json`.
 
 ### 4.4 Overwrite-guard verification
 
-Re-run `package-infra-web` without bumping `packages/infra-web/package.json` `version`:
+Re-run `publish-infra-web.yml` (via `workflow_dispatch`) without bumping `packages/infra-web/package.json` `version`:
 
 - Expected: the `aws s3api put-object --if-none-match '*'` step fails with `412 Precondition Failed`. The role's deny-without-If-None-Match guarantees no alternate caller can bypass.
 - Bump the version and re-run; expected: success.
@@ -961,22 +878,20 @@ Closure of this divergence requires every item below to be true.
 - [ ] `npm run typecheck` at repo root passes (covers infra-web's `typecheck` script via `--workspaces --if-present`).
 - [ ] `npm run build --workspace=@orchestra/infra-web-static` produces a `dist/` with `dist/lib/static-spa-site.{js,d.ts}` and `dist/bin/web-deploy.js`.
 - [ ] `npm pack` of `packages/infra-web/` produces a tarball that includes `dist/`, `lib/`, `bin/`, `README.md`, `package.json`, and **nothing else** (no `node_modules`, no `cdk.out`).
-- [ ] `npx cdk synth` (env: empty `SPA_DIST_PATH`, no domain) emits a template with: 1 S3 bucket (BlockPublicAccess BLOCK_ALL, SSE-S3, versioned), 1 CloudFront distribution with `_expo/*` + `assets/*` long-cache behaviors and 403/404 → `/index.html` rules, TLS 1.2+, OAC, no Route53/ACM resources.
+- [ ] **`bin/web-deploy.ts` synthesizes locally without errors** via `npx cdk synth` (env: empty `SPA_DIST_PATH`, no domain). Emits a template with: 1 S3 bucket (BlockPublicAccess BLOCK_ALL, SSE-S3, versioned), 1 CloudFront distribution with `_expo/*` + `assets/*` long-cache behaviors and 403/404 → `/index.html` rules, TLS 1.2+, OAC, no Route53/ACM resources.
 - [ ] `npx cdk synth` with `WEB_DOMAIN` + `HOSTED_ZONE_ID` + `HOSTED_ZONE_NAME` set (and `CDK_DEPLOY_REGION=us-east-1`) emits a template with an additional `AWS::CertificateManager::Certificate` (DNS-validated) and `AWS::Route53::RecordSet` (A alias to the distribution).
 - [ ] `npx cdk synth` with `WEB_DOMAIN` set but `CDK_DEPLOY_REGION` ≠ `us-east-1` (and no `WEB_CERT_ARN`) **fails fast** with the documented error message.
 - [ ] CDK snapshot test in `lib/static-spa-site.test.ts` passes and pins: BlockPublicAccess BLOCK_ALL, both 403/404 → /index.html error responses, `_expo/*` + `assets/*` cache behaviors with CACHING_OPTIMIZED, TLS 1.2+, default behavior CACHING_DISABLED.
 - [ ] `packages/app/package.json` no longer contains `deploy:web` script or `wrangler` devDep.
 - [ ] Root `package.json` `workspaces` array includes `packages/infra-web`.
 - [ ] `knip.json` has a workspace entry for `packages/infra-web` and no longer lists `wrangler` in `ignoreBinaries`.
-- [ ] `.github/workflows/deploy-app.yml` is replaced wholesale; two jobs (`deploy-web`, `package-infra-web`); both authenticate via OIDC into the same account (`437906455141`); no `CLOUDFLARE_*` references in this file.
+- [ ] `.github/workflows/deploy-app.yml` is **deleted**.
+- [ ] `.github/workflows/publish-infra-web.yml` exists, has a single `publish` job authenticating via OIDC into account `437906455141`, and triggers only on `app-v*` (non-beta) tags.
 - [ ] `FORK-NOTES.md` has a "Cloud-mode additions (web SPA deployment)" section documenting all of the above.
-- [ ] IAM role `gh-actions-paseo-fork-deploy-web` exists in account `437906455141`, scoped to the SPA stack.
 - [ ] IAM role `gh-actions-paseo-fork-infra-web-publisher` exists in account `437906455141`, scoped to `s3:PutObject` on the `infra-web-static/` prefix of `orchestra-internal-packages`, with a deny-without-If-None-Match guard.
-- [ ] GH Actions variable `ORCHESTRA_HOSTED_ZONE_ID` is set to the existing `orchestra.nuvo.software` zone ID.
 - [ ] GH Actions secret `CLOUDFLARE_API_TOKEN` is deleted (or scheduled for deletion after `deploy-website.yml` is audited).
-- [ ] `cdk bootstrap aws://437906455141/us-east-1` has been executed (§ 3.5).
-- [ ] First post-merge release tag drives both jobs to green. `deploy-web` produces a working SPA at `https://dev.app.orchestra.nuvo.software/`; `package-infra-web` produces `s3://orchestra-internal-packages/infra-web-static/<version>.tgz` whose tarball, when extracted, exposes `dist/lib/static-spa-site.js`.
-- [ ] Re-running `package-infra-web` without bumping version fails with `412 Precondition Failed` (overwrite guard works).
+- [ ] First post-merge `app-v*` tag drives `publish-infra-web.yml` to green and produces `s3://orchestra-internal-packages/infra-web-static/<version>.tgz` whose tarball, when extracted, exposes `dist/lib/static-spa-site.js`.
+- [ ] Re-running `publish-infra-web.yml` without bumping version fails with `412 Precondition Failed` (overwrite guard works).
 - [ ] `aws-cdk-lib` pin in `packages/infra-web/package.json` matches `orchestra-cloud-private/packages/infra/package.json` (manual coordination check; sibling planning agent's responsibility to honor).
 - [ ] Cloudflare `paseo-app` Pages project is either deleted or has a documented owner/disposition in FORK-NOTES.md.
 
@@ -984,11 +899,7 @@ Closure of this divergence requires every item below to be true.
 
 ## 6. Open questions / risks
 
-Operator resolutions from the cross-plan tension review (see § "Operator resolutions" below) closed Q-1…Q-12; the corresponding decisions are folded into the body of this plan. Items that remain genuinely open after those resolutions:
-
-### Open — O-1: `app-v*` tag-pattern cross-fire with other workflows
-
-The trigger patterns `v*` and `app-v*` are shared by several workflows in `.github/workflows/` (`deploy-relay.yml`, `desktop-release.yml`, `desktop-rollout.yml`, `release-notes-sync.yml`). Verify at T-5 time that an `app-v*` tag does not over-trigger them. If any cross-fires, narrow `deploy-app.yml`'s trigger to `app-v*` only (drop `v*`); leave the other workflows alone. **Operator confirmation at T-5.**
+Operator resolutions closed Q-1…Q-12 and O-1; the corresponding decisions are folded into the body of this plan. Items that remain genuinely open:
 
 ### Open — O-2: Orchestra-side `aws-cdk-lib` pin discovery
 
@@ -1007,25 +918,29 @@ The CDK version coordination requirement (see § "NEW: `packages/infra-web/packa
 | **Q-7 — `source-map-support` dep** | Add to `dependencies` (not devDeps).                                                                                                                                               | `packages/infra-web/package.json` sketch.                                                                        |
 | **Q-8 — Tarball `dist` path**      | Orchestra always sets `SPA_DIST_PATH`. Sibling planning agent confirms.                                                                                                            | Captured in `bin/web-deploy.ts` env-var contract.                                                                |
 | **Q-9 — Workflow file rename**     | Keep `deploy-app.yml` filename for git-log continuity.                                                                                                                             | Workflow sketch retains filename.                                                                                |
-| **Q-10 — Tag cross-fire**          | Reopened as **O-1** above — pending T-5 verification.                                                                                                                              | (See O-1.)                                                                                                       |
-| **Q-11 — `cdk bootstrap`**         | Pre-T-9 operator action; bootstrap `aws://437906455141/us-east-1`.                                                                                                                 | § 3.5; T-9 dependency.                                                                                           |
+| **Q-10 / O-1 — Tag cross-fire**    | Closed by the simplification: `publish-infra-web.yml` only triggers on `app-v*` (the construct's own cadence). Daemon `v*` tags don't touch the construct.                         | Workflow `on:` block.                                                                                            |
+| **Q-11 — `cdk bootstrap`**         | **Dropped.** The fork's CI no longer runs `cdk deploy`; no bootstrap needed in nuvo-ai. Orchestra-side bootstrap lives in `orchestra-cloud-private`'s scope.                       | § 3 preamble.                                                                                                    |
 | **Q-12 — Construct version bumps** | Manual semver bumps in `packages/infra-web/package.json`; document in FORK-NOTES.md.                                                                                               | FORK-NOTES sketch (add bumping note when this section lands).                                                    |
 
 ### R-1 — Failing CI on the first release tag merge
 
-If T-7 (IAM) is not complete when the first release tag lands, both workflow jobs will fail at the `configure-aws-credentials` step. This is non-destructive (no partial deploys, no orphaned resources) but visible. **Mitigation:** land T-7 in nuvo-ai BEFORE landing T-5 (workflow file). Order matters.
+If T-7 (IAM) is not complete when the first `app-v*` tag lands, the `publish` job will fail at the `configure-aws-credentials` step. This is non-destructive (no partial deploys, no orphaned resources — there's no deploy at all) but visible. **Mitigation:** land T-7 in nuvo-ai BEFORE landing T-5 (workflow file). Order matters.
 
 ### R-2 — Orchestra-side coupling drift
 
 The fork's `lib/static-spa-site.ts` is the single source of truth for the construct API. If Orchestra wraps it with their own `web-stack.ts` and the fork later renames a prop (e.g., `hostedZone` → `zone`), Orchestra silently breaks. **Mitigation:** the construct's `StaticSpaSiteProps` interface is the contract; treat it as semver. Bump the construct's `version` major on breaking changes. Document in `packages/infra-web/README.md`.
 
-### R-3 — Expo `_expo/` asset path assumption
+### R-3 — `bin/web-deploy.ts` drift goes uncaught by fork CI
 
-The design doc says hashed assets live under `_expo/`. Expo's `expo export --platform web` actually emits to `_expo/static/js/web/` and `_expo/static/css/` plus an `assets/` directory for fonts/images. The construct's `_expo/*` + `assets/*` cache behaviors cover both. **Verify empirically during T-9 — list bucket contents after the first deploy** and confirm the cache-behavior wildcards line up with the actual paths. If Expo emits assets under a different prefix in a future major (Expo 55+), the construct's cache behaviors need updating.
+The fork no longer exercises `bin/web-deploy.ts` beyond typecheck. A subtle bug — wrong env-var name, region check that silently no-ops, a sourcePath default that no longer resolves — would not be caught by the fork's CI; it would surface only when (a) Orchestra's CI deploys the underlying construct and exposes an indirect dependency on `bin/`'s behavior, or (b) a self-host operator hits it. **Mitigation:** when changing `bin/web-deploy.ts`, run `npx cdk synth` locally with at least the two env-var combos in §§ 4.1 and 4.2, and verify the new failure-fast path in § 4.2's second variant. The acceptance checklist's "synthesizes locally without errors" item exists for this reason.
 
-### R-4 — `BucketDeployment` Lambda runtime limits
+### R-4 — Expo `_expo/` asset path assumption
 
-`s3Deployment.BucketDeployment` uses an internal Lambda to copy assets from the CDK staging bucket to the destination bucket. The Lambda has a 15-minute timeout. For an Expo web bundle the asset count is small (~hundreds of files, <50 MB total typical), so this is unlikely to bite. Flag for monitoring if the SPA grows substantially.
+The design doc says hashed assets live under `_expo/`. Expo's `expo export --platform web` actually emits to `_expo/static/js/web/` and `_expo/static/css/` plus an `assets/` directory for fonts/images. The construct's `_expo/*` + `assets/*` cache behaviors cover both. **Verify empirically once Orchestra deploys the first dev SPA** by inspecting bucket contents; if Expo emits assets under a different prefix in a future major (Expo 55+), the construct's cache behaviors need updating. The fork's CI cannot catch this directly because it no longer runs the deploy.
+
+### R-5 — `BucketDeployment` Lambda runtime limits
+
+`s3Deployment.BucketDeployment` uses an internal Lambda to copy assets from the CDK staging bucket to the destination bucket. The Lambda has a 15-minute timeout. For an Expo web bundle the asset count is small (~hundreds of files, <50 MB total typical), so this is unlikely to bite. Flag for monitoring if the SPA grows substantially. Risk surfaces on Orchestra's side, not the fork's.
 
 ---
 
