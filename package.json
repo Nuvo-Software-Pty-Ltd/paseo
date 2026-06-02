@@ -29,7 +29,8 @@
     "packages/relay",
     "packages/website",
     "packages/desktop",
-    "packages/cli"
+    "packages/cli",
+    "packages/infra-web"
   ],
   "scripts": {
     "dev": "./scripts/dev.sh",
