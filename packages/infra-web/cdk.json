@@ -1,0 +1,13 @@
+{
+  "app": "npx tsx bin/web-deploy.ts",
+  "watch": {
+    "include": ["lib/**", "bin/**"],
+    "exclude": ["dist/**", "node_modules/**"]
+  },
+  "context": {
+    "@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1_2_2021": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
+    "@aws-cdk/customresources:installLatestAwsSdkDefault": false
+  }
+}

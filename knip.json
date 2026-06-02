@@ -66,6 +66,10 @@
     "packages/expo-two-way-audio": {
       "entry": ["src/index.ts"],
       "project": ["src/**/*.ts"]
+    },
+    "packages/infra-web": {
+      "entry": ["bin/web-deploy.ts", "lib/static-spa-site.ts"],
+      "project": ["lib/**/*.ts", "bin/**/*.ts"]
     }
   },
   "ignoreDependencies": [
@@ -87,10 +91,10 @@
     "xed",
     "eas",
     "playwright",
-    "wrangler",
     "powershell",
     "tsx",
     "vitest",
-    "open"
+    "open",
+    "cdk"
   ]
 }

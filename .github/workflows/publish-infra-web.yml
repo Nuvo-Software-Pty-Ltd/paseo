@@ -1,0 +1,93 @@
+# Build the @orchestra/infra-web-static CDK construct and publish the tarball to
+# s3://orchestra-internal-packages/infra-web-static/<version>.tgz so orchestra-cloud-private
+# can vendor it pre-`npm install`.
+#
+# Single job — the fork does NOT deploy the SPA; Orchestra's CI does that, by consuming
+# this tarball. The fork's `bin/web-deploy.ts` runnable CDK app stays in the repo for
+# self-host operators to run manually; it is not exercised by this workflow beyond the
+# typecheck on every PR (via lefthook + repo-root `npm run typecheck`).
+#
+# Auth: GitHub OIDC. The job assumes the `gh-actions-paseo-fork-publish-infra-web`
+# role by ARN. No long-lived AWS keys.
+
+name: Publish infra-web tarball
+
+on:
+  push:
+    tags:
+      # Construct release cadence: only `app-v*` tags trigger a publish. Daemon-only
+      # releases (`v*`) do not touch the SPA construct, so they don't fire this workflow.
+      - "app-v*"
+      - "!app-v*-beta.*"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION_BUCKET: ap-southeast-2
+  OIDC_ROLE_ARN: arn:aws:iam::437906455141:role/gh-actions-paseo-fork-publish-infra-web
+  INFRA_WEB_PACKAGE_BUCKET: orchestra-internal-packages
+  INFRA_WEB_PACKAGE_PREFIX: infra-web-static
+
+jobs:
+  package-infra-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck infra-web
+        run: npm run typecheck --workspace=@orchestra/infra-web-static
+
+      - name: Build infra-web construct
+        run: npm run build --workspace=@orchestra/infra-web-static
+
+      - name: Read package version
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./packages/infra-web/package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: npm pack
+        id: pack
+        working-directory: packages/infra-web
+        run: |
+          TARBALL=$(npm pack --silent | tail -n1)
+          echo "tarball=packages/infra-web/${TARBALL}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC, nuvo-ai)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION_BUCKET }}
+
+      - name: Upload tarball (immutable; refuses overwrite)
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          # `--if-none-match '*'` returns 412 Precondition Failed if the key already exists.
+          # The publisher IAM role denies s3:PutObject without an If-None-Match header, so
+          # no alternate caller can bypass the guard.
+          aws s3api put-object \
+            --bucket "${INFRA_WEB_PACKAGE_BUCKET}" \
+            --key "${INFRA_WEB_PACKAGE_PREFIX}/${VERSION}.tgz" \
+            --body "$TARBALL" \
+            --if-none-match '*' \
+            --server-side-encryption AES256 \
+            --content-type application/gzip
+
+      - name: Confirmation
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          echo "Published infra-web tarball version ${VERSION} to s3://${INFRA_WEB_PACKAGE_BUCKET}/${INFRA_WEB_PACKAGE_PREFIX}/${VERSION}.tgz"

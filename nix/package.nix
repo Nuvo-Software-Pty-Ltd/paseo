@@ -103,6 +103,10 @@ buildNpmPackage rec {
       fi
     done
 
+    # @orchestra/* workspaces (e.g. infra-web-static) are build-time CDK constructs,
+    # not part of the daemon runtime. Remove the dangling symlinks left by `cp -a node_modules`.
+    rm -rf $out/lib/paseo/node_modules/@orchestra
+
     # Copy CLI bin entry
     mkdir -p $out/lib/paseo/packages/cli/bin
     cp packages/cli/bin/paseo $out/lib/paseo/packages/cli/bin/

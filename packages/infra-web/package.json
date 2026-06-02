@@ -1,0 +1,43 @@
+{
+  "name": "@orchestra/infra-web-static",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reusable CDK v2 construct + runnable app for the Paseo SPA on S3 + CloudFront. Distributed as a tarball in s3://orchestra-internal-packages/infra-web-static/ — NEVER published to npm.",
+  "files": [
+    "dist",
+    "lib",
+    "bin",
+    "README.md"
+  ],
+  "main": "dist/lib/static-spa-site.js",
+  "types": "dist/lib/static-spa-site.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib/static-spa-site.d.ts",
+      "default": "./dist/lib/static-spa-site.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cdk": "cdk",
+    "deploy": "cdk deploy --app 'npx tsx bin/web-deploy.ts'",
+    "synth": "cdk synth --app 'npx tsx bin/web-deploy.ts'",
+    "pack": "npm run build && npm pack"
+  },
+  "dependencies": {
+    "source-map-support": "^0.5.21"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "aws-cdk": "^2.252.0",
+    "aws-cdk-lib": "^2.252.0",
+    "constructs": "^10.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.2"
+  },
+  "peerDependencies": {
+    "aws-cdk-lib": "^2.252.0",
+    "constructs": "^10.5.0"
+  }
+}

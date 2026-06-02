@@ -88,6 +88,13 @@
       "rules": {
         "no-empty-pattern": "off"
       }
+    },
+    {
+      "files": ["packages/infra-web/**/*.ts"],
+      "rules": {
+        "no-new": "off",
+        "import/no-unassigned-import": "off"
+      }
     }
   ]
 }
