@@ -1,5 +1,9 @@
 // TODO(security-headers): CSP, HSTS, Permissions-Policy via a CloudFront response-headers
 // policy are deferred per design-doc § "Out of scope". Wire here when designed.
+//
+// Cache-Control IS wired, via the two ResponseHeadersPolicy resources created in the
+// constructor: no-cache for index.html (default behavior), 1yr-immutable for the
+// content-hashed `_expo/*` and `assets/*` behaviors.
 import { Duration, RemovalPolicy } from "aws-cdk-lib";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
@@ -55,11 +59,45 @@ export class StaticSpaSite extends Construct {
       );
     }
 
+    // Cache-Control response headers. S3 origins emit no Cache-Control by default and
+    // CloudFront passes that through, so browsers get no caching guidance. These policies
+    // make CloudFront stamp Cache-Control on the viewer response:
+    //   - index.html (default behavior): always revalidate, never serve stale HTML.
+    //   - _expo/* and assets/*: content-hashed by `expo export`, so cache for a year and
+    //     mark immutable — a content change ships a new filename, never a stale hit.
+    const htmlHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, "HtmlHeadersPolicy", {
+      customHeadersBehavior: {
+        customHeaders: [
+          {
+            header: "cache-control",
+            value: "public, max-age=0, must-revalidate",
+            override: true,
+          },
+        ],
+      },
+    });
+    const immutableHeadersPolicy = new cloudfront.ResponseHeadersPolicy(
+      this,
+      "ImmutableHeadersPolicy",
+      {
+        customHeadersBehavior: {
+          customHeaders: [
+            {
+              header: "cache-control",
+              value: "public, max-age=31536000, immutable",
+              override: true,
+            },
+          ],
+        },
+      },
+    );
+
     this.distribution = new cloudfront.Distribution(this, "Distribution", {
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        responseHeadersPolicy: htmlHeadersPolicy,
         compress: true,
       },
       additionalBehaviors: {
@@ -67,12 +105,14 @@ export class StaticSpaSite extends Construct {
           origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
           cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+          responseHeadersPolicy: immutableHeadersPolicy,
           compress: true,
         },
         "assets/*": {
           origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
           cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+          responseHeadersPolicy: immutableHeadersPolicy,
           compress: true,
         },
       },
