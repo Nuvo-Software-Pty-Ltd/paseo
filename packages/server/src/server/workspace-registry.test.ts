@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 
 import { beforeEach, afterEach, describe, expect, test } from "vitest";
 
@@ -8,8 +8,11 @@ import { createTestLogger } from "../test-utils/test-logger.js";
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
+  createWorkspaceContainerRecord,
   FileBackedProjectRegistry,
+  FileBackedWorkspaceContainerRegistry,
   FileBackedWorkspaceRegistry,
+  InMemoryWorkspaceContainerRegistry,
   InMemoryWorkspaceRegistry,
 } from "./workspace-registry.js";
 
@@ -67,6 +70,80 @@ describe("workspace registries", () => {
     await projectRegistry.remove("remote:github.com/acme/repo");
     expect(await projectRegistry.get("remote:github.com/acme/repo")).toBeNull();
     expect(await projectRegistry.list()).toEqual([]);
+  });
+
+  test("D-3.5a: persists and round-trips project workspaceId + repoUrl", async () => {
+    await projectRegistry.initialize();
+    await projectRegistry.upsert(
+      createPersistedProjectRecord({
+        projectId: "remote:github.com/acme/repo",
+        rootPath: "/tmp/repo",
+        kind: "git",
+        displayName: "acme/repo",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+        workspaceId: "ws_local",
+        repoUrl: "https://github.com/acme/repo",
+      }),
+    );
+    const fetched = await projectRegistry.get("remote:github.com/acme/repo");
+    expect(fetched).toMatchObject({
+      workspaceId: "ws_local",
+      repoUrl: "https://github.com/acme/repo",
+    });
+  });
+
+  test("D-3.5a: an old projects.json file (no workspaceId/repoUrl) still parses", async () => {
+    const projectsDir = path.join(tmpDir, "legacy");
+    mkdirSync(projectsDir, { recursive: true });
+    const filePath = path.join(projectsDir, "projects.json");
+    // Shape produced by a pre-D-3.5a daemon.
+    writeFileSync(
+      filePath,
+      JSON.stringify([
+        {
+          projectId: "remote:github.com/acme/old",
+          rootPath: "/tmp/old",
+          kind: "git",
+          displayName: "acme/old",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          archivedAt: null,
+        },
+      ]),
+    );
+    const legacyRegistry = new FileBackedProjectRegistry(filePath, logger);
+    await legacyRegistry.initialize();
+    const records = await legacyRegistry.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ projectId: "remote:github.com/acme/old" });
+    expect(records[0].workspaceId).toBeUndefined();
+    expect(records[0].repoUrl).toBeUndefined();
+  });
+
+  test("D-3.5a: container registry persists a zero-project container and round-trips", async () => {
+    const containerRegistry = new FileBackedWorkspaceContainerRegistry(
+      path.join(tmpDir, "projects", "containers.json"),
+      logger,
+    );
+    await containerRegistry.initialize();
+    await containerRegistry.upsert(
+      createWorkspaceContainerRecord({
+        workspaceId: "ws_abc123",
+        displayName: "My Workspace",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    );
+    const fetched = await containerRegistry.get("ws_abc123");
+    expect(fetched).toMatchObject({ workspaceId: "ws_abc123", displayName: "My Workspace" });
+    // A reload from disk sees the same container (durability).
+    const reloaded = new FileBackedWorkspaceContainerRegistry(
+      path.join(tmpDir, "projects", "containers.json"),
+      logger,
+    );
+    await reloaded.initialize();
+    expect(await reloaded.get("ws_abc123")).toMatchObject({ displayName: "My Workspace" });
   });
 
   test("creates, updates, archives, deletes, and lists workspace records", async () => {
@@ -212,5 +289,22 @@ describe("InMemoryWorkspaceRegistry (cloud-mode variant)", () => {
 
   test("get returns null for unknown workspace", async () => {
     expect(await registry.get("ws_unknown")).toBeNull();
+  });
+});
+
+describe("InMemoryWorkspaceContainerRegistry (cloud-mode variant)", () => {
+  test("existsOnDisk always returns false and round-trips a container", async () => {
+    const registry = new InMemoryWorkspaceContainerRegistry();
+    expect(await registry.existsOnDisk()).toBe(false);
+    await registry.upsert(
+      createWorkspaceContainerRecord({
+        workspaceId: "ws_cloud",
+        displayName: "cloud container",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        updatedAt: "2026-06-01T00:00:00.000Z",
+      }),
+    );
+    expect(await registry.existsOnDisk()).toBe(false);
+    expect(await registry.get("ws_cloud")).toMatchObject({ displayName: "cloud container" });
   });
 });

@@ -27,6 +27,8 @@ function buildRecord(overrides: Partial<PersistedProjectRecord> = {}): Persisted
     createdAt: overrides.createdAt ?? "2026-05-30T01:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-05-30T01:00:00.000Z",
     archivedAt: overrides.archivedAt ?? null,
+    ...("workspaceId" in overrides ? { workspaceId: overrides.workspaceId } : {}),
+    ...("repoUrl" in overrides ? { repoUrl: overrides.repoUrl } : {}),
   };
 }
 
@@ -169,6 +171,49 @@ describe("DynamoProjectStore (D-3.12)", () => {
     await storeA.upsert(buildRecord({ projectId: "proj_shared_id" }));
     expect(await storeB.get("proj_shared_id")).toBeNull();
     expect(await storeB.list()).toEqual([]);
+  });
+
+  test("D-3.5a: round-trips workspaceId + repoUrl (containment FK + provenance)", async () => {
+    const { store } = build("ws_1n");
+    await store.upsert(
+      buildRecord({
+        projectId: "remote:github.com/acme/repo",
+        workspaceId: "ws_1n",
+        repoUrl: "https://github.com/acme/repo",
+      }),
+    );
+    const fetched = await store.get("remote:github.com/acme/repo");
+    expect(fetched).toMatchObject({
+      projectId: "remote:github.com/acme/repo",
+      workspaceId: "ws_1n",
+      repoUrl: "https://github.com/acme/repo",
+    });
+  });
+
+  test("D-3.5a: a row body persisted WITHOUT the new fields still parses (back-compat)", async () => {
+    const { store, ddb } = build("ws_legacy");
+    // Simulate an old daemon's row body — no workspaceId / repoUrl.
+    await ddb.put({
+      TableName: TABLE,
+      Item: {
+        pk: "ws_legacy#project",
+        sk: "proj_old",
+        projectId: "proj_old",
+        record: {
+          projectId: "proj_old",
+          rootPath: "/tmp/old",
+          kind: "git",
+          displayName: "Old Project",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          archivedAt: null,
+        },
+      },
+    });
+    const fetched = await store.get("proj_old");
+    expect(fetched).toMatchObject({ projectId: "proj_old", kind: "git" });
+    expect(fetched?.workspaceId).toBeUndefined();
+    expect(fetched?.repoUrl).toBeUndefined();
   });
 
   test("list skips rows that fail schema parse (warn-and-continue)", async () => {

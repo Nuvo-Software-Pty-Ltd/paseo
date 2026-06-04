@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 
 import {
   classifyDirectoryForProjectMembership,
+  deriveCanonicalRepoUrl,
   deriveProjectGroupingName,
   deriveProjectRootPath,
   deriveWorkspaceKind,
@@ -163,6 +164,7 @@ describe("git worktree grouping", () => {
       projectName: "acme/repo",
       projectRootPath: "/tmp/repo",
       projectKind: "git",
+      repoUrl: "https://github.com/acme/repo",
     });
   });
 
@@ -195,5 +197,62 @@ describe("git worktree grouping", () => {
         mainRepoRoot: "/tmp/repo",
       }),
     ).toBe("worktree");
+  });
+});
+
+// D-3.5a (VERIFY-3.5a finding #1, HIGH) — repoUrl must NEVER carry a
+// credential. The cloud clone stores a tokenized remote
+// (`https://x-access-token:<TOKEN>@github.com/...`); canonicalization
+// strips it before the value can be persisted or shipped over the wire.
+describe("deriveCanonicalRepoUrl (credential-free repo provenance)", () => {
+  test("strips an embedded access token from a tokenized https remote", () => {
+    const tokenized = "https://x-access-token:ghs_SUPERSECRETTOKEN@github.com/acme/repo.git";
+    const canonical = deriveCanonicalRepoUrl(tokenized);
+    expect(canonical).toBe("https://github.com/acme/repo");
+    expect(canonical).not.toContain("x-access-token");
+    expect(canonical).not.toContain("ghs_SUPERSECRETTOKEN");
+    expect(canonical).not.toContain("@");
+  });
+
+  test("strips basic-auth user:password credentials from any https remote", () => {
+    const canonical = deriveCanonicalRepoUrl("https://user:p%40ss@gitlab.com/group/app.git");
+    expect(canonical).toBe("https://gitlab.com/group/app");
+    expect(canonical).not.toContain("user");
+    expect(canonical).not.toContain("p%40ss");
+  });
+
+  test("canonicalizes a clean github https remote (drops .git suffix)", () => {
+    expect(deriveCanonicalRepoUrl("https://github.com/acme/repo.git")).toBe(
+      "https://github.com/acme/repo",
+    );
+  });
+
+  test("canonicalizes an scp-style git remote", () => {
+    expect(deriveCanonicalRepoUrl("git@github.com:acme/repo.git")).toBe(
+      "https://github.com/acme/repo",
+    );
+  });
+
+  test("returns null for a non-remote / null input", () => {
+    expect(deriveCanonicalRepoUrl(null)).toBeNull();
+    expect(deriveCanonicalRepoUrl("")).toBeNull();
+    expect(deriveCanonicalRepoUrl("not-a-url")).toBeNull();
+  });
+
+  test("a tokenized remote routed through classifyDirectoryForProjectMembership yields a credential-free repoUrl", () => {
+    const membership = classifyDirectoryForProjectMembership({
+      cwd: "/workspace/ws_demo/.git-canonical",
+      checkout: {
+        cwd: "/workspace/ws_demo/.git-canonical",
+        isGit: true,
+        currentBranch: "main",
+        remoteUrl: "https://x-access-token:ghs_LEAKME@github.com/acme/private-repo.git",
+        worktreeRoot: "/workspace/ws_demo/.git-canonical",
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: "/workspace/ws_demo/.git-canonical",
+      },
+    });
+    expect(membership.repoUrl).toBe("https://github.com/acme/private-repo");
+    expect(membership.repoUrl).not.toContain("ghs_LEAKME");
   });
 });
