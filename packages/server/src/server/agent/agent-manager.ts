@@ -2483,8 +2483,23 @@ export class AgentManager {
       return { timestamp: now.toISOString() };
     }
 
+    // Seed the in-memory timeline with the durably-committed rows so a freshly
+    // loaded agent (e.g. after a cloud suspend/resume onto a new daemon task)
+    // renders its history. The UI read path (fetchTimeline) is in-memory only,
+    // and the provider-transcript replay is intentionally skipped when durable
+    // rows exist (historyPrimed = durableTimelineHasRows) — so without seeding
+    // the rows here the timeline showed blank on resume despite being durably
+    // committed. nextSeq is still sourced from getLatestCommittedSeq so the
+    // durableTimelineHasRows computation in initializeAgentTimelineForRegister
+    // stays unchanged.
+    const [rows, latestSeq] = await Promise.all([
+      this.durableTimelineStore.getCommittedRows(agentId),
+      this.durableTimelineStore.getLatestCommittedSeq(agentId),
+    ]);
+
     return {
-      nextSeq: (await this.durableTimelineStore.getLatestCommittedSeq(agentId)) + 1,
+      rows,
+      nextSeq: latestSeq + 1,
       timestamp: now.toISOString(),
     };
   }
