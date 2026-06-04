@@ -1503,6 +1503,45 @@ export const ArchiveWorkspaceRequestSchema = z.object({
   requestId: z.string(),
 });
 
+// D-3.5a (T-3) — explicit, workspace-scoped Project add/list/remove. Projects
+// are first-class children of a Workspace container in the 1:N model. The
+// `source` discriminator lets a project be a local directory (self-host) or a
+// GitHub repo (cloud + self-host). All new fields are additive; old daemons
+// reject the new request types via the capability gate (features.projectSource),
+// not by silently mis-parsing.
+export const AddProjectSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("local_dir"), path: z.string() }),
+  z.object({ kind: z.literal("github_repo"), repoUrl: z.string() }),
+]);
+
+export const AddProjectRequestSchema = z.object({
+  type: z.literal("add_project_request"),
+  workspaceId: z.string(),
+  source: AddProjectSourceSchema,
+  requestId: z.string(),
+});
+
+export const ListProjectsRequestSchema = z.object({
+  type: z.literal("list_projects_request"),
+  workspaceId: z.string(),
+  requestId: z.string(),
+});
+
+// D-3.5a (T-2) — create a Workspace container with just a name (no repo, no
+// directory). On-host mints a `ws_<uuid>`; cloud returns the ambient container.
+export const CreateWorkspaceRequestSchema = z.object({
+  type: z.literal("create_workspace_request"),
+  displayName: z.string(),
+  requestId: z.string(),
+});
+
+export const RemoveProjectRequestSchema = z.object({
+  type: z.literal("remove_project_request"),
+  workspaceId: z.string(),
+  projectId: z.string(),
+  requestId: z.string(),
+});
+
 // Highlighted diff token schema
 // Note: style can be a compound class name (e.g., "heading meta") from the syntax highlighter
 const HighlightTokenSchema = z.object({
@@ -1780,6 +1819,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   OpenInEditorRequestSchema,
   OpenProjectRequestSchema,
   ArchiveWorkspaceRequestSchema,
+  CreateWorkspaceRequestSchema,
+  AddProjectRequestSchema,
+  ListProjectsRequestSchema,
+  RemoveProjectRequestSchema,
   FileExplorerRequestSchema,
   ProjectIconRequestSchema,
   FileDownloadTokenRequestSchema,
@@ -2420,6 +2463,66 @@ export const OpenProjectResponseMessageSchema = z.object({
   payload: z.object({
     requestId: z.string(),
     workspace: WorkspaceDescriptorPayloadSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+// D-3.5a (T-2) — a Workspace container as the client sees it.
+export const WorkspaceContainerDescriptorPayloadSchema = z.object({
+  workspaceId: z.string(),
+  displayName: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  archivedAt: z.string().nullable(),
+});
+
+export const CreateWorkspaceResponseMessageSchema = z.object({
+  type: z.literal("create_workspace_response"),
+  payload: z.object({
+    requestId: z.string(),
+    workspace: WorkspaceContainerDescriptorPayloadSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+// D-3.5a (T-3) — a Project as the client sees it: a repo or local directory
+// contained by a Workspace. `repoUrl` is ALWAYS credential-free.
+export const ProjectDescriptorPayloadSchema = z.object({
+  projectId: z.string(),
+  workspaceId: z.string(),
+  displayName: z.string(),
+  rootPath: z.string(),
+  repoUrl: z.string().nullable(),
+  kind: z.enum(["git", "non_git"]),
+  archivedAt: z.string().nullable(),
+});
+
+export const AddProjectResponseMessageSchema = z.object({
+  type: z.literal("add_project_response"),
+  payload: z.object({
+    requestId: z.string(),
+    project: ProjectDescriptorPayloadSchema.nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
+export const ListProjectsResponseMessageSchema = z.object({
+  type: z.literal("list_projects_response"),
+  payload: z.object({
+    requestId: z.string(),
+    workspaceId: z.string(),
+    projects: z.array(ProjectDescriptorPayloadSchema),
+    error: z.string().nullable(),
+  }),
+});
+
+export const RemoveProjectResponseMessageSchema = z.object({
+  type: z.literal("remove_project_response"),
+  payload: z.object({
+    requestId: z.string(),
+    workspaceId: z.string(),
+    projectId: z.string(),
+    removed: z.boolean(),
     error: z.string().nullable(),
   }),
 });
@@ -3394,6 +3497,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   FetchRecentProviderSessionsResponseMessageSchema,
   FetchWorkspacesResponseMessageSchema,
   OpenProjectResponseMessageSchema,
+  CreateWorkspaceResponseMessageSchema,
+  AddProjectResponseMessageSchema,
+  ListProjectsResponseMessageSchema,
+  RemoveProjectResponseMessageSchema,
   StartWorkspaceScriptResponseMessageSchema,
   ListAvailableEditorsResponseMessageSchema,
   OpenInEditorResponseMessageSchema,
@@ -3511,6 +3618,19 @@ export type ProjectCheckoutLitePayload = z.infer<typeof ProjectCheckoutLitePaylo
 export type ProjectPlacementPayload = z.infer<typeof ProjectPlacementPayloadSchema>;
 export type WorkspaceStateBucket = z.infer<typeof WorkspaceStateBucketSchema>;
 export type WorkspaceDescriptorPayload = z.infer<typeof WorkspaceDescriptorPayloadSchema>;
+export type ProjectDescriptorPayload = z.infer<typeof ProjectDescriptorPayloadSchema>;
+export type WorkspaceContainerDescriptorPayload = z.infer<
+  typeof WorkspaceContainerDescriptorPayloadSchema
+>;
+export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequestSchema>;
+export type CreateWorkspaceResponseMessage = z.infer<typeof CreateWorkspaceResponseMessageSchema>;
+export type AddProjectSource = z.infer<typeof AddProjectSourceSchema>;
+export type AddProjectRequest = z.infer<typeof AddProjectRequestSchema>;
+export type ListProjectsRequest = z.infer<typeof ListProjectsRequestSchema>;
+export type RemoveProjectRequest = z.infer<typeof RemoveProjectRequestSchema>;
+export type AddProjectResponseMessage = z.infer<typeof AddProjectResponseMessageSchema>;
+export type ListProjectsResponseMessage = z.infer<typeof ListProjectsResponseMessageSchema>;
+export type RemoveProjectResponseMessage = z.infer<typeof RemoveProjectResponseMessageSchema>;
 export type WorkspaceScriptLifecycle = z.infer<typeof WorkspaceScriptLifecycleSchema>;
 export type WorkspaceScriptHealth = z.infer<typeof WorkspaceScriptHealthSchema>;
 export type WorkspaceScriptPayload = z.infer<typeof WorkspaceScriptPayloadSchema>;

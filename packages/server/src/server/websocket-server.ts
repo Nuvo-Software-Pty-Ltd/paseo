@@ -7,7 +7,11 @@ import type { AgentStore } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
-import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
+import type {
+  ProjectRegistry,
+  WorkspaceContainerRegistry,
+  WorkspaceRegistry,
+} from "./workspace-registry.js";
 import { resolveProjectSource } from "./paseo-env.js";
 import type { ChatService } from "./chat/chat-service.js";
 import type { LoopService } from "./loop-service.js";
@@ -351,6 +355,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly agentStorage: AgentStore;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
+  private readonly workspaceContainerRegistry: WorkspaceContainerRegistry | null;
   private readonly chatService: ChatService;
   private readonly loopService: LoopService;
   private readonly scheduleService: ScheduleService;
@@ -436,6 +441,7 @@ export class VoiceAssistantWebSocketServer {
     github?: GitHubService,
     pushNotificationSender?: PushNotificationSender,
     workspaceAuth?: WorkspaceAuthCallback | null,
+    workspaceContainerRegistry?: WorkspaceContainerRegistry,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.serverId = serverId;
@@ -447,6 +453,7 @@ export class VoiceAssistantWebSocketServer {
     this.agentStorage = agentStorage;
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
+    this.workspaceContainerRegistry = workspaceContainerRegistry ?? null;
     const requiredServices = requireWebSocketServices({
       chatService,
       loopService,
@@ -943,6 +950,9 @@ export class VoiceAssistantWebSocketServer {
       agentStorage: this.agentStorage,
       projectRegistry: this.projectRegistry,
       workspaceRegistry: this.workspaceRegistry,
+      ...(this.workspaceContainerRegistry
+        ? { workspaceContainerRegistry: this.workspaceContainerRegistry }
+        : {}),
       chatService: this.chatService,
       loopService: this.loopService,
       scheduleService: this.scheduleService,

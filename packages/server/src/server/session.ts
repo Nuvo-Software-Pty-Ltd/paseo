@@ -30,6 +30,8 @@ import {
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type ProjectDescriptorPayload,
+  type AddProjectSource,
 } from "./messages.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { TerminalSessionController } from "../terminal/terminal-session-controller.js";
@@ -81,7 +83,12 @@ import type { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-sto
 import type { DaemonConfigStore } from "./daemon-config-store.js";
 import { applyMutableProviderConfigToOverrides } from "./daemon-config-store.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
-import { cloneWorkspaceRepo, fetchWorkspaceRepoUrl } from "./cloud-clone.js";
+import {
+  cloneWorkspaceRepo,
+  deriveProjectCloneSlug,
+  fetchWorkspaceRepoUrl,
+  parseGitHubRepoUrl,
+} from "./cloud-clone.js";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { getErrorMessage, getErrorMessageOr } from "../shared/error-utils.js";
 import { getAgentStatusPriority } from "../shared/agent-state-bucket.js";
@@ -145,15 +152,19 @@ import {
   checkoutLiteFromGitSnapshot,
   normalizeWorkspaceId as normalizePersistedWorkspaceId,
   deriveProjectGroupingName,
+  deriveProjectGroupingKey,
+  deriveCanonicalRepoUrl,
   classifyDirectoryForProjectMembership,
   deriveWorkspaceDisplayName,
 } from "./workspace-registry-model.js";
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
+  DEFAULT_CONTAINER_WORKSPACE_ID,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
   type ProjectRegistry,
+  type WorkspaceContainerRegistry,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import {
@@ -534,6 +545,9 @@ export interface SessionOptions {
   agentStorage: AgentStore;
   projectRegistry: ProjectRegistry;
   workspaceRegistry: WorkspaceRegistry;
+  // D-3.5a — container registry (optional; absent in legacy construction
+  // sites/tests → add_project/list_projects fall back to the default container).
+  workspaceContainerRegistry?: WorkspaceContainerRegistry;
   chatService: ChatService;
   scheduleService: ScheduleService;
   loopService: LoopService;
@@ -729,6 +743,7 @@ export class Session {
   private readonly agentStorage: AgentStore;
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
+  private readonly workspaceContainerRegistry: WorkspaceContainerRegistry | null;
   private readonly chatService: ChatService;
   private readonly scheduleService: ScheduleService;
   private readonly loopService: LoopService;
@@ -815,6 +830,7 @@ export class Session {
       agentStorage,
       projectRegistry,
       workspaceRegistry,
+      workspaceContainerRegistry,
       chatService,
       scheduleService,
       loopService,
@@ -861,6 +877,7 @@ export class Session {
     this.agentStorage = agentStorage;
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
+    this.workspaceContainerRegistry = workspaceContainerRegistry ?? null;
     this.chatService = chatService;
     this.scheduleService = scheduleService;
     this.loopService = loopService;
@@ -2031,6 +2048,14 @@ export class Session {
         return this.handleOpenInEditorRequest(msg);
       case "open_project_request":
         return this.handleOpenProjectRequest(msg);
+      case "create_workspace_request":
+        return this.handleCreateWorkspaceRequest(msg);
+      case "add_project_request":
+        return this.handleAddProjectRequest(msg);
+      case "list_projects_request":
+        return this.handleListProjectsRequest(msg);
+      case "remove_project_request":
+        return this.handleRemoveProjectRequest(msg);
       case "archive_workspace_request":
         return this.handleArchiveWorkspaceRequest(msg);
       case "file_explorer_request":
@@ -6693,6 +6718,20 @@ export class Session {
         workspaceId,
         logger: this.sessionLogger,
       });
+      // D-3.5a (T-5) — an empty workspace (created with no repo) has no primary
+      // repoUrl. Treat as a clean no-op: nothing to clone, no fail-loud.
+      if (!repoUrl) {
+        this.emit({
+          type: "workspace_setup_progress",
+          payload: {
+            workspaceId,
+            status: "completed",
+            detail: synthDetail("completed"),
+            error: null,
+          },
+        });
+        return;
+      }
       await cloneWorkspaceRepo({
         accountId,
         workspaceId,
@@ -6766,6 +6805,278 @@ export class Session {
         },
       });
     }
+  }
+
+  // D-3.5a (T-2) — create a Workspace container with just a name. On-host mints
+  // a `ws_<uuid>` and persists it; cloud returns the ambient container (its
+  // lifecycle is auth-service-owned). A container can hold zero projects.
+  private async handleCreateWorkspaceRequest(
+    request: Extract<SessionInboundMessage, { type: "create_workspace_request" }>,
+  ): Promise<void> {
+    try {
+      const timestamp = new Date().toISOString();
+      const displayName = request.displayName.trim() || "Workspace";
+      const workspaceId = isPaseoCloudMode()
+        ? process.env.PASEO_WORKSPACE_ID?.trim() || DEFAULT_CONTAINER_WORKSPACE_ID
+        : `ws_${uuidv4()}`;
+      const record = {
+        workspaceId,
+        displayName,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        archivedAt: null,
+      };
+      if (this.workspaceContainerRegistry) {
+        const existing = await this.workspaceContainerRegistry.get(workspaceId);
+        // Cloud: the ambient container already exists — keep its name. On-host:
+        // persist the freshly-minted container.
+        if (!existing) {
+          await this.workspaceContainerRegistry.upsert(record);
+        }
+        const persisted = (await this.workspaceContainerRegistry.get(workspaceId)) ?? record;
+        this.emit({
+          type: "create_workspace_response",
+          payload: { requestId: request.requestId, workspace: persisted, error: null },
+        });
+        return;
+      }
+      this.emit({
+        type: "create_workspace_response",
+        payload: { requestId: request.requestId, workspace: record, error: null },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to create workspace";
+      this.sessionLogger.error({ err: error }, "Failed to create workspace");
+      this.emit({
+        type: "create_workspace_response",
+        payload: { requestId: request.requestId, workspace: null, error: message },
+      });
+    }
+  }
+
+  // D-3.5a (T-3) — the container a project belongs to. A missing FK resolves
+  // to the ambient cloud container (every DynamoProjectStore row is
+  // workspace-scoped) or the on-host default container (upgrader backfill).
+  private resolveProjectContainerId(record: PersistedProjectRecord): string {
+    if (record.workspaceId) {
+      return record.workspaceId;
+    }
+    if (isPaseoCloudMode()) {
+      return process.env.PASEO_WORKSPACE_ID?.trim() || DEFAULT_CONTAINER_WORKSPACE_ID;
+    }
+    return DEFAULT_CONTAINER_WORKSPACE_ID;
+  }
+
+  private toProjectDescriptor(
+    record: PersistedProjectRecord,
+    fallbackWorkspaceId: string,
+  ): ProjectDescriptorPayload {
+    return {
+      projectId: record.projectId,
+      workspaceId: record.workspaceId ?? fallbackWorkspaceId,
+      displayName: record.displayName,
+      rootPath: record.rootPath,
+      repoUrl: record.repoUrl ?? null,
+      kind: record.kind,
+      archivedAt: record.archivedAt,
+    };
+  }
+
+  // D-3.5a (T-3) — list a workspace's projects. Filters the project registry by
+  // the containment FK; an empty workspace returns [] cleanly (T-5).
+  private async handleListProjectsRequest(
+    request: Extract<SessionInboundMessage, { type: "list_projects_request" }>,
+  ): Promise<void> {
+    try {
+      const all = await this.projectRegistry.list();
+      const projects = all
+        .filter((project) => !project.archivedAt)
+        .filter((project) => this.resolveProjectContainerId(project) === request.workspaceId)
+        .map((project) => this.toProjectDescriptor(project, request.workspaceId));
+      this.emit({
+        type: "list_projects_response",
+        payload: {
+          requestId: request.requestId,
+          workspaceId: request.workspaceId,
+          projects,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to list projects";
+      this.sessionLogger.error(
+        { err: error, workspaceId: request.workspaceId },
+        "Failed to list projects",
+      );
+      this.emit({
+        type: "list_projects_response",
+        payload: {
+          requestId: request.requestId,
+          workspaceId: request.workspaceId,
+          projects: [],
+          error: message,
+        },
+      });
+    }
+  }
+
+  // D-3.5a (T-3) — add a project (local dir or GitHub repo) to a workspace
+  // container via the single shared writer (F9).
+  private async handleAddProjectRequest(
+    request: Extract<SessionInboundMessage, { type: "add_project_request" }>,
+  ): Promise<void> {
+    try {
+      const record = await this.createProjectInWorkspace(request.workspaceId, request.source);
+      this.emit({
+        type: "add_project_response",
+        payload: {
+          requestId: request.requestId,
+          project: this.toProjectDescriptor(record, request.workspaceId),
+          error: null,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to add project";
+      this.sessionLogger.error(
+        { err: error, workspaceId: request.workspaceId },
+        "Failed to add project",
+      );
+      this.emit({
+        type: "add_project_response",
+        payload: { requestId: request.requestId, project: null, error: message },
+      });
+    }
+  }
+
+  // D-3.5a (T-3) — remove a project from its container. Does not touch sibling
+  // projects; a project belonging to a different container is a no-op.
+  private async handleRemoveProjectRequest(
+    request: Extract<SessionInboundMessage, { type: "remove_project_request" }>,
+  ): Promise<void> {
+    try {
+      const existing = await this.projectRegistry.get(request.projectId);
+      const belongs =
+        existing !== null && this.resolveProjectContainerId(existing) === request.workspaceId;
+      if (existing && belongs) {
+        await this.projectRegistry.remove(request.projectId);
+      }
+      this.emit({
+        type: "remove_project_response",
+        payload: {
+          requestId: request.requestId,
+          workspaceId: request.workspaceId,
+          projectId: request.projectId,
+          removed: Boolean(existing && belongs),
+          error: null,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to remove project";
+      this.sessionLogger.error(
+        { err: error, workspaceId: request.workspaceId, projectId: request.projectId },
+        "Failed to remove project",
+      );
+      this.emit({
+        type: "remove_project_response",
+        payload: {
+          requestId: request.requestId,
+          workspaceId: request.workspaceId,
+          projectId: request.projectId,
+          removed: false,
+          error: message,
+        },
+      });
+    }
+  }
+
+  // D-3.5a (T-3, F9) — the SINGLE project-creation writer shared by
+  // add_project. local_dir attaches an existing directory; github_repo clones
+  // (cloud) via cloneWorkspaceRepo directly. repoUrl is always credential-free.
+  private async createProjectInWorkspace(
+    workspaceId: string,
+    source: AddProjectSource,
+  ): Promise<PersistedProjectRecord> {
+    const timestamp = new Date().toISOString();
+    if (source.kind === "local_dir") {
+      const normalizedCwd = normalizePersistedWorkspaceId(source.path);
+      const checkout = await this.workspaceGitService.getCheckout(normalizedCwd);
+      const membership = classifyDirectoryForProjectMembership({ cwd: normalizedCwd, checkout });
+      const record = createPersistedProjectRecord({
+        projectId: membership.projectKey,
+        rootPath: membership.projectRootPath,
+        kind: membership.projectKind,
+        displayName: membership.projectName,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        workspaceId,
+        repoUrl: membership.repoUrl,
+      });
+      await this.projectRegistry.upsert(record);
+      return record;
+    }
+
+    // github_repo
+    const parsed = parseGitHubRepoUrl(source.repoUrl);
+    const canonicalRepoUrl = deriveCanonicalRepoUrl(source.repoUrl);
+    if (!parsed || !canonicalRepoUrl) {
+      throw new Error(`Invalid GitHub repository URL: ${source.repoUrl}`);
+    }
+    if (!isPaseoCloudMode()) {
+      // OQ-1 — self-host GitHub-clone source is not resolved in D-3.5a. The
+      // self-host GitHub source is "paste a URL" only once a clone strategy is
+      // chosen; for now self-host should add a local directory.
+      throw new Error(
+        "Adding a GitHub repo is only supported in cloud mode; add a local directory on self-host.",
+      );
+    }
+    const accountId = await this.resolveCloudAccountId(workspaceId);
+    const slug = deriveProjectCloneSlug(parsed);
+    const cloneResult = await cloneWorkspaceRepo({
+      accountId,
+      workspaceId,
+      repoUrl: canonicalRepoUrl,
+      smClient: new SecretsManagerClient({}),
+      logger: this.sessionLogger,
+      destSubdir: slug,
+    });
+    const projectKey = deriveProjectGroupingKey({
+      cwd: cloneResult.clonePath,
+      remoteUrl: canonicalRepoUrl,
+      mainRepoRoot: null,
+    });
+    const record = createPersistedProjectRecord({
+      projectId: projectKey,
+      rootPath: cloneResult.clonePath,
+      kind: "git",
+      displayName: deriveProjectGroupingName(projectKey),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      workspaceId,
+      repoUrl: canonicalRepoUrl,
+    });
+    await this.projectRegistry.upsert(record);
+    return record;
+  }
+
+  // D-3.5a — resolve the workspace's GitHub account id for token-scoped clones.
+  // The account id is workspace-level (shared across all the workspace's repos),
+  // so describe-workspace works even when the workspace has no primary repoUrl.
+  private async resolveCloudAccountId(workspaceId: string): Promise<string> {
+    const authServiceBaseUrl = process.env.ORCHESTRA_AUTH_INTERNAL_URL;
+    const hmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY;
+    if (!authServiceBaseUrl || !hmacKey) {
+      throw new Error(
+        "Adding a GitHub project requires ORCHESTRA_AUTH_INTERNAL_URL and " +
+          "ORCHESTRA_INTERNAL_HMAC_KEY to be set",
+      );
+    }
+    const { accountId } = await fetchWorkspaceRepoUrl({
+      authServiceBaseUrl,
+      hmacKey,
+      workspaceId,
+      logger: this.sessionLogger,
+    });
+    return accountId;
   }
 
   private buildWorkspaceScriptPayloadSnapshot(

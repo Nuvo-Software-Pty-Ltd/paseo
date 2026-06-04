@@ -4,13 +4,17 @@ import crypto from "node:crypto";
 import type { Logger } from "pino";
 
 // F9 design-out: this module is the SINGLE writer for the cloud
-// workspace-clone side-effect. Callers:
+// workspace-clone side-effect. Sanctioned callers:
 //   1. POST /api/internal/clone-repo (auth-service-triggered, HMAC-signed)
 //      — see internal-routes.ts.
 //   2. Workspace path repair-on-missing in handleOpenProjectRequest
 //      (session.ts) — gates on existsSync(/workspace/<id>) === false and
 //      re-clones before responding open_project_response.
-// Do not add a third caller. If a new side-effect writer is needed, route
+//   3. D-3.5a add_project (session.ts handleAddProjectRequest) — clones a
+//      2nd/Nth repo into a per-project subdir under /workspace/<ws>/. It calls
+//      this FUNCTION directly (NOT POST /api/internal/clone-repo, which is an
+//      inbound auth→daemon route — VERIFY-3.5a finding #5/#6).
+// Do not add a further caller. If a new side-effect writer is needed, route
 // it through cloneWorkspaceRepo here so the secret-fetch + clone primitive
 // stays unified.
 
@@ -101,10 +105,24 @@ export interface CloneWorkspaceRepoParams {
   smClient: SecretsManagerClient;
   logger: Logger;
   stage?: string;
+  // D-3.5a (T-4) — clone destination subdir under /workspace/<ws>/. Defaults
+  // to `.git-canonical` (the migrated first project; unchanged → no re-clone).
+  // add_project passes a per-project slug for 2nd/Nth repos.
+  destSubdir?: string;
 }
 
 export interface CloneWorkspaceRepoResult {
   workspacePath: string;
+  // The actual clone directory (`/workspace/<ws>/<destSubdir>`) — the new
+  // project's rootPath.
+  clonePath: string;
+}
+
+// D-3.5a (T-4 / OQ-6) — collision-free per-project slug. Two repos with the
+// same name in different orgs must not collide: slug = `<org>__<repo>`.
+export function deriveProjectCloneSlug(parsed: ParsedGitHubRepo): string {
+  const sanitize = (value: string) => value.replace(/[^A-Za-z0-9._-]/g, "-");
+  return `${sanitize(parsed.owner)}__${sanitize(parsed.repo)}`;
 }
 
 export async function cloneWorkspaceRepo(
@@ -121,7 +139,9 @@ export async function cloneWorkspaceRepo(
   const ghToken = await fetchGithubTokenForAccount({ stage, accountId, smClient, logger });
 
   const cloneUrl = `https://x-access-token:${ghToken}@github.com/${ghParsed.owner}/${ghParsed.repo}.git`;
-  const destPath = `/workspace/${workspaceId}/.git-canonical/`;
+  const subdir = params.destSubdir ?? ".git-canonical";
+  const clonePath = `/workspace/${workspaceId}/${subdir}`;
+  const destPath = `${clonePath}/`;
 
   logger.info(
     { workspaceId, owner: ghParsed.owner, repo: ghParsed.repo, destPath },
@@ -131,8 +151,8 @@ export async function cloneWorkspaceRepo(
   await runGitClone(cloneUrl, destPath);
 
   const workspacePath = `/workspace/${workspaceId}`;
-  logger.info({ workspaceId, workspacePath }, "Clone completed successfully");
-  return { workspacePath };
+  logger.info({ workspaceId, workspacePath, clonePath }, "Clone completed successfully");
+  return { workspacePath, clonePath };
 }
 
 // HMAC client for the auth-service-side describe-workspace lookup.
@@ -154,7 +174,10 @@ export interface FetchWorkspaceRepoUrlParams {
 
 export interface DescribeWorkspaceResponse {
   accountId: string;
-  repoUrl: string;
+  // D-3.5a (T-5) — nullable: an empty workspace (created with no repo) has no
+  // primary repoUrl. Callers that only need the accountId (e.g. add_project)
+  // tolerate null; the resume path treats null as "nothing to clone".
+  repoUrl: string | null;
 }
 
 export async function fetchWorkspaceRepoUrl(
@@ -191,10 +214,10 @@ export async function fetchWorkspaceRepoUrl(
   }
 
   const json = (await response.json()) as Partial<DescribeWorkspaceResponse>;
-  if (typeof json.accountId !== "string" || typeof json.repoUrl !== "string") {
-    throw new Error(
-      `describe-workspace response missing accountId/repoUrl (got ${JSON.stringify(json)})`,
-    );
+  if (typeof json.accountId !== "string") {
+    throw new Error(`describe-workspace response missing accountId (got ${JSON.stringify(json)})`);
   }
-  return { accountId: json.accountId, repoUrl: json.repoUrl };
+  // repoUrl may be null/absent for an empty workspace (D-3.5a T-5).
+  const repoUrl = typeof json.repoUrl === "string" ? json.repoUrl : null;
+  return { accountId: json.accountId, repoUrl };
 }

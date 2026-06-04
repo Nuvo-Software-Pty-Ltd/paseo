@@ -1088,6 +1088,7 @@ export async function createPaseoDaemon(
             github,
             config.pushNotificationSender,
             workspaceAuthCallback,
+            workspaceContainerRegistry,
           );
 
           if (relayEnabled) {
