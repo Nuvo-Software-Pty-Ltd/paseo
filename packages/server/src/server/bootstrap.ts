@@ -127,6 +127,16 @@ import { LoopService } from "./loop-service.js";
 import { FileBackedLoopStore, type LoopStore } from "./loop-store.js";
 import { ScheduleService } from "./schedule/service.js";
 import { FileBackedScheduleStore, type ScheduleStore } from "./schedule/store.js";
+import { FileBackedWebhookTriggerStore, type WebhookTriggerStore } from "./trigger/store.js";
+import { DynamoWebhookTriggerStore } from "./trigger/dynamo-store.js";
+import { FileBackedTriggerSecretStore } from "./trigger/secret-store.js";
+import { TriggerService } from "./trigger/service.js";
+import {
+  CloudTriggerProvisioner,
+  SelfHostTriggerProvisioner,
+  type TriggerProvisioner,
+} from "./trigger/provisioner.js";
+import { createSelfHostWebhookReceiver } from "./trigger/self-host-receiver.js";
 import { DaemonConfigStore } from "./daemon-config-store.js";
 import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 import { archivePersistedWorkspaceRecord } from "./workspace-archive-service.js";
@@ -506,8 +516,17 @@ export async function createPaseoDaemon(
   // Serve static files from public directory
   app.use("/public", express.static(staticDir));
 
-  // Middleware
-  app.use(express.json());
+  // Middleware. The self-host webhook receiver (D-3.5d, /hooks/*) needs the
+  // RAW request bytes to verify its per-trigger HMAC signature, so the
+  // global JSON parser must NOT consume those bodies — the receiver mounts
+  // its own raw-text parser scoped to /hooks.
+  app.use((req, res, next) => {
+    if (req.path.startsWith("/hooks/")) {
+      next();
+      return;
+    }
+    express.json()(req, res, next);
+  });
 
   // Health check endpoint
   app.get("/api/health", (_req, res) => {
@@ -716,10 +735,29 @@ export async function createPaseoDaemon(
   await scheduleService.start();
   logger.info({ elapsed: elapsed() }, "Schedule service initialized");
 
-  // T-15 / T-16 (D-3): mount the schedule-fire + file-download-internal
-  // routes now that scheduleService is constructed. Extracted helper
-  // keeps createPaseoDaemon under the per-function complexity ceiling.
-  mountLateInternalRoutes(app, logger, internalHmacKeyForLateMount, scheduleService);
+  // D-3.5d — webhook triggers. Construction + self-host receiver mount are
+  // extracted to a helper to keep createPaseoDaemon under the complexity
+  // ceiling. The provisioner is the ONLY cloud/self-host discriminator.
+  const triggerService = buildTriggerService(app, {
+    paseoHome: config.paseoHome,
+    logger,
+    agentManager,
+    agentStorage,
+    store: d3Stores.trigger,
+  });
+  logger.info({ elapsed: elapsed() }, "Trigger service initialized");
+
+  // T-15 / T-16 (D-3) + D-3.5d webhook-fire: mount the schedule-fire +
+  // webhook-fire + file-download-internal routes now that the services are
+  // constructed. Extracted helper keeps createPaseoDaemon under the
+  // per-function complexity ceiling.
+  mountLateInternalRoutes(
+    app,
+    logger,
+    internalHmacKeyForLateMount,
+    scheduleService,
+    triggerService,
+  );
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
   const persistedRecords = await agentStorage.list();
   // T-5 (D-3) — container-boot rehydration. Cloud-mode rehydrates
@@ -1089,6 +1127,7 @@ export async function createPaseoDaemon(
             config.pushNotificationSender,
             workspaceAuthCallback,
             workspaceContainerRegistry,
+            triggerService,
           );
 
           if (relayEnabled) {
@@ -1278,11 +1317,67 @@ async function runCloudBootRehydration(deps: {
   }
 }
 
+// D-3.5d — build the TriggerService and (self-host only) mount its public
+// /hooks receiver. The provisioner is the ONLY cloud/self-host
+// discriminator: an injected internal URL → cloud register hook; its
+// absence → local secret generation + the self-host receiver. No
+// `if (cloud)` branch (mirrors the schedule store's lifecycle-URL seam).
+function buildTriggerService(
+  app: express.Express,
+  deps: {
+    paseoHome: string;
+    logger: Logger;
+    agentManager: AgentManager;
+    agentStorage: AgentStore;
+    store: WebhookTriggerStore;
+  },
+): TriggerService {
+  const { logger } = deps;
+  const cloudInternalUrl =
+    process.env.ORCHESTRA_LIFECYCLE_INTERNAL_URL?.trim() ||
+    process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim();
+  const internalHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim();
+  const workspaceId = isPaseoCloudMode() ? process.env.PASEO_WORKSPACE_ID?.trim() : undefined;
+  const useCloudProvisioner = Boolean(cloudInternalUrl && internalHmacKey && workspaceId);
+  const secretStore = useCloudProvisioner
+    ? null
+    : new FileBackedTriggerSecretStore(path.join(deps.paseoHome, "triggers", "secrets"));
+  const provisioner: TriggerProvisioner =
+    useCloudProvisioner && cloudInternalUrl && internalHmacKey && workspaceId
+      ? new CloudTriggerProvisioner({
+          internalUrl: cloudInternalUrl,
+          hmacKey: internalHmacKey,
+          workspaceId,
+          logger,
+        })
+      : new SelfHostTriggerProvisioner(
+          process.env.PASEO_WEBHOOK_BASE_URL?.trim() || "http://localhost:6767",
+          // secretStore is non-null on this branch by construction.
+          secretStore as FileBackedTriggerSecretStore,
+        );
+  const triggerService = new TriggerService({
+    store: deps.store,
+    provisioner,
+    logger,
+    agentManager: deps.agentManager,
+    agentStorage: deps.agentStorage,
+  });
+  // Self-host: mount the public /hooks/:webhookId receiver. Bypasses the
+  // daemon-password gate (auth.ts shouldBypassBearerAuth) and the global
+  // JSON parser; authenticates each request by its per-trigger signature.
+  if (secretStore) {
+    app.use(createSelfHostWebhookReceiver({ triggerService, secretStore, logger }));
+    logger.info("Self-host webhook receiver mounted at /hooks/:webhookId");
+  }
+  return triggerService;
+}
+
 function mountLateInternalRoutes(
   app: express.Express,
   logger: Logger,
   internalHmacKeyForLateMount: string | null,
   scheduleService: ScheduleService,
+  triggerService: TriggerService,
 ): void {
   if (!internalHmacKeyForLateMount) return;
   const workspaceIdForLateRoutes = process.env.PASEO_WORKSPACE_ID?.trim();
@@ -1292,6 +1387,8 @@ function mountLateInternalRoutes(
       logger,
       scheduleService,
       scheduleStore: scheduleService.getStore(),
+      triggerService,
+      triggerStore: triggerService.getStore(),
       ...(workspaceIdForLateRoutes ? { expectedWorkspaceId: workspaceIdForLateRoutes } : {}),
       ...(workspaceIdForLateRoutes
         ? { workspaceRoot: `/workspace/${workspaceIdForLateRoutes}` }
@@ -1383,6 +1480,12 @@ export interface D3DaemonStores {
   loop: LoopStore;
   schedule: ScheduleStore;
   /**
+   * D-3.5d webhook-trigger store. On-host: `FileBackedWebhookTriggerStore`
+   * (`$PASEO_HOME/triggers/<id>.json`); cloud: `DynamoWebhookTriggerStore`
+   * (`<ws>#trigger` partition). Both satisfy `WebhookTriggerStore`.
+   */
+  trigger: WebhookTriggerStore;
+  /**
    * Durable AgentTimelineStore for cloud mode (`<ws>#agent#timeline`
    * partition). `undefined` on-host — AgentManager falls back to the
    * in-memory store. The cloud value is consumed at AgentManager
@@ -1428,6 +1531,7 @@ export async function buildD3DaemonStores(deps: {
       permission: new FileBackedPermissionStore({ paseoHome, logger }),
       loop: new FileBackedLoopStore({ paseoHome, logger }),
       schedule: new FileBackedScheduleStore(path.join(paseoHome, "schedules")),
+      trigger: new FileBackedWebhookTriggerStore(path.join(paseoHome, "triggers")),
       agentTimeline: undefined,
       agent: new AgentStorage(agentStoragePath, logger),
       project: new FileBackedProjectRegistry(
@@ -1461,6 +1565,11 @@ export async function buildD3DaemonStores(deps: {
       logger,
       ...(lifecycleInternalUrl ? { lifecycleInternalUrl } : {}),
       ...(hmacKey ? { hmacKey } : {}),
+    }),
+    trigger: new DynamoWebhookTriggerStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
     }),
     agentTimeline: new DynamoAgentTimelineStore({
       client: dynamoLike,
