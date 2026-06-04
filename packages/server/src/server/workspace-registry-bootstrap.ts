@@ -270,6 +270,12 @@ export async function bootstrapWorkspaceRegistries(options: {
   // when the local clone is absent at boot (cold respawn) so the migrated
   // project's identity/repoUrl does not degrade. Canonicalized before use,
   // so a tokenized seed never leaks. Omitted on-host.
+  //
+  // COMPAT(workspace-repo-migration): added in v0.1.73, remove after all 3
+  // live cloud workspaces (ws_74d480de, ws_7258b0f1, ws_b6e79fef) are
+  // confirmed migrated (target 2026-09). The seed bridges the legacy
+  // `<ws>#metadata.repoUrl` → the first Project's repoUrl during the model
+  // change; once every workspace carries a real project row it is unused.
   migrationRepoUrlSeed?: string | null;
 }): Promise<void> {
   const [projectsExists, workspacesExists] = await Promise.all([
