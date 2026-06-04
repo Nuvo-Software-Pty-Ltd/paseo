@@ -218,6 +218,7 @@ import { ChatService, ChatServiceError, parseMentionAgentIds } from "./chat/chat
 import { notifyChatMentions, prepareChatMentionFanout } from "./chat/chat-mentions.js";
 import { LoopService } from "./loop-service.js";
 import { ScheduleService } from "./schedule/service.js";
+import { TriggerService } from "./trigger/service.js";
 import { execCommand } from "../utils/spawn.js";
 import {
   createGitHubService,
@@ -550,6 +551,10 @@ export interface SessionOptions {
   workspaceContainerRegistry?: WorkspaceContainerRegistry;
   chatService: ChatService;
   scheduleService: ScheduleService;
+  // D-3.5d — webhook triggers. Optional so legacy construction sites/test
+  // stubs (no trigger backend) keep compiling; trigger/* RPCs surface a
+  // clean rpc_error when absent.
+  triggerService?: TriggerService;
   loopService: LoopService;
   checkoutDiffManager: CheckoutDiffManager;
   github?: GitHubService;
@@ -746,6 +751,7 @@ export class Session {
   private readonly workspaceContainerRegistry: WorkspaceContainerRegistry | null;
   private readonly chatService: ChatService;
   private readonly scheduleService: ScheduleService;
+  private readonly triggerService: TriggerService | null;
   private readonly loopService: LoopService;
   private readonly checkoutDiffManager: CheckoutDiffManager;
   private readonly github: GitHubService;
@@ -833,6 +839,7 @@ export class Session {
       workspaceContainerRegistry,
       chatService,
       scheduleService,
+      triggerService,
       loopService,
       checkoutDiffManager,
       github,
@@ -880,6 +887,7 @@ export class Session {
     this.workspaceContainerRegistry = workspaceContainerRegistry ?? null;
     this.chatService = chatService;
     this.scheduleService = scheduleService;
+    this.triggerService = triggerService ?? null;
     this.loopService = loopService;
     this.checkoutDiffManager = checkoutDiffManager;
     this.github = github ?? createGitHubService();
@@ -2148,6 +2156,29 @@ export class Session {
         return this.handleScheduleRunOnceRequest(msg);
       case "schedule/update":
         return this.handleScheduleUpdateRequest(msg);
+      default:
+        return this.dispatchTriggerMessage(msg);
+    }
+  }
+
+  private dispatchTriggerMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "trigger/create":
+        return this.handleTriggerCreateRequest(msg);
+      case "trigger/list":
+        return this.handleTriggerListRequest(msg);
+      case "trigger/inspect":
+        return this.handleTriggerInspectRequest(msg);
+      case "trigger/logs":
+        return this.handleTriggerLogsRequest(msg);
+      case "trigger/update":
+        return this.handleTriggerUpdateRequest(msg);
+      case "trigger/delete":
+        return this.handleTriggerDeleteRequest(msg);
+      case "trigger/run-once":
+        return this.handleTriggerRunOnceRequest(msg);
+      case "trigger/rotate-secret":
+        return this.handleTriggerRotateSecretRequest(msg);
       default:
         return undefined;
     }
@@ -8942,6 +8973,211 @@ export class Session {
       });
     } catch (error) {
       this.emitScheduleRpcError(request, error);
+    }
+  }
+
+  // ---- D-3.5d webhook triggers ----------------------------------------
+
+  private toTriggerSummary(
+    trigger: Awaited<ReturnType<TriggerService["inspect"]>>,
+  ): Extract<
+    SessionOutboundMessage,
+    { type: "trigger/list/response" }
+  >["payload"]["triggers"][number] {
+    const { runs: _runs, ...summary } = trigger;
+    return summary;
+  }
+
+  private requireTriggerService(): TriggerService {
+    if (!this.triggerService) {
+      throw new Error("Webhook triggers are not supported by this host");
+    }
+    return this.triggerService;
+  }
+
+  private emitTriggerRpcError(
+    request: Extract<
+      SessionInboundMessage,
+      {
+        type:
+          | "trigger/create"
+          | "trigger/list"
+          | "trigger/inspect"
+          | "trigger/logs"
+          | "trigger/update"
+          | "trigger/delete"
+          | "trigger/run-once"
+          | "trigger/rotate-secret";
+      }
+    >,
+    error: unknown,
+  ): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.sessionLogger.error({ err: error, requestType: request.type }, "Trigger request failed");
+    this.emit({
+      type: "rpc_error",
+      payload: {
+        requestId: request.requestId,
+        requestType: request.type,
+        error: message,
+        code: "trigger_request_failed",
+      },
+    });
+  }
+
+  private async handleTriggerCreateRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/create" }>,
+  ): Promise<void> {
+    try {
+      const target =
+        request.target.type === "self"
+          ? { type: "agent" as const, agentId: request.target.agentId }
+          : request.target;
+      const { trigger, secret, ingressUrl } = await this.requireTriggerService().create({
+        prompt: request.prompt,
+        name: request.name,
+        target,
+        payloadTemplate: request.payloadTemplate,
+        enabled: request.enabled,
+      });
+      this.emit({
+        type: "trigger/create/response",
+        payload: {
+          requestId: request.requestId,
+          trigger: this.toTriggerSummary(trigger),
+          secret,
+          ingressUrl,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerListRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/list" }>,
+  ): Promise<void> {
+    try {
+      const triggers = await this.requireTriggerService().list();
+      this.emit({
+        type: "trigger/list/response",
+        payload: {
+          requestId: request.requestId,
+          triggers: triggers.map((trigger) => this.toTriggerSummary(trigger)),
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerInspectRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/inspect" }>,
+  ): Promise<void> {
+    try {
+      const trigger = await this.requireTriggerService().inspect(request.triggerId);
+      this.emit({
+        type: "trigger/inspect/response",
+        payload: { requestId: request.requestId, trigger, error: null },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerLogsRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/logs" }>,
+  ): Promise<void> {
+    try {
+      const runs = await this.requireTriggerService().logs(request.triggerId);
+      this.emit({
+        type: "trigger/logs/response",
+        payload: { requestId: request.requestId, runs, error: null },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerUpdateRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/update" }>,
+  ): Promise<void> {
+    try {
+      const target =
+        request.target?.type === "self"
+          ? { type: "agent" as const, agentId: request.target.agentId }
+          : request.target;
+      const trigger = await this.requireTriggerService().update({
+        id: request.triggerId,
+        ...(request.name !== undefined ? { name: request.name } : {}),
+        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(target !== undefined ? { target } : {}),
+        ...(request.payloadTemplate !== undefined
+          ? { payloadTemplate: request.payloadTemplate }
+          : {}),
+        ...(request.enabled !== undefined ? { enabled: request.enabled } : {}),
+      });
+      this.emit({
+        type: "trigger/update/response",
+        payload: { requestId: request.requestId, trigger, error: null },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerDeleteRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/delete" }>,
+  ): Promise<void> {
+    try {
+      await this.requireTriggerService().delete(request.triggerId);
+      this.emit({
+        type: "trigger/delete/response",
+        payload: { requestId: request.requestId, triggerId: request.triggerId, error: null },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerRunOnceRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/run-once" }>,
+  ): Promise<void> {
+    try {
+      const trigger = await this.requireTriggerService().runOnce(
+        request.triggerId,
+        request.payload,
+      );
+      this.emit({
+        type: "trigger/run-once/response",
+        payload: { requestId: request.requestId, trigger, error: null },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
+    }
+  }
+
+  private async handleTriggerRotateSecretRequest(
+    request: Extract<SessionInboundMessage, { type: "trigger/rotate-secret" }>,
+  ): Promise<void> {
+    try {
+      const { trigger, secret, ingressUrl } = await this.requireTriggerService().rotateSecret(
+        request.triggerId,
+      );
+      this.emit({
+        type: "trigger/rotate-secret/response",
+        payload: {
+          requestId: request.requestId,
+          trigger: this.toTriggerSummary(trigger),
+          secret,
+          ingressUrl,
+          error: null,
+        },
+      });
+    } catch (error) {
+      this.emitTriggerRpcError(request, error);
     }
   }
 

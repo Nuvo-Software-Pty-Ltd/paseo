@@ -41,6 +41,24 @@ import {
   ScheduleUpdateResponseSchema,
 } from "../server/schedule/rpc-schemas.js";
 import {
+  TriggerCreateRequestSchema,
+  TriggerListRequestSchema,
+  TriggerInspectRequestSchema,
+  TriggerLogsRequestSchema,
+  TriggerUpdateRequestSchema,
+  TriggerDeleteRequestSchema,
+  TriggerRunOnceRequestSchema,
+  TriggerRotateSecretRequestSchema,
+  TriggerCreateResponseSchema,
+  TriggerListResponseSchema,
+  TriggerInspectResponseSchema,
+  TriggerLogsResponseSchema,
+  TriggerUpdateResponseSchema,
+  TriggerDeleteResponseSchema,
+  TriggerRunOnceResponseSchema,
+  TriggerRotateSecretResponseSchema,
+} from "../server/trigger/rpc-schemas.js";
+import {
   LoopRunRequestSchema,
   LoopListRequestSchema,
   LoopInspectRequestSchema,
@@ -1857,6 +1875,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ScheduleDeleteRequestSchema,
   ScheduleRunOnceRequestSchema,
   ScheduleUpdateRequestSchema,
+  TriggerCreateRequestSchema,
+  TriggerListRequestSchema,
+  TriggerInspectRequestSchema,
+  TriggerLogsRequestSchema,
+  TriggerUpdateRequestSchema,
+  TriggerDeleteRequestSchema,
+  TriggerRunOnceRequestSchema,
+  TriggerRotateSecretRequestSchema,
   LoopRunRequestSchema,
   LoopListRequestSchema,
   LoopInspectRequestSchema,
@@ -2038,6 +2064,15 @@ export const ServerInfoStatusPayloadSchema = z
         // should offer (D-3.5a T-6). `.optional()` so old daemons (no field)
         // → client defaults to "local_and_github" (both sources, safe).
         projectSource: z.enum(["local_and_github", "github_only", "local_only"]).optional(),
+        // COMPAT(webhookTriggers): added in v0.1.74, drop the gate when
+        // floor >= v0.1.74. The daemon advertises this once the webhook
+        // trigger backend (D-3.5d) is present; the app gates the whole
+        // webhook automation UI on it. MUST be declared here — `features`
+        // is a STRICT object that strips unknown keys, so an absent
+        // declaration would silently hide the flag from a NEW client.
+        // `.optional()` so old daemons (no field) → app shows schedules
+        // only (feature-contract: "Update the host to use this").
+        webhookTriggers: z.boolean().optional(),
       })
       .optional(),
   })
@@ -3585,6 +3620,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ScheduleDeleteResponseSchema,
   ScheduleRunOnceResponseSchema,
   ScheduleUpdateResponseSchema,
+  TriggerCreateResponseSchema,
+  TriggerListResponseSchema,
+  TriggerInspectResponseSchema,
+  TriggerLogsResponseSchema,
+  TriggerUpdateResponseSchema,
+  TriggerDeleteResponseSchema,
+  TriggerRunOnceResponseSchema,
+  TriggerRotateSecretResponseSchema,
   LoopRunResponseSchema,
   LoopListResponseSchema,
   LoopInspectResponseSchema,
@@ -3708,6 +3751,14 @@ export type ScheduleResumeResponse = z.infer<typeof ScheduleResumeResponseSchema
 export type ScheduleDeleteResponse = z.infer<typeof ScheduleDeleteResponseSchema>;
 export type ScheduleRunOnceResponse = z.infer<typeof ScheduleRunOnceResponseSchema>;
 export type ScheduleUpdateResponse = z.infer<typeof ScheduleUpdateResponseSchema>;
+export type TriggerCreateResponse = z.infer<typeof TriggerCreateResponseSchema>;
+export type TriggerListResponse = z.infer<typeof TriggerListResponseSchema>;
+export type TriggerInspectResponse = z.infer<typeof TriggerInspectResponseSchema>;
+export type TriggerLogsResponse = z.infer<typeof TriggerLogsResponseSchema>;
+export type TriggerUpdateResponse = z.infer<typeof TriggerUpdateResponseSchema>;
+export type TriggerDeleteResponse = z.infer<typeof TriggerDeleteResponseSchema>;
+export type TriggerRunOnceResponse = z.infer<typeof TriggerRunOnceResponseSchema>;
+export type TriggerRotateSecretResponse = z.infer<typeof TriggerRotateSecretResponseSchema>;
 export type LoopRunResponse = z.infer<typeof LoopRunResponseSchema>;
 export type LoopListResponse = z.infer<typeof LoopListResponseSchema>;
 export type LoopInspectResponse = z.infer<typeof LoopInspectResponseSchema>;
@@ -3771,6 +3822,14 @@ export type ScheduleResumeRequest = z.infer<typeof ScheduleResumeRequestSchema>;
 export type ScheduleDeleteRequest = z.infer<typeof ScheduleDeleteRequestSchema>;
 export type ScheduleRunOnceRequest = z.infer<typeof ScheduleRunOnceRequestSchema>;
 export type ScheduleUpdateRequest = z.infer<typeof ScheduleUpdateRequestSchema>;
+export type TriggerCreateRequest = z.infer<typeof TriggerCreateRequestSchema>;
+export type TriggerListRequest = z.infer<typeof TriggerListRequestSchema>;
+export type TriggerInspectRequest = z.infer<typeof TriggerInspectRequestSchema>;
+export type TriggerLogsRequest = z.infer<typeof TriggerLogsRequestSchema>;
+export type TriggerUpdateRequest = z.infer<typeof TriggerUpdateRequestSchema>;
+export type TriggerDeleteRequest = z.infer<typeof TriggerDeleteRequestSchema>;
+export type TriggerRunOnceRequest = z.infer<typeof TriggerRunOnceRequestSchema>;
+export type TriggerRotateSecretRequest = z.infer<typeof TriggerRotateSecretRequestSchema>;
 export type LoopRunRequest = z.infer<typeof LoopRunRequestSchema>;
 export type LoopListRequest = z.infer<typeof LoopListRequestSchema>;
 export type LoopInspectRequest = z.infer<typeof LoopInspectRequestSchema>;
