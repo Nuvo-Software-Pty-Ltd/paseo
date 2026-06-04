@@ -989,6 +989,43 @@ export const WriteProjectConfigRequestMessageSchema = z.object({
 });
 
 // ============================================================================
+// D-3.5c — Scoped environment variables (workspace + project scope)
+// ============================================================================
+//
+// The daemon stores user env vars at two scopes and injects them into both
+// agent subprocesses and terminal sessions. These RPCs let the app read and
+// mutate them. `scope` is "workspace" (scopeId = container workspaceId) or
+// "project" (scopeId = projectId). New message types — old clients/daemons
+// ignore unknown discriminants, so this is additive on the wire.
+
+export const ScopedEnvVarScopeSchema = z.enum(["workspace", "project"]);
+
+export const ListScopedEnvVarsRequestMessageSchema = z.object({
+  type: z.literal("list_scoped_env_vars_request"),
+  requestId: z.string(),
+  scope: ScopedEnvVarScopeSchema,
+  scopeId: z.string(),
+});
+
+export const SetScopedEnvVarRequestMessageSchema = z.object({
+  type: z.literal("set_scoped_env_var_request"),
+  requestId: z.string(),
+  scope: ScopedEnvVarScopeSchema,
+  scopeId: z.string(),
+  key: z.string(),
+  value: z.string(),
+  secret: z.boolean().optional(),
+});
+
+export const DeleteScopedEnvVarRequestMessageSchema = z.object({
+  type: z.literal("delete_scoped_env_var_request"),
+  requestId: z.string(),
+  scope: ScopedEnvVarScopeSchema,
+  scopeId: z.string(),
+  key: z.string(),
+});
+
+// ============================================================================
 // Dictation Streaming (lossless, resumable)
 // ============================================================================
 
@@ -1767,6 +1804,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetDaemonConfigRequestMessageSchema,
   ReadProjectConfigRequestMessageSchema,
   WriteProjectConfigRequestMessageSchema,
+  ListScopedEnvVarsRequestMessageSchema,
+  SetScopedEnvVarRequestMessageSchema,
+  DeleteScopedEnvVarRequestMessageSchema,
   DictationStreamStartMessageSchema,
   DictationStreamChunkMessageSchema,
   DictationStreamFinishMessageSchema,
@@ -2038,6 +2078,14 @@ export const ServerInfoStatusPayloadSchema = z
         // should offer (D-3.5a T-6). `.optional()` so old daemons (no field)
         // → client defaults to "local_and_github" (both sources, safe).
         projectSource: z.enum(["local_and_github", "github_only", "local_only"]).optional(),
+        // COMPAT(scopedEnvVars): added in v0.1.74 (D-3.5c), drop the gate
+        // when floor >= v0.1.74. Signals the daemon supports the scoped
+        // env-var RPCs (list/set/delete). `.optional()` so old daemons (no
+        // field) → client treats it as absent and shows "Update the host to
+        // use this." in the env-var editor. Strict-features gotcha: this
+        // flag MUST be declared here or it is stripped before reaching the
+        // client.
+        scopedEnvVars: z.boolean().optional(),
       })
       .optional(),
   })
@@ -2709,6 +2757,79 @@ export const WriteProjectConfigResponseMessageSchema = z.object({
       repoRoot: z.string(),
       ok: z.literal(false),
       error: ProjectConfigRpcErrorSchema,
+    }),
+  ]),
+});
+
+// D-3.5c — a single env-var as returned to the client. Secret values are
+// write-only: the daemon returns a masked placeholder (the UI shows ••••)
+// and the real value is re-sent only when the user edits it (daemon OQ-3).
+export const ScopedEnvVarViewSchema = z
+  .object({
+    key: z.string(),
+    value: z.string(),
+    secret: z.boolean().optional(),
+    updatedAt: z.string(),
+  })
+  .passthrough();
+
+export const ScopedEnvVarRpcErrorSchema = z
+  .object({
+    code: z.string(),
+    message: z.string().optional(),
+  })
+  .passthrough();
+
+export const ListScopedEnvVarsResponseMessageSchema = z.object({
+  type: z.literal("list_scoped_env_vars_response"),
+  payload: z.discriminatedUnion("ok", [
+    z.object({
+      requestId: z.string(),
+      scope: ScopedEnvVarScopeSchema,
+      scopeId: z.string(),
+      ok: z.literal(true),
+      vars: z.array(ScopedEnvVarViewSchema),
+    }),
+    z.object({
+      requestId: z.string(),
+      ok: z.literal(false),
+      error: ScopedEnvVarRpcErrorSchema,
+    }),
+  ]),
+});
+
+export const SetScopedEnvVarResponseMessageSchema = z.object({
+  type: z.literal("set_scoped_env_var_response"),
+  payload: z.discriminatedUnion("ok", [
+    z.object({
+      requestId: z.string(),
+      scope: ScopedEnvVarScopeSchema,
+      scopeId: z.string(),
+      ok: z.literal(true),
+      var: ScopedEnvVarViewSchema,
+    }),
+    z.object({
+      requestId: z.string(),
+      ok: z.literal(false),
+      error: ScopedEnvVarRpcErrorSchema,
+    }),
+  ]),
+});
+
+export const DeleteScopedEnvVarResponseMessageSchema = z.object({
+  type: z.literal("delete_scoped_env_var_response"),
+  payload: z.discriminatedUnion("ok", [
+    z.object({
+      requestId: z.string(),
+      scope: ScopedEnvVarScopeSchema,
+      scopeId: z.string(),
+      key: z.string(),
+      ok: z.literal(true),
+    }),
+    z.object({
+      requestId: z.string(),
+      ok: z.literal(false),
+      error: ScopedEnvVarRpcErrorSchema,
     }),
   ]),
 });
@@ -3515,6 +3636,9 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetDaemonConfigResponseMessageSchema,
   ReadProjectConfigResponseMessageSchema,
   WriteProjectConfigResponseMessageSchema,
+  ListScopedEnvVarsResponseMessageSchema,
+  SetScopedEnvVarResponseMessageSchema,
+  DeleteScopedEnvVarResponseMessageSchema,
   SetAgentModeResponseMessageSchema,
   SetAgentModelResponseMessageSchema,
   SetAgentThinkingResponseMessageSchema,
