@@ -4565,6 +4565,7 @@ export class CodexAppServerAgentClient implements AgentClient {
     const child = spawnProcess(launchPrefix.command, args, {
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
+      // D-3.5c — scoped env vars (workspace + project) ride `launchEnv`.
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [launchEnv],
