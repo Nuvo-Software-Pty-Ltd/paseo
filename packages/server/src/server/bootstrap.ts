@@ -120,6 +120,10 @@ import {
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { DynamoProjectStore } from "./project/dynamo-project-store.js";
+import { FileBackedEnvVarStore, type EnvVarStore } from "./env/env-var-store.js";
+import { DynamoEnvVarStore } from "./env/dynamo-env-var-store.js";
+import { createScopedEnvResolver, resolveAmbientContainerId } from "./env/scoped-env-resolver.js";
+import { createProjectForCwdResolver } from "./env/project-for-cwd.js";
 import { ChatService } from "./chat/chat-service.js";
 import { FileBackedChatStore, type ChatStore } from "./chat/chat-store.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
@@ -637,6 +641,21 @@ export async function createPaseoDaemon(
     workspaceGitService,
     isDev: config.isDev === true,
   });
+  // D-3.5c — the ONE shared scoped-env resolver (DECISION P-2). Built once
+  // here and injected into BOTH the agent injection site (AgentManager →
+  // buildLaunchContext) and the terminal injection site (Session →
+  // TerminalSessionController), so resolution is byte-identical for the
+  // same cwd. Open-core: no cloud branch — only the store backing it
+  // (file vs Dynamo) differs, swapped at construction in buildD3DaemonStores.
+  const resolveScopedEnv = createScopedEnvResolver({
+    envStore: d3Stores.envVar,
+    resolveProjectForCwd: createProjectForCwdResolver({
+      projectRegistry,
+      getCheckout: (cwd) => workspaceGitService.getCheckout(cwd),
+    }),
+    ambientContainerId: () => resolveAmbientContainerId(),
+    logger,
+  });
   // T-4 (D-3) — durable permission queue. On-host gets
   // FileBackedPermissionStore for parity (new directory under
   // $PASEO_HOME/permissions/). Cloud-mode (D-3.10) gets
@@ -657,6 +676,7 @@ export async function createPaseoDaemon(
     onAgentTurnEnd: buildCloudTurnEndHook(logger),
     permissionStore,
     durableTimelineStore: d3Stores.agentTimeline,
+    resolveScopedEnv,
     logger,
   });
 
@@ -1089,6 +1109,8 @@ export async function createPaseoDaemon(
             config.pushNotificationSender,
             workspaceAuthCallback,
             workspaceContainerRegistry,
+            resolveScopedEnv,
+            d3Stores.envVar,
           );
 
           if (relayEnabled) {
@@ -1406,6 +1428,14 @@ export interface D3DaemonStores {
    */
   project: ProjectRegistry;
   /**
+   * D-3.5c — scoped env-var store. On-host this is `FileBackedEnvVarStore`
+   * (`$PASEO_HOME/projects/env-vars.json`); cloud mode swaps in
+   * `DynamoEnvVarStore` (partition `<ws>#envvar`). Both satisfy the
+   * `EnvVarStore` interface; the shared resolver reads from it at both
+   * injection sites (agent + terminal).
+   */
+  envVar: EnvVarStore;
+  /**
    * The DynamoLike client backing the four stores in cloud mode.
    * `null` in on-host mode (no DDB construction). The caller uses
    * this to issue the boot-time self-probe (`selfProbeDdb`).
@@ -1434,6 +1464,7 @@ export async function buildD3DaemonStores(deps: {
         path.join(paseoHome, "projects", "projects.json"),
         logger,
       ),
+      envVar: new FileBackedEnvVarStore({ paseoHome, logger }),
       dynamoLike: null,
     };
   }
@@ -1477,6 +1508,11 @@ export async function buildD3DaemonStores(deps: {
       workspaceId: cloudWorkspaceId,
       logger,
     }),
+    envVar: new DynamoEnvVarStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+    }),
     dynamoLike,
   };
 }
@@ -1502,6 +1538,11 @@ export const DAEMON_OWNED_PARTITION_PREFIXES = [
   "agent#timeline",
   "agent#metadata",
   "project",
+  // D-3.5c — scoped env-var store partition (`<ws>#envvar`). The cloud
+  // IAM template (workspace-role-template.ts WorkspaceDynamoDb
+  // LeadingKeys) must grant `<ws>#envvar` + `<ws>#envvar#*` alongside
+  // this; add both together.
+  "envvar",
 ] as const;
 
 export type DaemonOwnedPartitionPrefix = (typeof DAEMON_OWNED_PARTITION_PREFIXES)[number];

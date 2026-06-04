@@ -167,6 +167,8 @@ import {
   type WorkspaceContainerRegistry,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
+import type { EnvVarStore, ScopedEnvVarRecord } from "./env/env-var-store.js";
+import { validateEnvVarKeyValue } from "./env/scoped-env-resolver.js";
 import {
   buildVoiceModeSystemPrompt,
   stripVoiceModeSystemPrompt,
@@ -530,6 +532,25 @@ interface VoiceTranscriptionResultPayload {
   debugRecordingPath?: string;
 }
 
+// D-3.5c — placeholder returned in place of a secret env-var value on list
+// (the UI shows ••••). The real value is never echoed; it is re-sent only
+// when the user edits it (daemon OQ-3).
+const MASKED_ENV_VALUE = "••••••••";
+
+function toScopedEnvVarView(record: ScopedEnvVarRecord): {
+  key: string;
+  value: string;
+  secret?: boolean;
+  updatedAt: string;
+} {
+  return {
+    key: record.key,
+    value: record.secret ? MASKED_ENV_VALUE : record.value,
+    ...(record.secret ? { secret: true } : {}),
+    updatedAt: record.updatedAt,
+  };
+}
+
 export interface SessionOptions {
   clientId: string;
   appVersion?: string | null;
@@ -548,6 +569,12 @@ export interface SessionOptions {
   // D-3.5a — container registry (optional; absent in legacy construction
   // sites/tests → add_project/list_projects fall back to the default container).
   workspaceContainerRegistry?: WorkspaceContainerRegistry;
+  // D-3.5c — the shared scoped-env resolver, used by both the env-var RPC
+  // handlers and (forwarded to) the TerminalSessionController so terminals
+  // resolve scoped env from cwd. Optional → absent in tests/legacy callers.
+  resolveScopedEnv?: (cwd: string) => Promise<Record<string, string>>;
+  // D-3.5c — scoped env-var store backing the list/set/delete RPCs (T-2).
+  envVarStore?: EnvVarStore;
   chatService: ChatService;
   scheduleService: ScheduleService;
   loopService: LoopService;
@@ -744,6 +771,9 @@ export class Session {
   private readonly projectRegistry: ProjectRegistry;
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly workspaceContainerRegistry: WorkspaceContainerRegistry | null;
+  // D-3.5c — the shared scoped-env resolver is consumed at construction
+  // (forwarded to the TerminalSessionController), so no field is retained.
+  private readonly envVarStore: EnvVarStore | null;
   private readonly chatService: ChatService;
   private readonly scheduleService: ScheduleService;
   private readonly loopService: LoopService;
@@ -831,6 +861,8 @@ export class Session {
       projectRegistry,
       workspaceRegistry,
       workspaceContainerRegistry,
+      resolveScopedEnv,
+      envVarStore,
       chatService,
       scheduleService,
       loopService,
@@ -878,6 +910,7 @@ export class Session {
     this.projectRegistry = projectRegistry;
     this.workspaceRegistry = workspaceRegistry;
     this.workspaceContainerRegistry = workspaceContainerRegistry ?? null;
+    this.envVarStore = envVarStore ?? null;
     this.chatService = chatService;
     this.scheduleService = scheduleService;
     this.loopService = loopService;
@@ -895,6 +928,7 @@ export class Session {
       hasBinaryChannel: () => this.onBinaryMessage !== null,
       isPathWithinRoot: (rootPath, candidatePath) => this.isPathWithinRoot(rootPath, candidatePath),
       sessionLogger: this.sessionLogger,
+      ...(resolveScopedEnv ? { resolveScopedEnv } : {}),
     });
     this.providerSnapshotManager = providerSnapshotManager ?? null;
     this.scriptRouteStore = scriptRouteStore ?? null;
@@ -1855,9 +1889,109 @@ export class Session {
         return this.handleReadProjectConfigRequest(msg);
       case "write_project_config_request":
         return this.handleWriteProjectConfigRequest(msg);
+      case "list_scoped_env_vars_request":
+        return this.handleListScopedEnvVarsRequest(msg);
+      case "set_scoped_env_var_request":
+        return this.handleSetScopedEnvVarRequest(msg);
+      case "delete_scoped_env_var_request":
+        return this.handleDeleteScopedEnvVarRequest(msg);
       default:
         return undefined;
     }
+  }
+
+  // D-3.5c — scoped env-var RPCs. `secret` values are write-only: `list`
+  // returns a masked placeholder, never the stored value (daemon OQ-3). Key
+  // validation (charset, length, reserved-key reject) is shared with the
+  // resolver's denylist via `validateEnvVarKeyValue`.
+  private async handleListScopedEnvVarsRequest(
+    msg: Extract<SessionInboundMessage, { type: "list_scoped_env_vars_request" }>,
+  ): Promise<void> {
+    if (!this.envVarStore) {
+      this.emit({
+        type: "list_scoped_env_vars_response",
+        payload: { requestId: msg.requestId, ok: false, error: { code: "unsupported" } },
+      });
+      return;
+    }
+    const records = await this.envVarStore.listForScope(msg.scope, msg.scopeId);
+    this.emit({
+      type: "list_scoped_env_vars_response",
+      payload: {
+        requestId: msg.requestId,
+        scope: msg.scope,
+        scopeId: msg.scopeId,
+        ok: true,
+        vars: records.map((record) => toScopedEnvVarView(record)),
+      },
+    });
+  }
+
+  private async handleSetScopedEnvVarRequest(
+    msg: Extract<SessionInboundMessage, { type: "set_scoped_env_var_request" }>,
+  ): Promise<void> {
+    if (!this.envVarStore) {
+      this.emit({
+        type: "set_scoped_env_var_response",
+        payload: { requestId: msg.requestId, ok: false, error: { code: "unsupported" } },
+      });
+      return;
+    }
+    const validationError = validateEnvVarKeyValue({ key: msg.key, value: msg.value });
+    if (validationError) {
+      this.emit({
+        type: "set_scoped_env_var_response",
+        payload: { requestId: msg.requestId, ok: false, error: { code: validationError } },
+      });
+      return;
+    }
+    const now = new Date().toISOString();
+    const existing = (await this.envVarStore.listForScope(msg.scope, msg.scopeId)).find(
+      (record) => record.key === msg.key,
+    );
+    const record: ScopedEnvVarRecord = {
+      scope: msg.scope,
+      scopeId: msg.scopeId,
+      key: msg.key,
+      value: msg.value,
+      ...(msg.secret !== undefined ? { secret: msg.secret } : {}),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    await this.envVarStore.upsert(record);
+    this.emit({
+      type: "set_scoped_env_var_response",
+      payload: {
+        requestId: msg.requestId,
+        scope: msg.scope,
+        scopeId: msg.scopeId,
+        ok: true,
+        var: toScopedEnvVarView(record),
+      },
+    });
+  }
+
+  private async handleDeleteScopedEnvVarRequest(
+    msg: Extract<SessionInboundMessage, { type: "delete_scoped_env_var_request" }>,
+  ): Promise<void> {
+    if (!this.envVarStore) {
+      this.emit({
+        type: "delete_scoped_env_var_response",
+        payload: { requestId: msg.requestId, ok: false, error: { code: "unsupported" } },
+      });
+      return;
+    }
+    await this.envVarStore.remove(msg.scope, msg.scopeId, msg.key);
+    this.emit({
+      type: "delete_scoped_env_var_response",
+      payload: {
+        requestId: msg.requestId,
+        scope: msg.scope,
+        scopeId: msg.scopeId,
+        key: msg.key,
+        ok: true,
+      },
+    });
   }
 
   private async handleReadProjectConfigRequest(
