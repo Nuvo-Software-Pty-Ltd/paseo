@@ -54,6 +54,13 @@ export interface CloudSharedKeys {
   // DynamoProjectStore one-row-per-project partition.
   // pk = `<ws>#project`, sk = `<projectId>`.
   workspaceProject(workspaceId: string, projectId: string): DdbKey;
+  // ANTI-DRIFT: D-3.5d mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:workspaceTrigger`. The
+  // DynamoWebhookTriggerStore meta + per-run partition, mirroring the
+  // `#schedule` layout. pk = `<ws>#trigger`, sk = `<triggerId>#meta` |
+  // `<triggerId>#run#<runId>`.
+  workspaceTrigger(workspaceId: string, triggerId: string): DdbKey;
+  workspaceTriggerRun(workspaceId: string, triggerId: string, runId: string): DdbKey;
 }
 
 // ANTI-DRIFT: matches `LOOP_STEP_SEQ_WIDTH` in cloud-shared keys.ts.
@@ -104,6 +111,12 @@ export function createCloudSharedKeys(): CloudSharedKeys {
     },
     workspaceProject(workspaceId: string, projectId: string): DdbKey {
       return { pk: `${workspaceId}#project`, sk: projectId };
+    },
+    workspaceTrigger(workspaceId: string, triggerId: string): DdbKey {
+      return { pk: `${workspaceId}#trigger`, sk: `${triggerId}#meta` };
+    },
+    workspaceTriggerRun(workspaceId: string, triggerId: string, runId: string): DdbKey {
+      return { pk: `${workspaceId}#trigger`, sk: `${triggerId}#run#${runId}` };
     },
   };
 }

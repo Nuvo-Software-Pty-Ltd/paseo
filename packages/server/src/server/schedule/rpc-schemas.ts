@@ -7,7 +7,10 @@ import {
   ScheduleTargetSchema,
 } from "./types.js";
 
-const ScheduleCreateTargetSchema = z.discriminatedUnion("type", [
+// Exported for reuse by the webhook-trigger RPC family (D-3.5d): the
+// agent-spawn target shape is identical to a schedule's, incl. the
+// create-only `{type:"self"}` variant the daemon rewrites to `agent`.
+export const ScheduleCreateTargetSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("self"),
     agentId: z.string().uuid(),
