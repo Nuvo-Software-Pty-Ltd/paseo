@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { FolderPlus, MessagesSquare, Settings } from "lucide-react-native";
+import { FolderPlus, MessagesSquare, Settings, Zap } from "lucide-react-native";
 import {
   type Dispatch,
   memo,
@@ -58,6 +58,7 @@ import { resolveActiveHost } from "@/utils/active-host";
 import { formatConnectionStatus } from "@/utils/daemons";
 import { useWindowControlsPadding } from "@/utils/desktop-window";
 import {
+  buildHostAutomationsRoute,
   buildHostSessionsRoute,
   buildSettingsRoute,
   mapPathnameToServer,
@@ -109,12 +110,14 @@ interface MobileSidebarProps extends SidebarSharedProps {
   isOpen: boolean;
   closeToAgent: () => void;
   handleViewMoreNavigate: () => void;
+  handleAutomationsNavigate: () => void;
 }
 
 interface DesktopSidebarProps extends SidebarSharedProps {
   insetsTop: number;
   isOpen: boolean;
   handleViewMore: () => void;
+  handleAutomationsNavigate: () => void;
 }
 
 export const LeftSidebar = memo(function LeftSidebar({
@@ -230,6 +233,13 @@ export const LeftSidebar = memo(function LeftSidebar({
     router.push(buildHostSessionsRoute(activeServerId));
   }, [activeServerId]);
 
+  const handleAutomationsNavigate = useCallback(() => {
+    if (!activeServerId) {
+      return;
+    }
+    router.push(buildHostAutomationsRoute(activeServerId));
+  }, [activeServerId]);
+
   const handleHostSelect = useCallback(
     (nextServerId: string) => {
       if (!nextServerId) {
@@ -274,6 +284,7 @@ export const LeftSidebar = memo(function LeftSidebar({
         handleOpenProject={handleOpenProjectMobile}
         handleSettings={handleSettingsMobile}
         handleViewMoreNavigate={handleViewMoreNavigate}
+        handleAutomationsNavigate={handleAutomationsNavigate}
       />
     );
   }
@@ -286,6 +297,7 @@ export const LeftSidebar = memo(function LeftSidebar({
       handleOpenProject={handleOpenProjectDesktop}
       handleSettings={handleSettingsDesktop}
       handleViewMore={handleViewMoreNavigate}
+      handleAutomationsNavigate={handleAutomationsNavigate}
     />
   );
 });
@@ -506,9 +518,11 @@ function MobileSidebar({
   isOpen,
   closeToAgent,
   handleViewMoreNavigate,
+  handleAutomationsNavigate,
 }: MobileSidebarProps) {
   const pathname = usePathname();
   const isSessionsActive = pathname.includes("/sessions");
+  const isAutomationsActive = pathname.includes("/automations");
   const {
     translateX,
     backdropOpacity,
@@ -540,6 +554,23 @@ function MobileSidebar({
     backdropOpacity,
     closeToAgent,
     handleViewMoreNavigate,
+    translateX,
+    windowWidth,
+  ]);
+
+  const handleAutomations = useCallback(() => {
+    if (!activeServerId) {
+      return;
+    }
+    translateX.value = -windowWidth;
+    backdropOpacity.value = 0;
+    closeToAgent();
+    handleAutomationsNavigate();
+  }, [
+    activeServerId,
+    backdropOpacity,
+    closeToAgent,
+    handleAutomationsNavigate,
     translateX,
     windowWidth,
   ]);
@@ -680,6 +711,14 @@ function MobileSidebar({
               testID="sidebar-sessions"
             />
 
+            <SidebarHeaderRow
+              icon={Zap}
+              label="Automations"
+              onPress={handleAutomations}
+              isActive={isAutomationsActive}
+              testID="sidebar-automations"
+            />
+
             {isInitialLoad ? (
               <SidebarAgentListSkeleton />
             ) : (
@@ -742,9 +781,11 @@ function DesktopSidebar({
   insetsTop,
   isOpen,
   handleViewMore,
+  handleAutomationsNavigate,
 }: DesktopSidebarProps) {
   const pathname = usePathname();
   const isSessionsActive = pathname.includes("/sessions");
+  const isAutomationsActive = pathname.includes("/automations");
   const padding = useWindowControlsPadding("sidebar");
   const sidebarWidth = usePanelStore((state) => state.sidebarWidth);
   const setSidebarWidth = usePanelStore((state) => state.setSidebarWidth);
@@ -818,6 +859,14 @@ function DesktopSidebar({
             testID="sidebar-sessions"
           />
         </View>
+
+        <SidebarHeaderRow
+          icon={Zap}
+          label="Automations"
+          onPress={handleAutomationsNavigate}
+          isActive={isAutomationsActive}
+          testID="sidebar-automations"
+        />
 
         {isInitialLoad ? (
           <SidebarAgentListSkeleton />

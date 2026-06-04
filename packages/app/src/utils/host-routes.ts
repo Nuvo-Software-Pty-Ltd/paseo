@@ -347,6 +347,23 @@ export function buildHostSessionsRoute(serverId: string) {
   return `${base}/sessions` as const;
 }
 
+export function buildHostAutomationsRoute(serverId: string) {
+  const base = buildHostRootRoute(serverId);
+  if (base === "/") {
+    return "/" as const;
+  }
+  return `${base}/automations` as const;
+}
+
+export function buildHostAutomationDetailRoute(serverId: string, automationId: string) {
+  const base = buildHostRootRoute(serverId);
+  const normalizedAutomationId = trimNonEmpty(automationId);
+  if (base === "/" || !normalizedAutomationId) {
+    return "/" as const;
+  }
+  return `${base}/automations/${encodeSegment(normalizedAutomationId)}` as const;
+}
+
 export function buildHostOpenProjectRoute(serverId: string) {
   const base = buildHostRootRoute(serverId);
   if (base === "/") {
@@ -428,6 +445,9 @@ export function mapPathnameToServer(pathname: string, nextServerId: string) {
   }
   if (suffix.startsWith("sessions")) {
     return `${base}/sessions` as const;
+  }
+  if (suffix.startsWith("automations")) {
+    return `${base}/automations` as const;
   }
   if (suffix.startsWith("open-project")) {
     return `${base}/open-project` as const;
