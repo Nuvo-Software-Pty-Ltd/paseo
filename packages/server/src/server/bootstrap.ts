@@ -98,7 +98,10 @@ import { createSpeechService } from "./speech/speech-runtime.js";
 import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage, type AgentStore } from "./agent/agent-storage.js";
 import { DynamoAgentStore } from "./agent/dynamo-agent-store.js";
-import { attachAgentStoragePersistence } from "./persistence-hooks.js";
+import {
+  attachAgentStoragePersistence,
+  attachClaudeTranscriptCapture,
+} from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
   buildProviderRegistry,
@@ -658,6 +661,10 @@ export async function createPaseoDaemon(
     agentManager,
     agentStorage,
   );
+  // Cloud mode: persist each Claude transcript to S3 after every settled turn
+  // so conversations survive a daemon restart. attachClaudeTranscriptCapture
+  // no-ops in local mode, so this is byte-for-byte unchanged off-cloud.
+  const detachClaudeTranscriptCapture = attachClaudeTranscriptCapture(logger, agentManager);
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
@@ -1146,6 +1153,7 @@ export async function createPaseoDaemon(
     await closeAllAgents(logger, agentManager);
     await agentManager.flush().catch(() => undefined);
     detachAgentStoragePersistence();
+    detachClaudeTranscriptCapture();
     await agentStorage.flush().catch(() => undefined);
     await shutdownProviders(logger, {
       runtimeSettings: config.agentProviderSettings,

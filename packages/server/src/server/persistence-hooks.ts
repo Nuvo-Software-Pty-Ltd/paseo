@@ -6,6 +6,7 @@ import type {
 } from "./agent/agent-sdk-types.js";
 import type { AgentStore, StoredAgentRecord } from "./agent/agent-storage.js";
 import { buildProviderRegistry } from "./agent/provider-registry.js";
+import { isPaseoCloudMode } from "./paseo-env.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -56,6 +57,56 @@ export function attachAgentStoragePersistence(
     void storage.applySnapshot(event.agent).catch((error) => {
       log.error({ err: error, agentId: event.agent.id }, "Failed to persist agent snapshot");
     });
+  });
+
+  return unsubscribe;
+}
+
+/**
+ * Cloud-mode only (A4): snapshot each Claude agent's transcript to S3 after it
+ * settles, so the conversation survives a daemon restart. Subscribes to
+ * `agent_state` (which fires very often) and debounces per agent with an
+ * in-flight guard so a burst of events collapses to a single snapshot; the
+ * store additionally skips the upload when the transcript is unchanged.
+ * `captureTranscriptSnapshot` itself gates on `isPaseoCloudMode()`, so this is
+ * a no-op in local mode.
+ */
+export function attachClaudeTranscriptCapture(
+  logger: LoggerLike,
+  agentManager: AgentManagerStateSource,
+): () => void {
+  // Cloud-mode only — in local mode there is nothing to snapshot, so skip the
+  // subscription entirely (zero per-event overhead, byte-for-byte unchanged).
+  if (!isPaseoCloudMode()) {
+    return () => {};
+  }
+  const log = getLogger(logger);
+  const inFlight = new Set<string>();
+  const unsubscribe = agentManager.subscribe((event) => {
+    if (event.type !== "agent_state") {
+      return;
+    }
+    const agent = event.agent;
+    if (agent.lifecycle === "closed" || agent.provider !== "claude") {
+      return;
+    }
+    const capture = agent.session.captureTranscriptSnapshot;
+    if (typeof capture !== "function") {
+      return;
+    }
+    // Debounce: while a snapshot is in flight for this agent, drop further
+    // turn-complete events — the next settled state re-triggers a snapshot.
+    if (inFlight.has(agent.id)) {
+      return;
+    }
+    inFlight.add(agent.id);
+    void Promise.resolve(capture.call(agent.session))
+      .catch((error) => {
+        log.error({ err: error, agentId: agent.id }, "Failed to snapshot Claude transcript");
+      })
+      .finally(() => {
+        inFlight.delete(agent.id);
+      });
   });
 
   return unsubscribe;

@@ -86,6 +86,10 @@ import {
   provisionCloudClaudeHome,
   type MaterializedClaudeHome,
 } from "../../../cloud-credentials.js";
+import {
+  getSessionTranscriptStore,
+  type SessionTranscriptStore,
+} from "./session-transcript-store.js";
 
 const fsPromises = promises;
 const CLAUDE_SETTING_SOURCES: NonNullable<ClaudeOptions["settingSources"]> = ["user", "project"];
@@ -244,12 +248,18 @@ export interface ClaudeContentChunk {
   [key: string]: unknown;
 }
 
+// Cloud-mode session-persistence seams. Both default to the production
+// implementations; tests inject fakes so the cloud paths run without AWS.
+type ProvisionCloudHomeFn = (params: { logger: Logger }) => Promise<MaterializedClaudeHome>;
+
 interface ClaudeAgentClientOptions {
   defaults?: { agents?: Record<string, AgentDefinition> };
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary?: () => Promise<string>;
+  sessionTranscriptStore?: SessionTranscriptStore;
+  provisionCloudHome?: ProvisionCloudHomeFn;
 }
 
 interface ClaudeAgentSessionOptions {
@@ -261,6 +271,8 @@ interface ClaudeAgentSessionOptions {
   logger: Logger;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary: () => Promise<string>;
+  sessionTranscriptStore?: SessionTranscriptStore;
+  provisionCloudHome?: ProvisionCloudHomeFn;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -339,6 +351,12 @@ interface ClaudeOptionsLogSummary {
 const MAX_RECENT_STDERR_CHARS = 4000;
 const STDERR_FLUSH_WAIT_MS = 150;
 const STDERR_FLUSH_POLL_INTERVAL_MS = 10;
+
+// User-visible notice surfaced once when a cloud-mode resume targets a session
+// whose transcript could not be restored, so the turn continues fresh instead
+// of failing. Single source of truth for the copy.
+export const STALE_RESUME_FRESH_SESSION_NOTICE =
+  "Previous session could not be restored; continuing in a new session.";
 
 function summarizeClaudeOptionsForLog(options: ClaudeOptions): ClaudeOptionsLogSummary {
   const systemPromptRaw = options.systemPrompt;
@@ -1169,6 +1187,8 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
+  private readonly sessionTranscriptStore?: SessionTranscriptStore;
+  private readonly provisionCloudHome?: ProvisionCloudHomeFn;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1176,6 +1196,8 @@ export class ClaudeAgentClient implements AgentClient {
     this.runtimeSettings = options.runtimeSettings;
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary ?? (() => resolveClaudeBinary(this.runtimeSettings));
+    this.sessionTranscriptStore = options.sessionTranscriptStore;
+    this.provisionCloudHome = options.provisionCloudHome;
   }
 
   async createSession(
@@ -1192,6 +1214,8 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      sessionTranscriptStore: this.sessionTranscriptStore,
+      provisionCloudHome: this.provisionCloudHome,
     });
   }
 
@@ -1219,6 +1243,8 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      sessionTranscriptStore: this.sessionTranscriptStore,
+      provisionCloudHome: this.provisionCloudHome,
     });
   }
 
@@ -1563,6 +1589,8 @@ class ClaudeAgentSession implements AgentSession {
   private readonly logger: Logger;
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
+  private readonly injectedTranscriptStore?: SessionTranscriptStore;
+  private readonly provisionCloudHome: ProvisionCloudHomeFn;
   private query: Query | null = null;
   private input: AsyncMessageInput<SDKUserMessage> | null = null;
   private claudeSessionId: string | null;
@@ -1594,6 +1622,10 @@ class ClaudeAgentSession implements AgentSession {
   private queryRestartNeeded = false;
   private pendingInterruptAbort = false;
   private lastForegroundPromptText: string | null = null;
+  // Cloud-mode stale-resume fallback: the SDK message for the in-flight
+  // foreground turn, retained so we can replay it on a fresh session if the
+  // resumed conversation turns out to be gone. Cleared when the turn ends.
+  private pendingForegroundPrompt: SDKUserMessage | null = null;
   private foregroundHasVisibleActivity = false;
   private lastContextWindowUsedTokens: number | undefined;
   private lastContextWindowMaxTokens: number | undefined;
@@ -1617,6 +1649,8 @@ class ClaudeAgentSession implements AgentSession {
     this.logger = options.logger;
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary;
+    this.injectedTranscriptStore = options.sessionTranscriptStore;
+    this.provisionCloudHome = options.provisionCloudHome ?? provisionCloudClaudeHome;
     const handle = options.handle;
 
     if (handle) {
@@ -1748,6 +1782,11 @@ class ClaudeAgentSession implements AgentSession {
     this.cancelCurrentTurn = requestCancel;
 
     this.notifySubscribers({ type: "turn_started", provider: "claude" });
+
+    // Retain the SDK message so the cloud-mode stale-resume fallback can replay
+    // it on a fresh session instead of failing the turn (see
+    // handleMissingResumedConversation).
+    this.pendingForegroundPrompt = sdkMessage;
 
     try {
       await this.ensureQuery();
@@ -1992,6 +2031,16 @@ class ClaudeAgentSession implements AgentSession {
             "Failed to delete ephemeral Claude session transcript",
           );
         }
+      }
+    }
+    // A5: shutdown flush — snapshot the final transcript to S3 before the
+    // per-spawn home is reclaimed below. Covers graceful SIGTERM
+    // (daemon-worker -> closeAllAgents). Cloud-gated + warn-and-continue inside.
+    if (this.persistSession !== false) {
+      try {
+        await this.captureTranscriptSnapshot();
+      } catch (error) {
+        this.logger.warn({ err: error }, "Failed to flush Claude transcript on close");
       }
     }
     // Cloud-mode cleanup: reclaim every per-spawn `~/.claude` we materialized
@@ -2328,9 +2377,15 @@ class ClaudeAgentSession implements AgentSession {
     // AsyncLocalStorage — never from any wire payload (F-design-out).
     let cloudEnvOverlay: Record<string, string> | undefined;
     if (isPaseoCloudMode()) {
-      const home = await provisionCloudClaudeHome({ logger: this.logger });
+      const home = await this.provisionCloudHome({ logger: this.logger });
       this.cloudClaudeHomes.push(home);
       cloudEnvOverlay = home.env;
+      // A3: rehydrate the persisted transcript into this fresh per-spawn home
+      // BEFORE the query is built with `resume`, so a daemon restart / deploy /
+      // crash continues the conversation instead of erroring with
+      // "No conversation found with session ID". Warn-and-continue on a miss —
+      // the stale-resume fallback (handleMissingResumedConversation) covers it.
+      await this.restoreTranscriptForResume(home.configDir);
     }
     const sdkEnv = createProviderEnv({
       baseEnv: process.env,
@@ -2636,6 +2691,7 @@ class ClaudeAgentSession implements AgentSession {
     this.notifySubscribers(event);
     this.activeForegroundTurnId = null;
     this.lastForegroundPromptText = null;
+    this.pendingForegroundPrompt = null;
     this.cancelCurrentTurn = null;
     this.syncTurnState("foreground turn terminal");
   }
@@ -2651,6 +2707,7 @@ class ClaudeAgentSession implements AgentSession {
       if (this.activeForegroundTurnId) {
         this.activeForegroundTurnId = null;
         this.lastForegroundPromptText = null;
+        this.pendingForegroundPrompt = null;
         this.cancelCurrentTurn = null;
         this.syncTurnState("foreground turn terminal");
       } else if (this.autonomousTurn) {
@@ -2919,6 +2976,19 @@ class ClaudeAgentSession implements AgentSession {
       return false;
     }
 
+    // Cloud-mode graceful fallback: the persisted transcript could not be
+    // restored (e.g. it predates persistence, or the S3 object is gone). Rather
+    // than fail the turn with "No conversation found", clear the dead session,
+    // surface one notice, and replay the pending prompt on a fresh session.
+    if (
+      isPaseoCloudMode() &&
+      this.activeForegroundTurnId &&
+      this.pendingForegroundPrompt &&
+      this.claudeSessionPersistenceEnabled()
+    ) {
+      return this.restartForegroundTurnOnFreshSession(activeQuery, staleResumeError);
+    }
+
     this.logger.warn(
       {
         claudeSessionId: this.claudeSessionId,
@@ -2945,6 +3015,70 @@ class ClaudeAgentSession implements AgentSession {
     this.autonomousTurn = null;
     this.activeForegroundTurnId = null;
     this.syncTurnState("missing resumed conversation");
+    return true;
+  }
+
+  // Cloud-mode stale-resume recovery: tear down the dead resumed query, clear
+  // the missing session so buildOptions omits `resume`, surface one notice, and
+  // replay the in-flight foreground prompt on a brand-new session — keeping the
+  // same foreground turn alive so the user sees one continuous turn.
+  private async restartForegroundTurnOnFreshSession(
+    activeQuery: Query,
+    staleResumeError: string,
+  ): Promise<boolean> {
+    const promptToReplay = this.pendingForegroundPrompt;
+    this.logger.warn(
+      { claudeSessionId: this.claudeSessionId, error: staleResumeError },
+      "Claude resumed session missing; starting a fresh session and replaying the pending prompt",
+    );
+
+    // Tear down the dead query WITHOUT failing the active turn.
+    this.input?.end();
+    await this.awaitWithTimeout(
+      activeQuery.return?.(),
+      "query pump return on stale-resume fresh-session fallback",
+    );
+    if (this.query === activeQuery) {
+      this.query = null;
+      this.input = null;
+    }
+    // Release the current pump slot so startQueryPump() can launch a new pump
+    // for the replacement query (the old pump unwinds right after we return).
+    this.queryPumpPromise = null;
+    // Clear the dead session + its derived state. Null sessionId makes
+    // buildOptions omit `resume`, and readMissingResumedConversationError() will
+    // short-circuit, so there is no replay loop.
+    this.claudeSessionId = null;
+    this.persistence = null;
+    this.persistedHistory = [];
+    this.historyPending = false;
+    this.cachedRuntimeInfo = null;
+    this.queryRestartNeeded = false;
+    this.autonomousTurn = null;
+
+    // Single user-visible notice on the still-active foreground turn.
+    this.notifySubscribers({
+      type: "timeline",
+      provider: "claude",
+      item: { type: "assistant_message", text: STALE_RESUME_FRESH_SESSION_NOTICE },
+    });
+
+    if (promptToReplay) {
+      try {
+        await this.ensureQuery();
+        if (!this.input) {
+          throw new Error("Claude session input stream not initialized");
+        }
+        this.startQueryPump();
+        this.input.push(promptToReplay);
+      } catch (error) {
+        this.finishForegroundTurn(
+          this.buildTurnFailedEvent(
+            error instanceof Error ? error.message : "Claude stream failed",
+          ),
+        );
+      }
+    }
     return true;
   }
 
@@ -3653,6 +3787,88 @@ class ClaudeAgentSession implements AgentSession {
     const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
     const dir = path.join(configDir, "projects", sanitized);
     return path.join(dir, `${sessionId}.jsonl`);
+  }
+
+  // --- Cloud-mode transcript persistence (S3) ---------------------------------
+  // Every path below is gated on isPaseoCloudMode() by its callers; the store
+  // itself warn-and-continues so persistence never throws into the turn path.
+
+  private resolveTranscriptStore(): SessionTranscriptStore {
+    return this.injectedTranscriptStore ?? getSessionTranscriptStore(this.logger);
+  }
+
+  // Boot-time workspace id (NOT AsyncLocalStorage): scheduled/loop spawns have
+  // no turn-scoped workspace-auth context, so S3 keys must use the stable
+  // per-workspace ECS binding from PASEO_WORKSPACE_ID.
+  private resolveBootWorkspaceId(): string | null {
+    const value = process.env.PASEO_WORKSPACE_ID?.trim();
+    return value && value.length > 0 ? value : null;
+  }
+
+  // The daemon-level agent id (distinct from claudeSessionId) — threaded in via
+  // the launch context env (PASEO_AGENT_ID, set by AgentManager).
+  private resolveAgentIdForPersistence(): string | null {
+    const value = this.launchEnv?.PASEO_AGENT_ID?.trim();
+    return value && value.length > 0 ? value : null;
+  }
+
+  // Kill switch: PASEO_PERSIST_CLAUDE_SESSIONS=0 disables snapshot + restore.
+  private claudeSessionPersistenceEnabled(): boolean {
+    return process.env.PASEO_PERSIST_CLAUDE_SESSIONS !== "0";
+  }
+
+  // The transcript the subprocess writes lives under the per-spawn home's
+  // configDir (not the daemon's CLAUDE_CONFIG_DIR), so resolve against it.
+  private resolveCloudTranscriptPath(sessionId: string, configDir: string): string {
+    const sanitized = sanitizeClaudeProjectPath(this.config.cwd);
+    return path.join(configDir, "projects", sanitized, `${sessionId}.jsonl`);
+  }
+
+  private async restoreTranscriptForResume(homeConfigDir: string): Promise<void> {
+    if (!this.claudeSessionId || !this.claudeSessionPersistenceEnabled()) {
+      return;
+    }
+    const workspaceId = this.resolveBootWorkspaceId();
+    const agentId = this.resolveAgentIdForPersistence();
+    if (!workspaceId || !agentId) {
+      this.logger.debug(
+        { hasWorkspaceId: Boolean(workspaceId), hasAgentId: Boolean(agentId) },
+        "Skipping transcript restore (missing workspace/agent id)",
+      );
+      return;
+    }
+    await this.resolveTranscriptStore().restore({
+      workspaceId,
+      agentId,
+      sessionId: this.claudeSessionId,
+      cwd: this.config.cwd,
+      homeConfigDir,
+    });
+  }
+
+  // Snapshot the live transcript to S3. Used by the per-turn capture hook (A4)
+  // and the shutdown flush (A5). No-op unless cloud mode + a session + a
+  // materialized per-spawn home are all present.
+  async captureTranscriptSnapshot(): Promise<void> {
+    if (!isPaseoCloudMode() || !this.claudeSessionId || !this.claudeSessionPersistenceEnabled()) {
+      return;
+    }
+    const home = this.cloudClaudeHomes[this.cloudClaudeHomes.length - 1];
+    if (!home) {
+      return;
+    }
+    const workspaceId = this.resolveBootWorkspaceId();
+    const agentId = this.resolveAgentIdForPersistence();
+    if (!workspaceId || !agentId) {
+      return;
+    }
+    await this.resolveTranscriptStore().snapshot({
+      workspaceId,
+      agentId,
+      sessionId: this.claudeSessionId,
+      cwd: this.config.cwd,
+      transcriptPath: this.resolveCloudTranscriptPath(this.claudeSessionId, home.configDir),
+    });
   }
 
   private convertHistoryEntry(entry: ClaudeHistoryEntry): AgentTimelineItem[] {

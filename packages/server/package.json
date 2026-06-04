@@ -59,6 +59,7 @@
     "@agentclientprotocol/sdk": "^0.17.1",
     "@anthropic-ai/claude-agent-sdk": "^0.2.133",
     "@aws-sdk/client-dynamodb": "^3.1056.0",
+    "@aws-sdk/client-s3": "^3.1056.0",
     "@aws-sdk/client-secrets-manager": "^3.1045.0",
     "@aws-sdk/lib-dynamodb": "^3.1056.0",
     "@getpaseo/highlight": "0.1.73",

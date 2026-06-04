@@ -1,9 +1,15 @@
 import { describe, expect, test } from "vitest";
+import pino from "pino";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { InMemoryDynamoClient } from "../cloud-dynamo-client.js";
 import { DynamoAgentStore } from "./dynamo-agent-store.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
+import {
+  SessionTranscriptStore,
+  setSessionTranscriptStoreForTesting,
+  type S3Like,
+} from "./providers/claude/session-transcript-store.js";
 
 const TABLE = "orchestra-dev-state";
 
@@ -112,6 +118,45 @@ describe("DynamoAgentStore (D-3.12)", () => {
     expect(fetched).toBeNull();
     const records = await store.list();
     expect(records).toEqual([]);
+  });
+
+  test("remove also deletes persisted Claude transcripts from S3 in cloud mode (A6)", async () => {
+    const originalCloudMode = process.env.PASEO_CLOUD_MODE;
+    process.env.PASEO_CLOUD_MODE = "1";
+    const listed: string[] = [];
+    const deleted: string[][] = [];
+    const fake: S3Like = {
+      async putObject() {},
+      async getObjectBytes() {
+        throw Object.assign(new Error("nope"), { name: "NoSuchKey" });
+      },
+      async listObjectKeys(input) {
+        listed.push(input.Prefix);
+        return [`${input.Prefix}sess-1.jsonl`, `${input.Prefix}current.json`];
+      },
+      async deleteObjects(input) {
+        deleted.push(input.Keys);
+      },
+    };
+    setSessionTranscriptStoreForTesting(
+      new SessionTranscriptStore({ client: fake, bucket: "b", logger: pino({ level: "silent" }) }),
+    );
+    try {
+      const { store } = build("ws_xyz");
+      await store.upsert(buildRecord({ id: "agt_hard_delete" }));
+      await store.remove("agt_hard_delete");
+      expect(listed).toEqual(["ws_xyz/claude-sessions/agt_hard_delete/"]);
+      expect(deleted).toEqual([
+        [
+          "ws_xyz/claude-sessions/agt_hard_delete/sess-1.jsonl",
+          "ws_xyz/claude-sessions/agt_hard_delete/current.json",
+        ],
+      ]);
+    } finally {
+      setSessionTranscriptStoreForTesting(null);
+      if (originalCloudMode === undefined) delete process.env.PASEO_CLOUD_MODE;
+      else process.env.PASEO_CLOUD_MODE = originalCloudMode;
+    }
   });
 
   test("beginDelete + concurrent upsert: upsert is suppressed (matches AgentStorage semantics)", async () => {
