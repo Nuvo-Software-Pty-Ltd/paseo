@@ -237,6 +237,11 @@ export async function unarchiveCloudWorkspace(workspaceId: string): Promise<Work
   return normalizeWorkspaceRecord(await res.json());
 }
 
+// COMPAT(per-user-credential): per-workspace credential write. The credential
+// is now per-account (D-3.5b, Decision #2) — set once via the account endpoints
+// below and inherited by every workspace. This per-workspace writer is retained
+// only for the migration window; remove after migration completes (target
+// 2026-12).
 export async function setAnthropicCredential(
   workspaceId: string,
   apiKey: string,
@@ -248,6 +253,61 @@ export async function setAnthropicCredential(
   if (!res.ok) {
     const body = await res.text().catch(() => "unknown error");
     throw new Error(`Failed to set Anthropic credential: ${res.status} — ${body}`);
+  }
+  return (await res.json()) as { status: "ok" };
+}
+
+// ---------------------------------------------------------------------------
+// Account-scoped Anthropic credential (D-3.5b — per-user credential)
+//
+// The credential is per-ACCOUNT, set once and inherited by all the account's
+// workspaces. Identity is derived from the session bearer only — there is NO
+// accountId in any URL or body, so the app cannot address another user's
+// account (cross-user isolation is enforced at the API + IAM, not the client).
+// The status endpoint returns only {set, updatedAt} metadata — the credential
+// value is never read back (write-only UI; no value-returning endpoint exists).
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_ANTHROPIC_CREDENTIAL_PATH = "/api/v1/cloud/account/anthropic-credential";
+
+export interface AccountCredentialStatus {
+  set: boolean;
+  updatedAt?: string;
+}
+
+export async function getAccountCredentialStatus(): Promise<AccountCredentialStatus> {
+  const res = await authedFetch(ACCOUNT_ANTHROPIC_CREDENTIAL_PATH);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to read Anthropic credential status: ${res.status} — ${body}`);
+  }
+  const body = (await res.json().catch(() => ({}))) as { set?: unknown; updatedAt?: unknown };
+  const status: AccountCredentialStatus = { set: body.set === true };
+  if (typeof body.updatedAt === "string") {
+    status.updatedAt = body.updatedAt;
+  }
+  return status;
+}
+
+export async function setAccountAnthropicCredential(apiKey: string): Promise<{ status: "ok" }> {
+  const res = await authedFetch(ACCOUNT_ANTHROPIC_CREDENTIAL_PATH, {
+    method: "POST",
+    body: JSON.stringify({ apiKey }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to set Anthropic credential: ${res.status} — ${body}`);
+  }
+  return (await res.json()) as { status: "ok" };
+}
+
+export async function removeAccountAnthropicCredential(): Promise<{ status: "ok" }> {
+  const res = await authedFetch(ACCOUNT_ANTHROPIC_CREDENTIAL_PATH, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to remove Anthropic credential: ${res.status} — ${body}`);
   }
   return (await res.json()) as { status: "ok" };
 }
