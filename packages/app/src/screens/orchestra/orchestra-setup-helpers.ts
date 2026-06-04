@@ -61,6 +61,15 @@ export function setupMintErrorMessage(result: MintWorkspaceTokenResult): string 
   }
 }
 
+// Pure: which step to enter after a workspace is picked or created. The
+// credential is per-account (D-3.5b) — once the account has a credential, every
+// workspace inherits it, so the wizard skips the credential prompt and connects
+// directly. First-run (no account credential) still routes through the
+// credential step once, which now writes the account-scoped credential.
+export function nextStepAfterWorkspacePick(hasAccountCredential: boolean): SetupStep {
+  return hasAccountCredential ? "connecting" : "credential";
+}
+
 export function workspaceStateBadge(state: WorkspaceRecord["state"]): string | null {
   switch (state) {
     case "active":
