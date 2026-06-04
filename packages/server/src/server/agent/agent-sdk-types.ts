@@ -516,6 +516,13 @@ export interface AgentSession {
   describePersistence(): AgentPersistenceHandle | null;
   interrupt(): Promise<void>;
   close(): Promise<void>;
+  /**
+   * Cloud-mode only: snapshot the live provider transcript to durable storage
+   * (S3) so the conversation survives a daemon restart. Implemented by the
+   * Claude provider; absent elsewhere. Safe to call frequently — the
+   * implementation skips unchanged transcripts.
+   */
+  captureTranscriptSnapshot?(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void>;
