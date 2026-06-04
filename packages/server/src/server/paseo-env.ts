@@ -86,3 +86,25 @@ export function resolvePaseoNodeEnv(env: NodeJS.ProcessEnv): PaseoNodeEnv | unde
 export function isPaseoCloudMode(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.PASEO_CLOUD_MODE === "1";
 }
+
+// D-3.5a (T-6) — which project sources the GitHub picker should offer.
+// This is a DEPLOYMENT-CONFIG value the core honors, NOT a cloud branch:
+// open-core discipline forbids gating the picker policy on
+// `isPaseoCloudMode()`. Self-host defaults to "local_and_github"; cloud
+// injects PASEO_PROJECT_SOURCE=github_only at RunTask. A self-host operator
+// may set "local_only" to disable the GitHub source entirely.
+export type ProjectSource = "local_and_github" | "github_only" | "local_only";
+
+const PROJECT_SOURCE_VALUES: readonly ProjectSource[] = [
+  "local_and_github",
+  "github_only",
+  "local_only",
+];
+
+export function resolveProjectSource(env: NodeJS.ProcessEnv = process.env): ProjectSource {
+  const raw = env.PASEO_PROJECT_SOURCE?.trim();
+  if (raw && (PROJECT_SOURCE_VALUES as readonly string[]).includes(raw)) {
+    return raw as ProjectSource;
+  }
+  return "local_and_github";
+}

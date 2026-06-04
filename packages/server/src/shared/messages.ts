@@ -1980,10 +1980,21 @@ export const ServerInfoStatusPayloadSchema = z
     hostname: ServerInfoHostnameSchema.optional(),
     version: ServerInfoVersionSchema.optional(),
     capabilities: ServerCapabilitiesFromUnknownSchema,
-    // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
+    // NOTE: `features` is a STRICT Zod object — it strips unknown keys on
+    // parse. Every new capability flag MUST be declared here explicitly or
+    // it never reaches the client. Back-compat for old clients holds because
+    // an old client's strict-object parse simply strips a flag it doesn't
+    // know (it does not error); the parent's `.passthrough()` is irrelevant
+    // to inner-object fields. (VERIFY-3.5a findings #3 + #7.)
     features: z
       .object({
+        // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
         providersSnapshot: z.boolean().optional(),
+        // COMPAT(projectSource): added in v0.1.73, drop the gate when floor
+        // >= v0.1.73. Tells the client which project sources the picker
+        // should offer (D-3.5a T-6). `.optional()` so old daemons (no field)
+        // → client defaults to "local_and_github" (both sources, safe).
+        projectSource: z.enum(["local_and_github", "github_only", "local_only"]).optional(),
       })
       .optional(),
   })

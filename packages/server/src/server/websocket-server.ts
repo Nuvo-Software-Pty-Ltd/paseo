@@ -8,6 +8,7 @@ import type { DownloadTokenStore } from "./file-download/token-store.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type pino from "pino";
 import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
+import { resolveProjectSource } from "./paseo-env.js";
 import type { ChatService } from "./chat/chat-service.js";
 import type { LoopService } from "./loop-service.js";
 import type { ScheduleService } from "./schedule/service.js";
@@ -1123,6 +1124,10 @@ export class VoiceAssistantWebSocketServer {
       features: {
         // COMPAT(providersSnapshot): keep optional until all clients rely on snapshot flow.
         providersSnapshot: true,
+        // D-3.5a (T-6) — picker source policy from deployment config. Read
+        // via resolveProjectSource (PASEO_PROJECT_SOURCE), NOT a cloud
+        // branch — open-core discipline (VERIFY-3.5a Locked Decision #1).
+        projectSource: resolveProjectSource(),
       },
     };
   }

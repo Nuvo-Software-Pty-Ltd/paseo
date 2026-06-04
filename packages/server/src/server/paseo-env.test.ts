@@ -6,7 +6,31 @@ import {
   createPaseoInternalEnv,
   isPaseoCloudMode,
   resolvePaseoNodeEnv,
+  resolveProjectSource,
 } from "./paseo-env.js";
+
+describe("resolveProjectSource (D-3.5a T-6)", () => {
+  test("defaults to local_and_github when PASEO_PROJECT_SOURCE is unset", () => {
+    expect(resolveProjectSource({})).toBe("local_and_github");
+  });
+
+  test("honors github_only verbatim (the cloud-injected value)", () => {
+    expect(resolveProjectSource({ PASEO_PROJECT_SOURCE: "github_only" })).toBe("github_only");
+  });
+
+  test("honors local_only (self-host operator disabling GitHub)", () => {
+    expect(resolveProjectSource({ PASEO_PROJECT_SOURCE: "local_only" })).toBe("local_only");
+  });
+
+  test("falls back to local_and_github for an unrecognized value", () => {
+    expect(resolveProjectSource({ PASEO_PROJECT_SOURCE: "bogus" })).toBe("local_and_github");
+  });
+
+  test("does NOT consult cloud mode — github_only is config-driven, not isPaseoCloudMode()", () => {
+    // Cloud-mode set but no project-source config → still the safe default.
+    expect(resolveProjectSource({ PASEO_CLOUD_MODE: "1" })).toBe("local_and_github");
+  });
+});
 
 describe("paseo env contract", () => {
   const ELECTRON_RUN_AS_NODE = "ELECTRON_RUN_AS_NODE";
