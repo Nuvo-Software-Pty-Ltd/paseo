@@ -24,6 +24,12 @@ import type {
   PersistedAgentDescriptor,
 } from "./agent-sdk-types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
+import type {
+  AgentTimelineFetchOptions,
+  AgentTimelineFetchResult,
+  AgentTimelineRow,
+  AgentTimelineStore,
+} from "./agent-timeline-store-types.js";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -508,6 +514,125 @@ test("setAgentMode persists the selected mode across session reload", async () =
   const reloaded = await manager.reloadAgentSession(snapshot.id);
   expect(reloaded.config.modeId).toBe("full-access");
   expect(reloaded.currentModeId).toBe("full-access");
+});
+
+test("resumeAgentFromPersistence rehydrates the in-memory timeline from the durable store", async () => {
+  // Regression (cloud suspend/resume): the daemon process is replaced on
+  // resume, so the in-memory timeline starts empty and must be seeded from the
+  // durable (DynamoDB-backed) store. Previously loadCommittedTimelineSeed
+  // returned only a nextSeq counter (no rows), so a resumed agent rendered a
+  // blank chat even though its history was durably committed. The
+  // Claude-transcript replay is intentionally skipped when durable rows exist
+  // (historyPrimed = durableTimelineHasRows), making the durable rows the sole
+  // source of the timeline on resume.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-durable-seed-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  const committedRows: AgentTimelineRow[] = [
+    {
+      seq: 1,
+      timestamp: "2026-06-04T01:18:24.124Z",
+      item: { type: "user_message", text: "what does this repo do", messageId: "m1" },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-06-04T01:18:30.000Z",
+      item: { type: "assistant_message", text: "It orchestrates agents." },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-06-04T01:19:00.000Z",
+      item: { type: "user_message", text: "tell me more", messageId: "m2" },
+    },
+  ];
+
+  class FakeDurableTimelineStore implements AgentTimelineStore {
+    rows: AgentTimelineRow[];
+    constructor(seed: readonly AgentTimelineRow[]) {
+      this.rows = seed.map((row) => ({ ...row }));
+    }
+    async appendCommitted(
+      _agentId: string,
+      item: AgentTimelineItem,
+      options?: { timestamp?: string },
+    ): Promise<AgentTimelineRow> {
+      const seq = (this.rows.at(-1)?.seq ?? 0) + 1;
+      const row: AgentTimelineRow = {
+        seq,
+        timestamp: options?.timestamp ?? "2026-06-04T02:00:00.000Z",
+        item,
+      };
+      this.rows.push(row);
+      return { ...row };
+    }
+    async fetchCommitted(
+      _agentId: string,
+      _options?: AgentTimelineFetchOptions,
+    ): Promise<AgentTimelineFetchResult> {
+      const maxSeq = this.rows.at(-1)?.seq ?? 0;
+      return {
+        epoch: "test-epoch",
+        direction: "tail",
+        reset: false,
+        staleCursor: false,
+        gap: false,
+        window: { minSeq: this.rows[0]?.seq ?? 0, maxSeq, nextSeq: maxSeq + 1 },
+        hasOlder: false,
+        hasNewer: false,
+        rows: this.rows.map((row) => ({ ...row })),
+      };
+    }
+    async getLatestCommittedSeq(): Promise<number> {
+      return this.rows.at(-1)?.seq ?? 0;
+    }
+    async getCommittedRows(): Promise<AgentTimelineRow[]> {
+      return this.rows.map((row) => ({ ...row }));
+    }
+    async getLastItem(): Promise<AgentTimelineItem | null> {
+      return this.rows.at(-1)?.item ?? null;
+    }
+    async getLastAssistantMessage(): Promise<string | null> {
+      for (let i = this.rows.length - 1; i >= 0; i -= 1) {
+        const { item } = this.rows[i];
+        if (item.type === "assistant_message") return item.text;
+      }
+      return null;
+    }
+    async hasCommittedUserMessage(): Promise<boolean> {
+      return false;
+    }
+    async deleteAgent(): Promise<void> {
+      this.rows = [];
+    }
+    async bulkInsert(_agentId: string, rows: readonly AgentTimelineRow[]): Promise<void> {
+      this.rows.push(...rows.map((row) => ({ ...row })));
+    }
+  }
+
+  const durableTimelineStore = new FakeDurableTimelineStore(committedRows);
+  const agentId = "00000000-0000-4000-8000-0000000003aa";
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    durableTimelineStore,
+    logger,
+    idFactory: () => agentId,
+  });
+
+  const handle: AgentPersistenceHandle = {
+    provider: "codex",
+    sessionId: "75c5c6f8-resume",
+    metadata: { provider: "codex", cwd: workdir },
+  };
+
+  await manager.resumeAgentFromPersistence(handle, undefined, agentId);
+
+  // The resumed agent must surface its durably-committed history, not a blank
+  // timeline rebuilt from an (empty) local transcript.
+  const timeline = manager.getTimeline(agentId);
+  expect(timeline).toEqual(committedRows.map((row) => row.item));
+
+  rmSync(workdir, { recursive: true, force: true });
 });
 
 test("reloadAgentSession completes when the previous session close hangs", async () => {
