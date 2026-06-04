@@ -1,10 +1,53 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import {
+  attachClaudeTranscriptCapture,
   buildConfigOverrides,
   buildSessionConfig,
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
+import { createTestLogger } from "../test-utils/test-logger.js";
+import type { AgentManager } from "./agent/agent-manager.js";
+
+type StateSubscriber = (event: { type: string; agent: unknown }) => void;
+
+function createFakeManager(): {
+  manager: Pick<AgentManager, "subscribe">;
+  emit: StateSubscriber;
+} {
+  let subscriber: StateSubscriber | null = null;
+  return {
+    manager: {
+      subscribe: ((callback: StateSubscriber) => {
+        subscriber = callback;
+        return () => {
+          subscriber = null;
+        };
+      }) as unknown as AgentManager["subscribe"],
+    },
+    emit: (event) => subscriber?.(event),
+  };
+}
+
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function claudeStateEvent(id: string, captureTranscriptSnapshot: () => Promise<void>) {
+  return {
+    type: "agent_state",
+    agent: {
+      id,
+      provider: "claude",
+      lifecycle: "idle",
+      session: { captureTranscriptSnapshot },
+    },
+  };
+}
 
 function createRecord(overrides?: Partial<StoredAgentRecord>): StoredAgentRecord {
   const now = new Date().toISOString();
@@ -25,6 +68,69 @@ function createRecord(overrides?: Partial<StoredAgentRecord>): StoredAgentRecord
     ...overrides,
   };
 }
+
+describe("attachClaudeTranscriptCapture", () => {
+  let originalCloudMode: string | undefined;
+  beforeEach(() => {
+    originalCloudMode = process.env.PASEO_CLOUD_MODE;
+    process.env.PASEO_CLOUD_MODE = "1";
+  });
+  afterEach(() => {
+    if (originalCloudMode === undefined) delete process.env.PASEO_CLOUD_MODE;
+    else process.env.PASEO_CLOUD_MODE = originalCloudMode;
+  });
+
+  test("does not subscribe in local mode", () => {
+    delete process.env.PASEO_CLOUD_MODE;
+    const { manager, emit } = createFakeManager();
+    const capture = vi.fn(async () => undefined);
+    attachClaudeTranscriptCapture(createTestLogger(), manager);
+    emit(claudeStateEvent("agent-1", capture));
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  test("debounces a burst of agent_state events into a single snapshot", async () => {
+    const { manager, emit } = createFakeManager();
+    const gate = createDeferred();
+    const capture = vi.fn(() => gate.promise);
+    attachClaudeTranscriptCapture(createTestLogger(), manager);
+
+    // Two rapid turn-complete events while the first snapshot is still running.
+    emit(claudeStateEvent("agent-1", capture));
+    emit(claudeStateEvent("agent-1", capture));
+
+    expect(capture).toHaveBeenCalledTimes(1);
+
+    // Once the in-flight snapshot settles, a later event snapshots again.
+    gate.resolve();
+    await gate.promise;
+    await Promise.resolve();
+    emit(claudeStateEvent("agent-1", capture));
+    expect(capture).toHaveBeenCalledTimes(2);
+  });
+
+  test("ignores closed agents and non-claude providers", async () => {
+    const { manager, emit } = createFakeManager();
+    const capture = vi.fn(async () => undefined);
+    attachClaudeTranscriptCapture(createTestLogger(), manager);
+
+    emit({
+      type: "agent_state",
+      agent: { id: "a", provider: "claude", lifecycle: "closed", session: null },
+    });
+    emit({
+      type: "agent_state",
+      agent: {
+        id: "b",
+        provider: "codex",
+        lifecycle: "idle",
+        session: { captureTranscriptSnapshot: capture },
+      },
+    });
+
+    expect(capture).not.toHaveBeenCalled();
+  });
+});
 
 describe("persistence hooks", () => {
   test("buildConfigOverrides carries systemPrompt and mcpServers", () => {

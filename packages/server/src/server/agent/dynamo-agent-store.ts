@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 
 import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
+import { isPaseoCloudMode } from "../paseo-env.js";
+import { getSessionTranscriptStore } from "./providers/claude/session-transcript-store.js";
 import {
   parseStoredAgentRecord,
   type AgentStore,
@@ -152,6 +154,16 @@ export class DynamoAgentStore implements AgentStore {
         "DynamoAgentStore: remove failed",
       );
       throw err;
+    }
+    // A6: hard delete reclaims the agent's persisted Claude transcripts from S3.
+    // Archive (archivedAt) never reaches `remove`, so archived sessions are
+    // retained. Cloud-mode only; kill switch + warn-and-continue keep this off
+    // the critical path.
+    if (isPaseoCloudMode() && process.env.PASEO_PERSIST_CLAUDE_SESSIONS !== "0") {
+      await getSessionTranscriptStore(this.logger).deleteAgent({
+        workspaceId: this.workspaceId,
+        agentId,
+      });
     }
   }
 
