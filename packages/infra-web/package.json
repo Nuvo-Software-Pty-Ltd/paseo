@@ -1,6 +1,6 @@
 {
   "name": "@orchestra/infra-web-static",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Reusable CDK v2 construct + runnable app for the Paseo SPA on S3 + CloudFront. Distributed as a tarball in s3://orchestra-internal-packages/infra-web-static/ — NEVER published to npm.",
   "files": [
