@@ -72,6 +72,7 @@ import type {
   EditorTargetId,
   PaseoConfigRaw,
   PaseoConfigRevision,
+  AddProjectSource,
 } from "../shared/messages.js";
 import type {
   AgentPermissionRequest,
@@ -1662,6 +1663,67 @@ export class DaemonClient {
         cwd,
       },
       responseType: "open_project_response",
+      timeout: 10000,
+    });
+  }
+
+  // D-3.5a (app T-1) — create a Workspace container with just a name.
+  async createWorkspace(
+    displayName: string,
+    requestId?: string,
+  ): Promise<Extract<SessionOutboundMessage, { type: "create_workspace_response" }>["payload"]> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "create_workspace_request", displayName },
+      responseType: "create_workspace_response",
+      timeout: 10000,
+    });
+  }
+
+  // D-3.5a (app T-1) — list a workspace container's projects.
+  async listProjects(
+    workspaceId: string,
+    requestId?: string,
+  ): Promise<Extract<SessionOutboundMessage, { type: "list_projects_response" }>["payload"]> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "list_projects_request", workspaceId },
+      responseType: "list_projects_response",
+      timeout: 10000,
+    });
+  }
+
+  // D-3.5a (app T-1) — add a project (local dir or GitHub repo) to a workspace.
+  // The GitHub-repo path may clone, so allow a longer timeout.
+  async addProject(
+    input: { workspaceId: string; source: AddProjectSource },
+    requestId?: string,
+  ): Promise<Extract<SessionOutboundMessage, { type: "add_project_response" }>["payload"]> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "add_project_request",
+        workspaceId: input.workspaceId,
+        source: input.source,
+      },
+      responseType: "add_project_response",
+      timeout: 120000,
+    });
+  }
+
+  // D-3.5a (app T-1) — remove a project from a workspace container.
+  async removeProject(
+    input: { workspaceId: string; projectId: string },
+    requestId?: string,
+  ): Promise<Extract<SessionOutboundMessage, { type: "remove_project_response" }>["payload"]> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "remove_project_request",
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+      },
+      responseType: "remove_project_response",
       timeout: 10000,
     });
   }

@@ -111,9 +111,12 @@ import {
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import {
   FileBackedProjectRegistry,
+  FileBackedWorkspaceContainerRegistry,
   FileBackedWorkspaceRegistry,
+  InMemoryWorkspaceContainerRegistry,
   InMemoryWorkspaceRegistry,
   type ProjectRegistry,
+  type WorkspaceContainerRegistry,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { DynamoProjectStore } from "./project/dynamo-project-store.js";
@@ -590,6 +593,7 @@ export async function createPaseoDaemon(
   httpServer.on("upgrade", scriptProxyUpgradeHandler);
 
   workspaceRegistry = buildWorkspaceRegistry(config.paseoHome, logger);
+  const workspaceContainerRegistry = buildWorkspaceContainerRegistry(config.paseoHome, logger);
   // D-3.10 — cloud-mode daemon persistence. Each of the original four
   // Day-1 surfaces (chat, permission, loop, schedule) picks DynamoStore
   // in cloud mode and FileBacked* on-host. See `buildD3DaemonStores`
@@ -667,13 +671,17 @@ export async function createPaseoDaemon(
   const detachClaudeTranscriptCapture = attachClaudeTranscriptCapture(logger, agentManager);
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  const cloudMigration = resolveCloudMigrationContext();
   await bootstrapWorkspaceRegistries({
     paseoHome: config.paseoHome,
     agentStorage,
     projectRegistry,
     workspaceRegistry,
+    workspaceContainerRegistry,
     workspaceGitService,
     logger,
+    containerWorkspaceId: cloudMigration.containerWorkspaceId,
+    migrationRepoUrlSeed: cloudMigration.migrationRepoUrlSeed,
   });
   logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
   await chatService.initialize();
@@ -1080,6 +1088,7 @@ export async function createPaseoDaemon(
             github,
             config.pushNotificationSender,
             workspaceAuthCallback,
+            workspaceContainerRegistry,
           );
 
           if (relayEnabled) {
@@ -1312,6 +1321,42 @@ function buildWorkspaceRegistry(paseoHome: string, logger: Logger): WorkspaceReg
     path.join(paseoHome, "projects", "workspaces.json"),
     logger,
   );
+}
+
+// D-3.5a — registry of top-level Workspace containers. Cloud: in-memory
+// (the single ambient PASEO_WORKSPACE_ID container, derived each boot).
+// On-host: a JSON file alongside projects.json / workspaces.json.
+function buildWorkspaceContainerRegistry(
+  paseoHome: string,
+  logger: Logger,
+): WorkspaceContainerRegistry {
+  if (isPaseoCloudMode()) {
+    return new InMemoryWorkspaceContainerRegistry();
+  }
+  return new FileBackedWorkspaceContainerRegistry(
+    path.join(paseoHome, "projects", "containers.json"),
+    logger,
+  );
+}
+
+// D-3.5a (T-7 migration) — cloud attaches reconstructed projects to the
+// ambient PASEO_WORKSPACE_ID container and seeds the migrated first project's
+// repoUrl from `<ws>#metadata` (injected by the cloud env as
+// PASEO_WORKSPACE_REPO_URL). On-host: no container override, no migration
+// seed. OQ-5: this env-var seed is the daemon-side contract; the cloud stream
+// may instead forward-fill a `<ws>#project` row — both converge on the same
+// end state (F9: one writer is the rebuild here).
+function resolveCloudMigrationContext(): {
+  containerWorkspaceId: string | undefined;
+  migrationRepoUrlSeed: string | null;
+} {
+  if (!isPaseoCloudMode()) {
+    return { containerWorkspaceId: undefined, migrationRepoUrlSeed: null };
+  }
+  return {
+    containerWorkspaceId: process.env.PASEO_WORKSPACE_ID?.trim() || undefined,
+    migrationRepoUrlSeed: process.env.PASEO_WORKSPACE_REPO_URL?.trim() || null,
+  };
 }
 
 // D-3.10 — cloud-mode-aware factory for the four Day-1 daemon stores

@@ -41,6 +41,8 @@ import type { PersistedProjectRecord, ProjectRegistry } from "../workspace-regis
 //     reader either sees the pre-archive row or the post-archive row,
 //     never a torn write.
 
+// Deliberately duplicated from `workspace-registry.ts` (cloud store keeps
+// its own copy). MUST stay field-aligned with that schema.
 const PersistedProjectRecordSchema = z.object({
   projectId: z.string(),
   rootPath: z.string(),
@@ -49,6 +51,12 @@ const PersistedProjectRecordSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
+  // COMPAT(workspace-project-1n): added in v0.1.73, drop optionality when
+  // floor >= v0.1.73 (target 2026-12). `workspaceId` echoes the
+  // `<ws>#project` partition for cross-mode uniformity; `repoUrl` is the
+  // credential-free canonical repo URL persisted in the row body.
+  workspaceId: z.string().optional(),
+  repoUrl: z.string().nullable().optional(),
 });
 
 export interface DynamoProjectStoreOptions {

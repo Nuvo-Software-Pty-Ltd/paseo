@@ -17,6 +17,12 @@ export interface DirectoryProjectMembership {
   projectName: string;
   projectRootPath: string;
   projectKind: PersistedProjectKind;
+  // D-3.5a — credential-free repo provenance. NEVER the raw
+  // `checkout.remoteUrl` (a cloud clone stores a tokenized remote,
+  // `https://x-access-token:<TOKEN>@github.com/...`). Canonicalized via
+  // `deriveCanonicalRepoUrl` so neither persistence nor the wire ever
+  // carries a credential. `null` for non-git / local-directory projects.
+  repoUrl: string | null;
 }
 
 export interface DetectStaleWorkspacesInput {
@@ -37,7 +43,15 @@ export function deriveWorkspaceId(cwd: string, checkout: ProjectCheckoutLitePayl
   return worktreeRoot ?? normalizeWorkspaceId(cwd);
 }
 
-function deriveRemoteProjectKey(remoteUrl: string | null): string | null {
+// Parse a git remote into its host + cleaned `<org>/<repo>` path. Both
+// the project grouping key and the credential-free canonical repo URL are
+// derived from this. Using `new URL(...).hostname`/`.pathname` (rather
+// than the raw string) intentionally DROPS any embedded credentials, so a
+// tokenized remote (`https://x-access-token:<TOKEN>@github.com/org/repo`)
+// never leaks downstream.
+function parseRemoteHostAndPath(
+  remoteUrl: string | null,
+): { host: string; cleanedPath: string } | null {
   if (!remoteUrl) {
     return null;
   }
@@ -76,12 +90,29 @@ function deriveRemoteProjectKey(remoteUrl: string | null): string | null {
     return null;
   }
 
-  const cleanedHost = host.toLowerCase();
-  if (cleanedHost === "github.com") {
-    return `remote:github.com/${cleanedPath}`;
-  }
+  return { host: host.toLowerCase(), cleanedPath };
+}
 
-  return `remote:${cleanedHost}/${cleanedPath}`;
+function deriveRemoteProjectKey(remoteUrl: string | null): string | null {
+  const parsed = parseRemoteHostAndPath(remoteUrl);
+  if (!parsed) {
+    return null;
+  }
+  return `remote:${parsed.host}/${parsed.cleanedPath}`;
+}
+
+// D-3.5a (VERIFY-3.5a finding #1, HIGH) — produce a credential-free
+// canonical `https://<host>/<org>/<repo>` from any remote (tokenized or
+// not). This is the ONLY value that may be persisted into
+// `project.repoUrl` or shipped over the wire in `list_projects`. The raw
+// `checkout.remoteUrl` must never be persisted/transmitted because the
+// cloud clone embeds a GitHub access token in it (`cloud-clone.ts`).
+export function deriveCanonicalRepoUrl(remoteUrl: string | null): string | null {
+  const parsed = parseRemoteHostAndPath(remoteUrl);
+  if (!parsed) {
+    return null;
+  }
+  return `https://${parsed.host}/${parsed.cleanedPath}`;
 }
 
 export function deriveProjectGroupingKey(options: {
@@ -265,5 +296,6 @@ export function classifyDirectoryForProjectMembership(input: {
       checkout,
     }),
     projectKind: deriveProjectKind(checkout),
+    repoUrl: deriveCanonicalRepoUrl(checkout.remoteUrl),
   };
 }
