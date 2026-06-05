@@ -133,7 +133,24 @@ describe("fetchWorkspaceRepoUrl", () => {
     ).rejects.toThrow(/403/);
   });
 
-  it("throws when the response is missing required fields", async () => {
+  it("throws when accountId is missing", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ repoUrl: "https://github.com/o/r" }), { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      fetchWorkspaceRepoUrl({
+        authServiceBaseUrl: "https://auth.example.com",
+        hmacKey: "k",
+        workspaceId: "ws_1",
+        logger,
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/missing accountId/);
+  });
+
+  it("tolerates an absent repoUrl (empty workspace — D-3.5a T-5)", async () => {
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ accountId: "a" }), { status: 200 }),
     ) as unknown as typeof fetch;
@@ -146,6 +163,6 @@ describe("fetchWorkspaceRepoUrl", () => {
         logger,
         fetchImpl,
       }),
-    ).rejects.toThrow(/missing accountId\/repoUrl/);
+    ).resolves.toEqual({ accountId: "a", repoUrl: null });
   });
 });
