@@ -8,12 +8,16 @@ import {
   View,
   type PressableStateCallbackType,
 } from "react-native";
-import { Archive, Cloud, Folder } from "lucide-react-native";
+import { Archive, Cloud, Folder, Github } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useQuery } from "@tanstack/react-query";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { shortenPath } from "@/utils/shorten-path";
-import { useRecommendedProjectPaths } from "@/stores/session-store-hooks";
+import { useProjectSource, useRecommendedProjectPaths } from "@/stores/session-store-hooks";
+import { projectSourceAllowsGithub, projectSourceAllowsLocalDirectory } from "@/lib/project-source";
+import { GithubRepoPicker } from "@/components/github-repo-picker";
+import { ADD_PROJECT_LABEL } from "@/lib/cloud-workspace-copy";
+import type { ProjectDescriptorPayload } from "@server/shared/messages";
 import {
   useHostRuntimeClient,
   useHostRuntimeIsConnected,
@@ -318,6 +322,248 @@ function PathRow({ path, active, onSelect }: PathRowProps) {
   );
 }
 
+// D-3.5a (T-3) — the entry point that opens the GitHub repo picker. Lives in
+// the GitHub source section; visible only when the daemon allows the GitHub
+// source (capability-gated upstream).
+function AddGithubRepoRow({
+  label,
+  busy,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  busy: boolean;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  const { theme } = useUnistyles();
+  const pressableStyle = useCallback(
+    ({ hovered = false, pressed }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.row,
+      (Boolean(hovered) || pressed) && { backgroundColor: theme.colors.surface1 },
+      disabled && { opacity: 0.5 },
+    ],
+    [disabled, theme.colors.surface1],
+  );
+  const rowTextStyle = useMemo(
+    () => [styles.rowText, { color: theme.colors.foreground }],
+    [theme.colors.foreground],
+  );
+  return (
+    <Pressable
+      style={pressableStyle}
+      onPress={onPress}
+      disabled={disabled}
+      testID="picker-add-github-repo"
+    >
+      <View style={styles.rowContent}>
+        <View style={styles.iconSlot}>
+          <Github size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />
+        </View>
+        <Text style={rowTextStyle} numberOfLines={1}>
+          {busy ? "Opening…" : label}
+        </Text>
+      </View>
+    </Pressable>
+  );
+}
+
+// D-3.5a (T-3) — encapsulates the GitHub source's container resolution + add
+// flow so the picker modal stays under the complexity budget.
+// D-3.5a (T-3) — the GitHub source section of the picker. Capability-gated by
+// the caller (`visible`); extracted to keep ProjectPickerModal under the
+// complexity budget.
+function GithubSourceSection({
+  visible,
+  busy,
+  disabled,
+  error,
+  onAdd,
+}: {
+  visible: boolean;
+  busy: boolean;
+  disabled: boolean;
+  error: string | null;
+  onAdd: () => void;
+}) {
+  const { theme } = useUnistyles();
+  const sectionHeaderStyle = useMemo(
+    () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const errorStyle = useMemo(
+    () => [styles.emptyText, { color: theme.colors.destructive }],
+    [theme.colors.destructive],
+  );
+  if (!visible) {
+    return null;
+  }
+  return (
+    <View style={styles.section}>
+      <Text style={sectionHeaderStyle}>GitHub</Text>
+      <AddGithubRepoRow label={ADD_PROJECT_LABEL} busy={busy} disabled={disabled} onPress={onAdd} />
+      {error ? <Text style={errorStyle}>{error}</Text> : null}
+    </View>
+  );
+}
+
+function usePickerGithubSource(
+  client: ReturnType<typeof useHostRuntimeClient>,
+  onProjectOpen: (path: string) => Promise<void>,
+) {
+  const [githubWorkspaceId, setGithubWorkspaceId] = useState<string | null>(null);
+  const [isResolvingContainer, setIsResolvingContainer] = useState(false);
+  const [containerError, setContainerError] = useState<string | null>(null);
+
+  const openGithubPicker = useCallback(() => {
+    if (!client || isResolvingContainer) {
+      return;
+    }
+    setIsResolvingContainer(true);
+    setContainerError(null);
+    void (async () => {
+      try {
+        // createWorkspace is idempotent in cloud — it returns the existing
+        // ambient container (authoritative id) without renaming it.
+        const result = await client.createWorkspace("");
+        if (result.workspace) {
+          setGithubWorkspaceId(result.workspace.workspaceId);
+        } else {
+          setContainerError(result.error ?? "Couldn't open this workspace");
+        }
+      } catch (err) {
+        setContainerError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setIsResolvingContainer(false);
+      }
+    })();
+  }, [client, isResolvingContainer]);
+
+  const closeGithubPicker = useCallback(() => {
+    setGithubWorkspaceId(null);
+  }, []);
+
+  const handleProjectAdded = useCallback(
+    (project: ProjectDescriptorPayload) => {
+      setGithubWorkspaceId(null);
+      void onProjectOpen(project.rootPath);
+    },
+    [onProjectOpen],
+  );
+
+  return {
+    githubWorkspaceId,
+    isResolvingContainer,
+    containerError,
+    openGithubPicker,
+    closeGithubPicker,
+    handleProjectAdded,
+  };
+}
+
+// D-3.5a (T-6) — the cwd to open for a cloud workspace. A repo-bound workspace
+// opens its canonical clone; a repo-less / empty workspace (repoUrl null) opens
+// the container root, which the daemon resolves to an empty workspace (no clone,
+// no error) instead of the old hard `.git-canonical` assumption.
+export function cloudWorkspaceOpenPath(workspace: WorkspaceRecord): string {
+  return workspace.repoUrl
+    ? `/workspace/${workspace.workspaceId}/.git-canonical`
+    : `/workspace/${workspace.workspaceId}`;
+}
+
+interface PickerResultsBodyProps {
+  isSubmitting: boolean;
+  allowLocalDir: boolean;
+  allowGithub: boolean;
+  isCloudHost: boolean;
+  githubBusy: boolean;
+  githubDisabled: boolean;
+  githubError: string | null;
+  onAddGithub: () => void;
+  options: string[];
+  activeIndex: number;
+  query: string;
+  activeCloudWorkspaces: WorkspaceRecord[];
+  archivedCloudWorkspaces: WorkspaceRecord[];
+  archivingWorkspaceId: string | null;
+  unarchivingWorkspaceId: string | null;
+  onSelectPath: (path: string) => void;
+  onSelectCloudWorkspace: (workspace: WorkspaceRecord) => void;
+  onArchiveCloudWorkspace: (workspace: WorkspaceRecord) => void;
+  onOpenArchivedWorkspace: (workspace: WorkspaceRecord) => void;
+  onUnarchiveOnly: (workspace: WorkspaceRecord) => void;
+}
+
+// Extracted from ProjectPickerModal to keep that function under the complexity
+// budget. Renders the scrollable result list: GitHub source, local-directory
+// suggestions, active cloud workspaces, and the archived section.
+function PickerResultsBody(props: PickerResultsBodyProps) {
+  const { theme } = useUnistyles();
+  const emptyTextStyle = useMemo(
+    () => [styles.emptyText, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const sectionHeaderStyle = useMemo(
+    () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
+    [theme.colors.foregroundMuted],
+  );
+  const showLocalEmptyHint =
+    !props.isSubmitting && props.allowLocalDir && props.options.length === 0 && !props.query.trim();
+  const showActiveCloud =
+    !props.isSubmitting && props.isCloudHost && props.activeCloudWorkspaces.length > 0;
+  const showOptions = !props.isSubmitting && !(props.options.length === 0 && !props.query.trim());
+  return (
+    <ScrollView
+      style={styles.results}
+      contentContainerStyle={styles.resultsContent}
+      keyboardShouldPersistTaps="always"
+      showsVerticalScrollIndicator={false}
+    >
+      {props.isSubmitting ? <Text style={emptyTextStyle}>Opening project...</Text> : null}
+      <GithubSourceSection
+        visible={!props.isSubmitting && props.allowGithub && props.isCloudHost}
+        busy={props.githubBusy}
+        disabled={props.githubDisabled}
+        error={props.githubError}
+        onAdd={props.onAddGithub}
+      />
+      {showLocalEmptyHint ? <Text style={emptyTextStyle}>Start typing a path</Text> : null}
+      {showActiveCloud ? (
+        <View style={styles.section}>
+          <Text style={sectionHeaderStyle}>Cloud workspaces</Text>
+          {props.activeCloudWorkspaces.map((workspace) => (
+            <CloudWorkspaceRow
+              key={workspace.workspaceId}
+              workspace={workspace}
+              onSelect={props.onSelectCloudWorkspace}
+              onArchive={props.onArchiveCloudWorkspace}
+              isArchiving={props.archivingWorkspaceId === workspace.workspaceId}
+            />
+          ))}
+        </View>
+      ) : null}
+      {showOptions
+        ? props.options.map((path, index) => (
+            <PathRow
+              key={path}
+              path={path}
+              active={index === props.activeIndex}
+              onSelect={props.onSelectPath}
+            />
+          ))
+        : null}
+      {!props.isSubmitting && props.isCloudHost ? (
+        <ArchivedSection
+          workspaces={props.archivedCloudWorkspaces}
+          onSelect={props.onOpenArchivedWorkspace}
+          onUnarchive={props.onUnarchiveOnly}
+          unarchivingWorkspaceId={props.unarchivingWorkspaceId}
+        />
+      ) : null}
+    </ScrollView>
+  );
+}
+
 function usePickerUnarchiveBinding() {
   const unarchive = useUnarchiveWorkspace();
   const unarchivingWorkspaceId = unarchive.isPending
@@ -357,6 +603,12 @@ export function ProjectPickerModal() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const openProject = useOpenProject(serverId);
 
+  // D-3.5a (T-5) — the picker's sources are decided ONLY by the connected
+  // daemon's capability, never by a cloud/platform constant.
+  const projectSource = useProjectSource(serverId);
+  const allowLocalDir = projectSourceAllowsLocalDirectory(projectSource);
+  const allowGithub = projectSourceAllowsGithub(projectSource);
+
   const cloudWorkspacesQuery = useCloudWorkspaces(serverId, {
     enabled: isCloudHost && open,
   });
@@ -385,12 +637,16 @@ export function ProjectPickerModal() {
         result.entries?.flatMap((entry) => (entry.kind === "directory" ? [entry.path] : [])) ?? []
       );
     },
-    enabled: Boolean(client) && isConnected && open,
+    enabled: Boolean(client) && isConnected && open && allowLocalDir,
     staleTime: 15_000,
     retry: false,
   });
 
   const options = useMemo(() => {
+    // github_only (cloud) hides the local-directory source entirely.
+    if (!allowLocalDir) {
+      return [] as string[];
+    }
     const suggestedPaths = buildWorkingDirectorySuggestions({
       recommendedPaths,
       serverPaths: directorySuggestionsQuery.data ?? [],
@@ -401,7 +657,7 @@ export function ProjectPickerModal() {
       return suggestedPaths;
     }
     return [trimmedQuery, ...suggestedPaths];
-  }, [query, directorySuggestionsQuery.data, recommendedPaths]);
+  }, [allowLocalDir, query, directorySuggestionsQuery.data, recommendedPaths]);
 
   const handleClose = useCallback(() => {
     setOpen(false);
@@ -443,13 +699,25 @@ export function ProjectPickerModal() {
         router.push("/settings/billing" as Href);
         return;
       }
-      // The daemon's container exposes each cloud workspace at this canonical
-      // mount; openProject clones-on-miss, so we never client-side-precheck.
-      const path = `/workspace/${workspace.workspaceId}/.git-canonical`;
-      void handleSelectPath(path);
+      // D-3.5a (T-6) — resume path no longer hard-assumes `.git-canonical`
+      // (see cloudWorkspaceOpenPath). openProject clones-on-miss, so we never
+      // client-side-precheck.
+      void handleSelectPath(cloudWorkspaceOpenPath(workspace));
     },
     [handleSelectPath, router, setOpen],
   );
+
+  // D-3.5a (T-3) — GitHub source: resolve the ambient container, then open the
+  // repo picker scoped to it; on add, open the new checkout (T-4 multi-add:
+  // re-opening the picker adds the 2nd/3rd repo into the same container).
+  const {
+    githubWorkspaceId,
+    isResolvingContainer,
+    containerError,
+    openGithubPicker: handleOpenGithubPicker,
+    closeGithubPicker: handleCloseGithubPicker,
+    handleProjectAdded: handleGithubProjectAdded,
+  } = usePickerGithubSource(client, handleSelectPath);
 
   const handleArchiveCloudWorkspace = useCallback(
     (workspace: WorkspaceRecord) => {
@@ -580,88 +848,78 @@ export function ProjectPickerModal() {
     () => [styles.input, { color: theme.colors.foreground }],
     [theme.colors.foreground],
   );
-  const emptyTextStyle = useMemo(
-    () => [styles.emptyText, { color: theme.colors.foregroundMuted }],
-    [theme.colors.foregroundMuted],
-  );
-  const sectionHeaderStyle = useMemo(
-    () => [styles.sectionHeader, { color: theme.colors.foregroundMuted }],
-    [theme.colors.foregroundMuted],
+  const headerPlaceholderStyle = useMemo(
+    () => [styles.input, { color: theme.colors.foreground }],
+    [theme.colors.foreground],
   );
 
   if (!serverId) return null;
 
   return (
-    <Modal visible={open} transparent animationType="fade" onRequestClose={handleClose}>
-      <View style={styles.overlay}>
-        <Pressable style={styles.backdrop} onPress={handleClose} />
+    <>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={handleClose}>
+        <View style={styles.overlay}>
+          <Pressable style={styles.backdrop} onPress={handleClose} />
 
-        <View style={panelStyle}>
-          <View style={headerStyle}>
-            <TextInput
-              ref={inputRef}
-              value={query}
-              onChangeText={handleChangeQuery}
-              placeholder="Type a directory path..."
-              placeholderTextColor={theme.colors.foregroundMuted}
-              style={inputStyle}
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoFocus
-              editable={!isSubmitting}
-              returnKeyType="go"
-              onSubmitEditing={handleSubmitCustom}
+          <View style={panelStyle}>
+            <View style={headerStyle}>
+              {allowLocalDir ? (
+                <TextInput
+                  ref={inputRef}
+                  value={query}
+                  onChangeText={handleChangeQuery}
+                  placeholder="Type a directory path..."
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={inputStyle}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  autoFocus
+                  editable={!isSubmitting}
+                  returnKeyType="go"
+                  onSubmitEditing={handleSubmitCustom}
+                />
+              ) : (
+                // github_only (cloud): no local directories — the directory input
+                // is hidden entirely (T-3 source-awareness).
+                <Text style={headerPlaceholderStyle}>Open a project</Text>
+              )}
+            </View>
+
+            <PickerResultsBody
+              isSubmitting={isSubmitting}
+              allowLocalDir={allowLocalDir}
+              allowGithub={allowGithub}
+              isCloudHost={isCloudHost}
+              githubBusy={isResolvingContainer}
+              githubDisabled={!client || isResolvingContainer}
+              githubError={containerError}
+              onAddGithub={handleOpenGithubPicker}
+              options={options}
+              activeIndex={activeIndex}
+              query={query}
+              activeCloudWorkspaces={activeCloudWorkspaces}
+              archivedCloudWorkspaces={archivedCloudWorkspaces}
+              archivingWorkspaceId={archivingWorkspaceId}
+              unarchivingWorkspaceId={unarchivingWorkspaceId}
+              onSelectPath={handleSelectPath}
+              onSelectCloudWorkspace={handleSelectCloudWorkspace}
+              onArchiveCloudWorkspace={handleArchiveCloudWorkspace}
+              onOpenArchivedWorkspace={handleOpenArchivedWorkspace}
+              onUnarchiveOnly={handleUnarchiveOnly}
             />
           </View>
-
-          <ScrollView
-            style={styles.results}
-            contentContainerStyle={styles.resultsContent}
-            keyboardShouldPersistTaps="always"
-            showsVerticalScrollIndicator={false}
-          >
-            {isSubmitting ? <Text style={emptyTextStyle}>Opening project...</Text> : null}
-            {!isSubmitting && options.length === 0 && !query.trim() ? (
-              <Text style={emptyTextStyle}>Start typing a path</Text>
-            ) : null}
-            {!isSubmitting && isCloudHost && activeCloudWorkspaces.length > 0 ? (
-              <View style={styles.section}>
-                <Text style={sectionHeaderStyle}>Cloud workspaces</Text>
-                {activeCloudWorkspaces.map((workspace) => (
-                  <CloudWorkspaceRow
-                    key={workspace.workspaceId}
-                    workspace={workspace}
-                    onSelect={handleSelectCloudWorkspace}
-                    onArchive={handleArchiveCloudWorkspace}
-                    isArchiving={archivingWorkspaceId === workspace.workspaceId}
-                  />
-                ))}
-              </View>
-            ) : null}
-            {!isSubmitting && !(options.length === 0 && !query.trim()) ? (
-              <>
-                {options.map((path, index) => (
-                  <PathRow
-                    key={path}
-                    path={path}
-                    active={index === activeIndex}
-                    onSelect={handleSelectPath}
-                  />
-                ))}
-              </>
-            ) : null}
-            {!isSubmitting && isCloudHost ? (
-              <ArchivedSection
-                workspaces={archivedCloudWorkspaces}
-                onSelect={handleOpenArchivedWorkspace}
-                onUnarchive={handleUnarchiveOnly}
-                unarchivingWorkspaceId={unarchivingWorkspaceId}
-              />
-            ) : null}
-          </ScrollView>
         </View>
-      </View>
-    </Modal>
+      </Modal>
+      {client && githubWorkspaceId ? (
+        <GithubRepoPicker
+          visible={githubWorkspaceId !== null}
+          onClose={handleCloseGithubPicker}
+          workspaceId={githubWorkspaceId}
+          client={client}
+          onProjectAdded={handleGithubProjectAdded}
+        />
+      ) : null}
+    </>
   );
 }
 

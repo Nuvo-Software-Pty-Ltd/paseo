@@ -10,6 +10,7 @@ import {
   resolveWorkspaceMapKeyByIdentity,
   type WorkspaceExecutionAuthorityResult,
 } from "@/utils/workspace-execution";
+import { resolveProjectSource, type ProjectSource } from "@/lib/project-source";
 import { useSessionStore, type WorkspaceDescriptor } from "./session-store";
 
 // These are the ONLY supported ways to read workspaces from the session store.
@@ -330,6 +331,24 @@ export function useRecommendedProjectPaths(serverId: string | null): string[] {
         .filter((path) => path.length > 0);
     },
     equal,
+  );
+}
+
+// D-3.5a (app T-5) — capability-driven project-source selector. The picker's
+// available sources are decided ENTIRELY by the connected daemon's
+// `server_info.features.projectSource`, never by a cloud/Electron/platform
+// constant (open-core discipline). An old daemon that omits the field defaults
+// to "local_and_github" (the safe superset) via `resolveProjectSource`.
+export function useProjectSource(serverId: string | null): ProjectSource {
+  return useStoreWithEqualityFn(
+    useSessionStore,
+    (state) => {
+      if (!serverId) {
+        return resolveProjectSource(null);
+      }
+      return resolveProjectSource(state.sessions[serverId]?.serverInfo ?? null);
+    },
+    Object.is,
   );
 }
 
