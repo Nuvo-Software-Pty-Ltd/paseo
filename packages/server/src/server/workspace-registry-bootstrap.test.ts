@@ -194,7 +194,12 @@ describe("bootstrapWorkspaceRegistries", () => {
     expect(await workspaceContainerRegistry.get(DEFAULT_CONTAINER_WORKSPACE_ID)).not.toBeNull();
   });
 
-  describe("cloud migration (the 3 live repo-bound workspaces)", () => {
+  // Cloud `/workspace/<ws>/...` containers are POSIX/Linux-only (ECS; gated by
+  // isPaseoCloudMode). On a Windows runner `normalizeWorkspaceId` → path.resolve
+  // rewrites these POSIX seeds to `C:\workspace\...`, so the cloud-container
+  // detection (intentionally POSIX) no longer matches — a platform combination
+  // that cannot occur in production. Skip on win32; ubuntu covers the real path.
+  describe.skipIf(process.platform === "win32")("cloud migration (the 3 live repo-bound workspaces)", () => {
     const CONTAINER = "ws_74d480de";
     const CLONE = `/workspace/${CONTAINER}/.git-canonical`;
 
