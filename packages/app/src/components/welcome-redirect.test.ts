@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HostProfile } from "@/types/host-connection";
-import { resolveWelcomeRedirectServerId } from "./welcome-redirect";
+import { isAutoRoutableOnlineHost, resolveWelcomeRedirectServerId } from "./welcome-redirect";
 
 function makeHost(input: {
   serverId: string;
@@ -83,5 +83,32 @@ describe("resolveWelcomeRedirectServerId", () => {
         isWeb: false,
       }),
     ).toBe("ws_74d480de");
+  });
+});
+
+describe("isAutoRoutableOnlineHost (shared predicate)", () => {
+  const cloudHost = makeHost({
+    serverId: "ws_74d480de",
+    connectionType: "directTcp",
+    workspaceId: "ws_74d480de",
+  });
+  const relayHost = makeHost({ serverId: "srv_local", connectionType: "relay" });
+
+  it("web + cloud host → not auto-routable", () => {
+    expect(
+      isAutoRoutableOnlineHost({ serverId: "ws_74d480de", hosts: [cloudHost], isWeb: true }),
+    ).toBe(false);
+  });
+
+  it("web + relay host → auto-routable", () => {
+    expect(
+      isAutoRoutableOnlineHost({ serverId: "srv_local", hosts: [relayHost], isWeb: true }),
+    ).toBe(true);
+  });
+
+  it("native + cloud host → auto-routable", () => {
+    expect(
+      isAutoRoutableOnlineHost({ serverId: "ws_74d480de", hosts: [cloudHost], isWeb: false }),
+    ).toBe(true);
   });
 });
