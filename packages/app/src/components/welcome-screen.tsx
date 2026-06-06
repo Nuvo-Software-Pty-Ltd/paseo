@@ -6,6 +6,7 @@ import { QrCode, Link2, ClipboardPaste, ExternalLink, Settings, Cloud } from "lu
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { HostProfile } from "@/types/host-connection";
 import { getHostRuntimeStore, isHostRuntimeConnected, useHosts } from "@/runtime/host-runtime";
+import { resolveWelcomeRedirectServerId } from "./welcome-redirect";
 import { AddHostModal } from "./add-host-modal";
 import { PairLinkModal } from "./pair-link-modal";
 import { Button } from "@/components/ui/button";
@@ -189,9 +190,14 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
   const anyOnlineServerId = useAnyHostOnline(hosts.map((h) => h.serverId));
 
   useEffect(() => {
-    if (!anyOnlineServerId) return;
-    router.replace(buildHostRootRoute(anyOnlineServerId));
-  }, [anyOnlineServerId, router]);
+    const redirectServerId = resolveWelcomeRedirectServerId({
+      anyOnlineServerId,
+      hosts,
+      isWeb,
+    });
+    if (!redirectServerId) return;
+    router.replace(buildHostRootRoute(redirectServerId));
+  }, [anyOnlineServerId, hosts, router]);
 
   const finishOnboarding = useCallback(
     (serverId: string) => {
