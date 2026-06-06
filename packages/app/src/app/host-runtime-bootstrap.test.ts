@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { HostProfile } from "@/types/host-connection";
 import {
   resolveStartupRedirectRoute,
   resolveStartupWorkspaceSelection,
@@ -232,6 +233,88 @@ describe("resolveStartupRedirectRoute", () => {
       });
 
       expect(route).toBe("/h/server-saved");
+    });
+  });
+
+  describe("cold web load: cloud-host auto-route gating (mirrors welcome-redirect)", () => {
+    function makeCloudHost(serverId: string): HostProfile {
+      return {
+        serverId,
+        label: serverId,
+        lifecycle: {},
+        connections: [
+          {
+            id: "direct:host:443",
+            type: "directTcp",
+            endpoint: "host:443",
+            useTls: true,
+            workspaceId: serverId,
+          },
+        ],
+        preferredConnectionId: "direct:host:443",
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+    }
+
+    function makeRelayHost(serverId: string): HostProfile {
+      return {
+        serverId,
+        label: serverId,
+        lifecycle: {},
+        connections: [
+          {
+            id: "relay:relay.example:443",
+            type: "relay",
+            relayEndpoint: "relay.example:443",
+            daemonPublicKeyB64: "key",
+          },
+        ],
+        preferredConnectionId: "relay:relay.example:443",
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      };
+    }
+
+    it("cloud host on web → does NOT auto-route, falls through to welcome", () => {
+      const route = resolveStartupRedirectRoute({
+        ...baseInput,
+        anyOnlineHostServerId: "ws_74d480de",
+        hosts: [makeCloudHost("ws_74d480de")],
+        isWeb: true,
+      });
+      expect(route).toBe(WELCOME_ROUTE);
+    });
+
+    it("cloud host on web → does NOT auto-enter the persisted workspace", () => {
+      const selection = resolveStartupWorkspaceSelection({
+        ...baseInput,
+        anyOnlineHostServerId: "ws_74d480de",
+        workspaceSelection: { serverId: "ws_74d480de", workspaceId: "ws_74d480de" },
+        hosts: [makeCloudHost("ws_74d480de")],
+        isWeb: true,
+      });
+      expect(selection).toBeNull();
+    });
+
+    it("relay host on web → resumes (auto-routes to host root)", () => {
+      const route = resolveStartupRedirectRoute({
+        ...baseInput,
+        anyOnlineHostServerId: "srv_local",
+        hosts: [makeRelayHost("srv_local")],
+        isWeb: true,
+      });
+      expect(route).toBe("/h/srv_local");
+    });
+
+    it("cloud host on native → resumes (auto-routes to host root)", () => {
+      const route = resolveStartupRedirectRoute({
+        ...baseInput,
+        anyOnlineHostServerId: "ws_74d480de",
+        hosts: [makeCloudHost("ws_74d480de")],
+        isWeb: false,
+      });
+      expect(route).toBe("/h/ws_74d480de");
     });
   });
 });

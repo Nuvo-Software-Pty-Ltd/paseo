@@ -343,6 +343,21 @@ export function normalizeStoredHostProfile(entry: unknown): HostProfile | null {
   };
 }
 
+// A "cloud host" is one whose preferred connection is a cloud-provisioned
+// daemon — a directTcp connection carrying a workspaceId (minted per-workspace
+// in cloud mode). Local/self-host directTcp connections never carry one.
+export function isCloudHostProfile(host: HostProfile | null | undefined): boolean {
+  if (!host) return false;
+  const preferred = host.connections.find(
+    (connection) => connection.id === host.preferredConnectionId,
+  );
+  return (
+    preferred?.type === "directTcp" &&
+    typeof preferred.workspaceId === "string" &&
+    preferred.workspaceId.length > 0
+  );
+}
+
 export function hostHasConnection(host: HostProfile, connection: HostConnection): boolean {
   return host.connections.some((existing) => hostConnectionEquals(existing, connection));
 }
