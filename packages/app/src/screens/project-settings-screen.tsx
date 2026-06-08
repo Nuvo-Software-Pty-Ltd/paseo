@@ -25,6 +25,8 @@ import { Switch } from "@/components/ui/switch";
 import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
 import { SettingsGroup } from "@/screens/settings/settings-group";
 import { SettingsSection } from "@/screens/settings/settings-section";
+import { ScopedEnvVarsEditor } from "@/components/scoped-env-vars-editor";
+import { ENV_VARS_GROUP_INFO, ENV_VARS_GROUP_TITLE } from "@/lib/env-vars-copy";
 import { settingsStyles } from "@/styles/settings";
 import { useProjects } from "@/hooks/use-projects";
 import { useHostRuntimeClient, useHostRuntimeSnapshot } from "@/runtime/host-runtime";
@@ -251,6 +253,25 @@ function ProjectSettingsBody({
         hasMultipleHosts,
         isHostGone,
       })}
+
+      {/* D-3.5c — project-scoped env vars. Independent of paseo.json, so it
+          renders regardless of config-load state. The editor self-gates on the
+          daemon's features.scopedEnvVars capability (shows "Update the host"
+          when absent). scopeId = projectKey, which is the daemon's projectId. */}
+      <SettingsGroup
+        title={ENV_VARS_GROUP_TITLE}
+        info={ENV_VARS_GROUP_INFO}
+        testID="env-vars-group"
+      >
+        <SettingsSection title="Variables" testID="env-vars-section" flush>
+          <ScopedEnvVarsEditor
+            serverId={selectedHost.serverId}
+            scope="project"
+            scopeId={project.projectKey}
+            testID="project-env-vars-editor"
+          />
+        </SettingsSection>
+      </SettingsGroup>
     </View>
   );
 }

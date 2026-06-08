@@ -43,6 +43,8 @@ describe("D-3.10 / D-3.12 boot probe — DAEMON_OWNED_PARTITION_PREFIXES contrac
       "agent#timeline",
       "agent#metadata",
       "project",
+      // D-3.5c — scoped env-var store partition (`<ws>#envvar`).
+      "envvar",
     ]);
   });
 
@@ -198,7 +200,10 @@ describe("D-3.10 / D-3.12 boot probe — type contract", () => {
     const agentTimeline: DaemonOwnedPartitionPrefix = "agent#timeline";
     const agentMetadata: DaemonOwnedPartitionPrefix = "agent#metadata";
     const project: DaemonOwnedPartitionPrefix = "project";
-    expect([chat, perm, loop, sched, agentTimeline, agentMetadata, project]).toHaveLength(7);
+    const envvar: DaemonOwnedPartitionPrefix = "envvar";
+    expect([chat, perm, loop, sched, agentTimeline, agentMetadata, project, envvar]).toHaveLength(
+      8,
+    );
 
     // @ts-expect-error — "metadata" is intentionally not assignable
     //   (the workspace-metadata control-plane partition is auth-owned;
@@ -214,8 +219,8 @@ describe("D-3.10 / D-3.12 boot probe — type contract", () => {
     // FIRST, then bump this expected length AND DAEMON_OWNED_PARTITION_PREFIXES.
     // D-3.10 shipped 5; D-3.12 added agent#metadata + project for the
     // file-backed AgentStorage + FileBackedProjectRegistry cloud-mode
-    // replacement.
-    expect(DAEMON_OWNED_PARTITION_PREFIXES.length).toBe(7);
+    // replacement; D-3.5c added envvar for the scoped env-var store.
+    expect(DAEMON_OWNED_PARTITION_PREFIXES.length).toBe(8);
   });
 });
 

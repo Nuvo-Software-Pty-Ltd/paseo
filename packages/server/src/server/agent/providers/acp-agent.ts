@@ -656,6 +656,7 @@ export class ACPAgentClient implements AgentClient {
     const { command, args } = await this.resolveLaunchCommand();
     const child = spawnProcess(command, args, {
       cwd: process.cwd(),
+      // D-3.5c — scoped env vars (workspace + project) ride `launchEnv`.
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [launchEnv],
@@ -1483,6 +1484,10 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const terminalCommand = resolveTerminalCommand(params.command, params.args);
     const child = spawnProcess(terminalCommand.command, terminalCommand.args, {
       cwd: params.cwd ?? this.config.cwd,
+      // D-3.5c — NOT a Paseo terminal session: this is the ACP agent's own
+      // `terminal/create` tool, where `env` comes from the agent-supplied
+      // `params.env`. Scoped vars are injected at agent spawn (launchEnv)
+      // and inherited; this site intentionally does not re-resolve them.
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [env],
@@ -1574,6 +1579,8 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const args = [...prefix.args, ...this.defaultCommand.slice(1)];
     const child = spawnProcess(command, args, {
       cwd: this.config.cwd,
+      // D-3.5c — scoped env vars ride `this.launchEnv` here too (the
+      // extended-binary-search spawn path), matching the primary spawn.
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
         overlays: [this.launchEnv],

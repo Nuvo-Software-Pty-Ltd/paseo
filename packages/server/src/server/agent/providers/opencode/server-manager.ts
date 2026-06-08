@@ -21,7 +21,10 @@ export interface OpenCodeServerAcquisition {
 
 export interface OpenCodeServerManagerLike {
   ensureRunning(): Promise<{ port: number; url: string }>;
-  acquire(options: { force: boolean }): Promise<OpenCodeServerAcquisition>;
+  acquire(options: {
+    force: boolean;
+    launchEnv?: Record<string, string>;
+  }): Promise<OpenCodeServerAcquisition>;
 }
 
 export interface OpenCodeServerGeneration {
@@ -91,10 +94,13 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     return acquisition.server;
   }
 
-  async acquire(options: { force: boolean }): Promise<OpenCodeServerAcquisition> {
+  async acquire(options: {
+    force: boolean;
+    launchEnv?: Record<string, string>;
+  }): Promise<OpenCodeServerAcquisition> {
     const server = options.force
-      ? await this.getForcedRefreshServer()
-      : await this.getCurrentServer();
+      ? await this.getForcedRefreshServer(options.launchEnv)
+      : await this.getCurrentServer(options.launchEnv);
     server.refCount += 1;
     let released = false;
     return {
@@ -110,7 +116,9 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     };
   }
 
-  private async getForcedRefreshServer(): Promise<OpenCodeServerGeneration> {
+  private async getForcedRefreshServer(
+    launchEnv?: Record<string, string>,
+  ): Promise<OpenCodeServerGeneration> {
     if (this.forcedRefreshPromise) {
       return this.forcedRefreshPromise;
     }
@@ -118,7 +126,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     this.forcedRefreshPromise = Promise.resolve()
       .then(async () => {
         await this.rotateCurrentServer();
-        return this.getCurrentServer();
+        return this.getCurrentServer(launchEnv);
       })
       .finally(() => {
         this.forcedRefreshPromise = null;
@@ -126,7 +134,9 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     return this.forcedRefreshPromise;
   }
 
-  private async getCurrentServer(): Promise<OpenCodeServerGeneration> {
+  private async getCurrentServer(
+    launchEnv?: Record<string, string>,
+  ): Promise<OpenCodeServerGeneration> {
     if (this.startPromise) {
       return this.startPromise;
     }
@@ -135,7 +145,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       return this.currentServer;
     }
 
-    this.startPromise = this.startServer();
+    this.startPromise = this.startServer(launchEnv);
     try {
       const result = await this.startPromise;
       if (!result.retired) {
@@ -164,7 +174,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     }
   }
 
-  private async startServer(): Promise<OpenCodeServerGeneration> {
+  private async startServer(launchEnv?: Record<string, string>): Promise<OpenCodeServerGeneration> {
     const port = await findAvailablePort();
     const url = `http://127.0.0.1:${port}`;
     const launchPrefix = await resolveProviderCommandPrefix(
@@ -179,7 +189,14 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         {
           detached: process.platform !== "win32",
           stdio: ["ignore", "pipe", "pipe"],
-          ...createProviderEnvSpec({ runtimeSettings: this.runtimeSettings }),
+          // D-3.5c — forward the scoped-env overlay (workspace + project
+          // vars), matching ACP/Codex which thread `launchEnv` here.
+          // Previously this spawn passed no overlays, so OpenCode agents
+          // silently missed scoped vars (VERIFY-3.5c finding #7).
+          ...createProviderEnvSpec({
+            runtimeSettings: this.runtimeSettings,
+            overlays: [launchEnv],
+          }),
         },
       );
 

@@ -318,6 +318,20 @@ type WriteProjectConfigPayload = Extract<
   SessionOutboundMessage,
   { type: "write_project_config_response" }
 >["payload"];
+// D-3.5c — scoped env-var RPC payloads.
+type ListScopedEnvVarsPayload = Extract<
+  SessionOutboundMessage,
+  { type: "list_scoped_env_vars_response" }
+>["payload"];
+type SetScopedEnvVarPayload = Extract<
+  SessionOutboundMessage,
+  { type: "set_scoped_env_var_response" }
+>["payload"];
+type DeleteScopedEnvVarPayload = Extract<
+  SessionOutboundMessage,
+  { type: "delete_scoped_env_var_response" }
+>["payload"];
+type ScopedEnvVarScope = "workspace" | "project";
 type ListCommandsPayload = ListCommandsResponse["payload"];
 type ListCommandsDraftConfig = Pick<
   AgentSessionConfig,
@@ -3351,6 +3365,66 @@ export class DaemonClient {
         expectedRevision: input.expectedRevision,
       },
       responseType: "write_project_config_response",
+      timeout: 10000,
+    });
+  }
+
+  // D-3.5c — scoped env-var RPCs. Mirror readProjectConfig/writeProjectConfig.
+  async listScopedEnvVars(input: {
+    scope: ScopedEnvVarScope;
+    scopeId: string;
+    requestId?: string;
+  }): Promise<ListScopedEnvVarsPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "list_scoped_env_vars_request",
+        scope: input.scope,
+        scopeId: input.scopeId,
+      },
+      responseType: "list_scoped_env_vars_response",
+      timeout: 10000,
+    });
+  }
+
+  async setScopedEnvVar(input: {
+    scope: ScopedEnvVarScope;
+    scopeId: string;
+    key: string;
+    value: string;
+    secret?: boolean;
+    requestId?: string;
+  }): Promise<SetScopedEnvVarPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "set_scoped_env_var_request",
+        scope: input.scope,
+        scopeId: input.scopeId,
+        key: input.key,
+        value: input.value,
+        ...(input.secret !== undefined ? { secret: input.secret } : {}),
+      },
+      responseType: "set_scoped_env_var_response",
+      timeout: 10000,
+    });
+  }
+
+  async deleteScopedEnvVar(input: {
+    scope: ScopedEnvVarScope;
+    scopeId: string;
+    key: string;
+    requestId?: string;
+  }): Promise<DeleteScopedEnvVarPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: input.requestId,
+      message: {
+        type: "delete_scoped_env_var_request",
+        scope: input.scope,
+        scopeId: input.scopeId,
+        key: input.key,
+      },
+      responseType: "delete_scoped_env_var_response",
       timeout: 10000,
     });
   }

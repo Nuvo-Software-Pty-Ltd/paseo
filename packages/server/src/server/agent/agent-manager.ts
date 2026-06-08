@@ -245,6 +245,16 @@ export interface AgentManagerOptions {
    */
   permissionStore?: PermissionStore;
   durableTimelineStore?: AgentTimelineStore;
+  /**
+   * D-3.5c — the shared scoped-env resolver (DECISION P-2). When injected,
+   * `buildLaunchContext` merges `resolveScopedEnv(agentCwd)` into the agent
+   * subprocess env BENEATH the platform `PASEO_AGENT_ID` overlay, so a
+   * scoped var can never shadow the platform key. The SAME resolver instance
+   * backs the terminal injection site, guaranteeing byte-identical
+   * resolution for the same cwd. Omitted in tests → behavior unchanged
+   * (only `PASEO_AGENT_ID` is set).
+   */
+  resolveScopedEnv?: (cwd: string) => Promise<Record<string, string>>;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
   agentStreamCoalesceWindowMs?: number;
@@ -515,6 +525,7 @@ export class AgentManager {
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentTurnEnd?: AgentTurnEndCallback;
   private permissionStore?: PermissionStore;
+  private readonly resolveScopedEnv?: (cwd: string) => Promise<Record<string, string>>;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
 
@@ -525,6 +536,7 @@ export class AgentManager {
     this.onAgentAttention = options?.onAgentAttention;
     this.onAgentTurnEnd = options?.onAgentTurnEnd;
     this.permissionStore = options?.permissionStore;
+    this.resolveScopedEnv = options?.resolveScopedEnv;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
     this.rescueTimeouts = {
@@ -886,7 +898,7 @@ export class AgentManager {
           };
     this.requireEnabledProvider(injectedConfig.provider);
     const normalizedConfig = await this.normalizeConfig(injectedConfig);
-    const launchContext = this.buildLaunchContext(resolvedAgentId);
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, normalizedConfig.cwd);
     const client = await this.requireAvailableClient({
       provider: normalizedConfig.provider,
     });
@@ -943,7 +955,7 @@ export class AgentManager {
       hasResumeOverrides = true;
     }
 
-    const launchContext = this.buildLaunchContext(resolvedAgentId);
+    const launchContext = await this.buildLaunchContext(resolvedAgentId, normalizedConfig.cwd);
     const client = this.requireClient(handle.provider);
     const available = await client.isAvailable();
     if (!available) {
@@ -989,7 +1001,7 @@ export class AgentManager {
       provider,
     } as AgentSessionConfig;
     const normalizedConfig = await this.normalizeConfig(refreshConfig);
-    const launchContext = this.buildLaunchContext(agentId);
+    const launchContext = await this.buildLaunchContext(agentId, normalizedConfig.cwd);
 
     const session = handle
       ? await client.resumeSession(handle, normalizedConfig, launchContext)
@@ -3450,9 +3462,25 @@ export class AgentManager {
     return normalized;
   }
 
-  private buildLaunchContext(agentId: string): AgentLaunchContext {
+  // D-3.5c — composes the per-agent launch env. Scoped env vars (workspace +
+  // project, resolved from the agent's cwd) are merged BENEATH the platform
+  // `PASEO_AGENT_ID` overlay so a scoped var can never shadow the platform
+  // key. The resolver already strips reserved keys (MCP_TIMEOUT, ANTHROPIC_*,
+  // etc.) and applies project-over-workspace precedence; it is the SAME
+  // resolver the terminal injection site uses (DECISION P-2), so an agent and
+  // a terminal in the same project see identical scoped env. Async because it
+  // does a store read; all three call sites already await within async methods.
+  private async buildLaunchContext(agentId: string, cwd?: string): Promise<AgentLaunchContext> {
+    const scopedEnv =
+      this.resolveScopedEnv && cwd
+        ? await this.resolveScopedEnv(cwd).catch((err) => {
+            this.logger.warn({ err, agentId, cwd }, "Failed to resolve scoped env for agent");
+            return {} as Record<string, string>;
+          })
+        : {};
     return {
       env: {
+        ...scopedEnv,
         PASEO_AGENT_ID: agentId,
       },
     };

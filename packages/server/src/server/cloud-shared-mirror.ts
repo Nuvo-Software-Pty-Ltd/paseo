@@ -54,6 +54,16 @@ export interface CloudSharedKeys {
   // DynamoProjectStore one-row-per-project partition.
   // pk = `<ws>#project`, sk = `<projectId>`.
   workspaceProject(workspaceId: string, projectId: string): DdbKey;
+  // ANTI-DRIFT: D-3.5c mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:workspaceEnvVar`. The
+  // DynamoEnvVarStore partition holding both workspace- and
+  // project-scoped vars under one per-workspace partition.
+  // pk = `<ws>#envvar`, sk = `<scope>#<scopeId>#<key>`. The cloud
+  // `LeadingKeys` grant must include `<ws>#envvar` (+ `<ws>#envvar#*`)
+  // for tenant isolation; `workspaceId` is the ambient container, and
+  // both scopes (workspace/project) live in the one partition so every
+  // row is already under the per-workspace key.
+  workspaceEnvVar(workspaceId: string, scope: string, scopeId: string, key: string): DdbKey;
 }
 
 // ANTI-DRIFT: matches `LOOP_STEP_SEQ_WIDTH` in cloud-shared keys.ts.
@@ -104,6 +114,9 @@ export function createCloudSharedKeys(): CloudSharedKeys {
     },
     workspaceProject(workspaceId: string, projectId: string): DdbKey {
       return { pk: `${workspaceId}#project`, sk: projectId };
+    },
+    workspaceEnvVar(workspaceId: string, scope: string, scopeId: string, key: string): DdbKey {
+      return { pk: `${workspaceId}#envvar`, sk: `${scope}#${scopeId}#${key}` };
     },
   };
 }
