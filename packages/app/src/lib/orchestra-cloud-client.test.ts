@@ -28,6 +28,9 @@ import {
   listWorkspaces,
   createWorkspace,
   setAnthropicCredential,
+  getAccountCredentialStatus,
+  setAccountAnthropicCredential,
+  removeAccountAnthropicCredential,
   mintWorkspaceToken,
   listGithubRepos,
   archiveCloudWorkspace,
@@ -210,6 +213,82 @@ describe("setAnthropicCredential", () => {
     expect(url).toContain("/api/v1/cloud/workspaces/ws_002/anthropic-credential");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-test" });
+  });
+});
+
+describe("account-scoped Anthropic credential (D-3.5b)", () => {
+  // Cross-user isolation: the account endpoints derive identity from the
+  // session bearer ONLY. There must be NO accountId anywhere in the URL — the
+  // app cannot address another user's account because there is no id to tamper.
+  const ACCOUNT_PATH = "/api/v1/cloud/account/anthropic-credential";
+
+  function lastCall(): [string, RequestInit] {
+    const calls = (global.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    return calls[calls.length - 1] as [string, RequestInit];
+  }
+
+  it("getAccountCredentialStatus GETs the account path with no accountId and no secret body", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { set: true, updatedAt: "2026-06-01T00:00:00.000Z" });
+
+    const status = await getAccountCredentialStatus();
+
+    expect(status).toEqual({ set: true, updatedAt: "2026-06-01T00:00:00.000Z" });
+    const [url, init] = lastCall();
+    expect(url).toContain(ACCOUNT_PATH);
+    // No accountId segment: the path ends at /account/anthropic-credential.
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    // A GET must not carry a credential value in its body.
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("getAccountCredentialStatus reports set:false when no credential exists", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { set: false });
+    expect(await getAccountCredentialStatus()).toEqual({ set: false });
+  });
+
+  it("setAccountAnthropicCredential POSTs {apiKey} to the account path (no accountId)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { status: "ok" });
+
+    const result = await setAccountAnthropicCredential("sk-ant-account-key");
+
+    expect(result).toEqual({ status: "ok" });
+    const [url, init] = lastCall();
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    expect(url).not.toContain("/workspaces/");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-account-key" });
+  });
+
+  it("setAccountAnthropicCredential surfaces the server's validation error verbatim", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(400, "Invalid Anthropic API key");
+    await expect(setAccountAnthropicCredential("nope")).rejects.toThrow(
+      /Invalid Anthropic API key/,
+    );
+  });
+
+  it("removeAccountAnthropicCredential DELETEs the account path (no accountId, no body)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { status: "ok" });
+
+    const result = await removeAccountAnthropicCredential();
+
+    expect(result).toEqual({ status: "ok" });
+    const [url, init] = lastCall();
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    expect(init.method).toBe("DELETE");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(getAccountCredentialStatus()).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });
 
