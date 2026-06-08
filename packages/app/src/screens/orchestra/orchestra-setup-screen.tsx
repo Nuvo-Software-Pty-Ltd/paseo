@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowLeft, Check } from "lucide-react-native";
+import { ArrowLeft } from "lucide-react-native";
 import { CLOUD_WORKSPACES_QUERY_KEY } from "@/hooks/use-cloud-workspaces";
 import { AdaptiveTextInput } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
@@ -175,8 +175,6 @@ export function OrchestraSetupScreen() {
 
   const [step, setStep] = useState<SetupStep>("workspace");
   const [workspaceStepView, setWorkspaceStepView] = useState<WorkspaceStepView>("auto");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [repoLess, setRepoLess] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
@@ -349,14 +347,13 @@ export function OrchestraSetupScreen() {
     setError("");
 
     try {
-      const url = repoLess ? null : repoUrl.trim() || null;
-      if (!repoLess && !url) {
-        setError("Enter a repo URL or check repo-less.");
-        return;
-      }
-
+      // D-3.5a (T-2) — the cloud workspace shell is created repo-less (name
+      // only). Projects are added AFTER connecting to the workspace's daemon
+      // (where projectSource + add_project live), via the GitHub project
+      // picker. `repoUrl` must be present and explicitly null (the cloud
+      // CreateWorkspaceBody schema is `.nullable()`, not `.optional()`).
       const ws = await createWorkspace({
-        repoUrl: url,
+        repoUrl: null,
         displayName: displayName.trim() || undefined,
       });
       // Refresh the cached list so the chooser/picker reflects the new row
@@ -380,7 +377,7 @@ export function OrchestraSetupScreen() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, repoLess, repoUrl, displayName, queryClient, hasAccountCredential, connectWorkspace]);
+  }, [isBusy, displayName, queryClient, hasAccountCredential, connectWorkspace]);
 
   const handlePickExistingWorkspace = useCallback(
     async (picked: WorkspaceRecord) => {
@@ -474,10 +471,6 @@ export function OrchestraSetupScreen() {
 
           {step === "workspace" && !shouldShowChooser && (
             <WorkspaceStep
-              repoUrl={repoUrl}
-              setRepoUrl={setRepoUrl}
-              repoLess={repoLess}
-              setRepoLess={setRepoLess}
               displayName={displayName}
               setDisplayName={setDisplayName}
               error={error}
@@ -598,20 +591,12 @@ function ChooserExistingWorkspaceCard({
 }
 
 function WorkspaceStep({
-  repoUrl,
-  setRepoUrl,
-  repoLess,
-  setRepoLess,
   displayName,
   setDisplayName,
   error,
   isBusy,
   onSubmit,
 }: {
-  repoUrl: string;
-  setRepoUrl: (v: string) => void;
-  repoLess: boolean;
-  setRepoLess: (v: boolean) => void;
   displayName: string;
   setDisplayName: (v: string) => void;
   error: string;
@@ -624,63 +609,27 @@ function WorkspaceStep({
     onSubmit();
   }, [onSubmit]);
 
-  const toggleRepoLess = useCallback(() => {
-    setRepoLess(!repoLess);
-  }, [repoLess, setRepoLess]);
-
-  const checkboxStyle = useMemo(
-    () => [styles.checkbox, repoLess ? styles.checkboxChecked : null],
-    [repoLess],
-  );
-
   return (
     <>
+      {/* D-3.5a (T-2) — name-only create. The workspace is a container; you add
+          GitHub projects to it after connecting, via the project picker. No
+          repo URL is required (or accepted) here anymore. */}
       <Text style={styles.subtitle}>
-        Point a workspace at a GitHub repo, or create a repo-less workspace to explore ideas.
+        Name your workspace. You&apos;ll add GitHub projects to it after it connects.
       </Text>
 
       <View style={styles.field}>
-        <Text style={styles.label}>GitHub repo URL</Text>
-        <AdaptiveTextInput
-          testID="orchestra-repo-url"
-          accessibilityLabel="GitHub repo URL"
-          value={repoUrl}
-          onChangeText={setRepoUrl}
-          placeholder="https://github.com/owner/repo"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          style={styles.input}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          editable={!isBusy && !repoLess}
-        />
-      </View>
-
-      <Pressable
-        style={styles.checkboxRow}
-        onPress={toggleRepoLess}
-        disabled={isBusy}
-        accessibilityRole="checkbox"
-        accessibilityLabel="Repo-less workspace"
-        testID="orchestra-repoless-toggle"
-      >
-        <View style={checkboxStyle}>
-          {repoLess ? <Check size={14} color={theme.colors.palette.white} /> : null}
-        </View>
-        <Text style={styles.label}>Repo-less workspace</Text>
-      </Pressable>
-
-      <View style={styles.field}>
-        <Text style={styles.label}>Display name (optional)</Text>
+        <Text style={styles.label}>Workspace name</Text>
         <AdaptiveTextInput
           testID="orchestra-display-name"
-          accessibilityLabel="Display name"
+          accessibilityLabel="Workspace name"
           value={displayName}
           onChangeText={setDisplayName}
-          placeholder="My Project"
+          placeholder="My workspace"
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.input}
           editable={!isBusy}
+          onSubmitEditing={handleSubmit}
         />
       </View>
 

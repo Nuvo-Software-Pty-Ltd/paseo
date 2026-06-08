@@ -397,17 +397,74 @@ export async function mintWorkspaceToken(workspaceId: string): Promise<MintWorks
   throw new Error(`Failed to mint workspace token: ${res.status} — ${body}`);
 }
 
-// NOTE: GET /api/v1/cloud/github/repos does not exist yet in Phase 3.
-// For D-1, users paste a repo URL by hand. This is a small follow-up for a
-// future phase that adds a GitHub repo proxy route to the auth service.
-export async function listGithubRepos(): Promise<
-  Array<{ full_name: string; private: boolean; updated_at: string }>
-> {
-  const res = await authedFetch("/api/v1/cloud/github/repos");
+// D-3.5a (app T-3) — the signed-in user's GitHub repositories, served by the
+// cloud auth service's repo-list proxy (cloud-proprietary; the GitHub token is
+// injected server-side). `cloneUrl` is credential-free — the token is added at
+// clone time by the daemon, never exposed to the client. The picker feeds
+// `cloneUrl` straight into `addProject({source:{kind:"github_repo", repoUrl}})`.
+export interface GithubRepoSummary {
+  fullName: string;
+  cloneUrl: string;
+  private: boolean;
+  defaultBranch: string;
+  updatedAt: string;
+}
+
+export interface ListGithubReposResult {
+  repos: GithubRepoSummary[];
+  // The page token to pass back for the next page, or null when exhausted.
+  nextPage: number | null;
+}
+
+export interface ListGithubReposInput {
+  page?: number;
+  perPage?: number;
+  search?: string;
+}
+
+function normalizeGithubRepoSummary(raw: unknown): GithubRepoSummary | null {
+  const record = (raw ?? {}) as Record<string, unknown>;
+  const fullName = typeof record.fullName === "string" ? record.fullName : null;
+  const cloneUrl = typeof record.cloneUrl === "string" ? record.cloneUrl : null;
+  if (!fullName || !cloneUrl) {
+    return null;
+  }
+  return {
+    fullName,
+    cloneUrl,
+    private: record.private === true,
+    defaultBranch: typeof record.defaultBranch === "string" ? record.defaultBranch : "main",
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+  };
+}
+
+export async function listGithubRepos(
+  input: ListGithubReposInput = {},
+): Promise<ListGithubReposResult> {
+  const params = new URLSearchParams();
+  if (typeof input.page === "number") {
+    params.set("page", String(input.page));
+  }
+  if (typeof input.perPage === "number") {
+    params.set("perPage", String(input.perPage));
+  }
+  const search = input.search?.trim();
+  if (search) {
+    params.set("search", search);
+  }
+  const queryString = params.toString();
+  const res = await authedFetch(
+    `/api/v1/cloud/github/repos${queryString ? `?${queryString}` : ""}`,
+  );
   if (!res.ok) {
     throw new Error(`Failed to list GitHub repos: ${res.status}`);
   }
-  return (await res.json()) as Array<{ full_name: string; private: boolean; updated_at: string }>;
+  const body = (await res.json()) as { repos?: unknown[]; nextPage?: unknown };
+  const repos = (body.repos ?? [])
+    .map(normalizeGithubRepoSummary)
+    .filter((repo): repo is GithubRepoSummary => repo !== null);
+  const nextPage = typeof body.nextPage === "number" ? body.nextPage : null;
+  return { repos, nextPage };
 }
 
 // D-3.4: Derive the per-workspace daemon WebSocket URL from the workspaceId.

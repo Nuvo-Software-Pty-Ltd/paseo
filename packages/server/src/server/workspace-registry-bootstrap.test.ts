@@ -194,117 +194,125 @@ describe("bootstrapWorkspaceRegistries", () => {
     expect(await workspaceContainerRegistry.get(DEFAULT_CONTAINER_WORKSPACE_ID)).not.toBeNull();
   });
 
-  describe("cloud migration (the 3 live repo-bound workspaces)", () => {
-    const CONTAINER = "ws_74d480de";
-    const CLONE = `/workspace/${CONTAINER}/.git-canonical`;
+  // Cloud `/workspace/<ws>/...` containers are POSIX/Linux-only (ECS; gated by
+  // isPaseoCloudMode). On a Windows runner `normalizeWorkspaceId` → path.resolve
+  // rewrites these POSIX seeds to `C:\workspace\...`, so the cloud-container
+  // detection (intentionally POSIX) no longer matches — a platform combination
+  // that cannot occur in production. Skip on win32; ubuntu covers the real path.
+  describe.skipIf(process.platform === "win32")(
+    "cloud migration (the 3 live repo-bound workspaces)",
+    () => {
+      const CONTAINER = "ws_74d480de";
+      const CLONE = `/workspace/${CONTAINER}/.git-canonical`;
 
-    test("cold boot (clone absent) seeds the migrated project from the metadata repoUrl, credential-free", async () => {
-      // Cold respawn: no clone on disk → getCheckout reports non-git.
-      const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
-      const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
-      await agentStorage.initialize();
-      await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
+      test("cold boot (clone absent) seeds the migrated project from the metadata repoUrl, credential-free", async () => {
+        // Cold respawn: no clone on disk → getCheckout reports non-git.
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        await agentStorage.initialize();
+        await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
 
-      await bootstrapWorkspaceRegistries({
-        paseoHome,
-        agentStorage,
-        projectRegistry,
-        workspaceRegistry: cloudWorkspaceRegistry,
-        workspaceContainerRegistry: cloudContainerRegistry,
-        workspaceGitService, // noop → non-git checkout (clone absent)
-        logger,
-        containerWorkspaceId: CONTAINER,
-        // Tokenized seed (as `<ws>#metadata.repoUrl` could be) must be sanitized.
-        migrationRepoUrlSeed: "https://x-access-token:ghs_LEAK@github.com/acme/app.git",
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService, // noop → non-git checkout (clone absent)
+          logger,
+          containerWorkspaceId: CONTAINER,
+          // Tokenized seed (as `<ws>#metadata.repoUrl` could be) must be sanitized.
+          migrationRepoUrlSeed: "https://x-access-token:ghs_LEAK@github.com/acme/app.git",
+        });
+
+        const projects = await projectRegistry.list();
+        expect(projects).toHaveLength(1);
+        const migrated = projects[0];
+        expect(migrated?.projectId).toBe("remote:github.com/acme/app");
+        expect(migrated?.workspaceId).toBe(CONTAINER);
+        expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
+        expect(migrated?.repoUrl).not.toContain("ghs_LEAK");
+        expect(migrated?.rootPath).toBe(CLONE);
       });
 
-      const projects = await projectRegistry.list();
-      expect(projects).toHaveLength(1);
-      const migrated = projects[0];
-      expect(migrated?.projectId).toBe("remote:github.com/acme/app");
-      expect(migrated?.workspaceId).toBe(CONTAINER);
-      expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
-      expect(migrated?.repoUrl).not.toContain("ghs_LEAK");
-      expect(migrated?.rootPath).toBe(CLONE);
-    });
+      test("idempotent + never clobbers a good project row with a degraded one (finding #2)", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        // A prior boot already wrote a GOOD migrated project row.
+        await projectRegistry.initialize();
+        await projectRegistry.upsert({
+          projectId: "remote:github.com/acme/app",
+          rootPath: CLONE,
+          kind: "git",
+          displayName: "acme/app",
+          createdAt: "2026-05-01T00:00:00.000Z",
+          updatedAt: "2026-05-01T00:00:00.000Z",
+          archivedAt: null,
+          workspaceId: CONTAINER,
+          repoUrl: "https://github.com/acme/app",
+        });
 
-    test("idempotent + never clobbers a good project row with a degraded one (finding #2)", async () => {
-      const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
-      const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
-      // A prior boot already wrote a GOOD migrated project row.
-      await projectRegistry.initialize();
-      await projectRegistry.upsert({
-        projectId: "remote:github.com/acme/app",
-        rootPath: CLONE,
-        kind: "git",
-        displayName: "acme/app",
-        createdAt: "2026-05-01T00:00:00.000Z",
-        updatedAt: "2026-05-01T00:00:00.000Z",
-        archivedAt: null,
-        workspaceId: CONTAINER,
-        repoUrl: "https://github.com/acme/app",
+        await agentStorage.initialize();
+        await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
+
+        // Cold boot again (clone absent → degraded checkout) with the seed.
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService,
+          logger,
+          containerWorkspaceId: CONTAINER,
+          migrationRepoUrlSeed: "https://github.com/acme/app",
+        });
+
+        const projects = await projectRegistry.list();
+        // No spurious cwd-keyed project; the good row survives unchanged.
+        expect(projects).toHaveLength(1);
+        const migrated = await projectRegistry.get("remote:github.com/acme/app");
+        expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
+        expect(migrated?.rootPath).toBe(CLONE);
+        expect(migrated?.workspaceId).toBe(CONTAINER);
       });
 
-      await agentStorage.initialize();
-      await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
+      test("warm boot (clone present, live remote) derives the project from git facts", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        // getCheckout reports a real git checkout with a tokenized remote.
+        const gitService = createNoopWorkspaceGitService({
+          getCheckout: async (cwd: string) => ({
+            cwd,
+            isGit: true,
+            currentBranch: "main",
+            remoteUrl: "https://x-access-token:ghs_TOKEN@github.com/acme/app.git",
+            worktreeRoot: cwd,
+            isPaseoOwnedWorktree: false,
+            mainRepoRoot: cwd,
+          }),
+        });
+        await agentStorage.initialize();
+        await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
 
-      // Cold boot again (clone absent → degraded checkout) with the seed.
-      await bootstrapWorkspaceRegistries({
-        paseoHome,
-        agentStorage,
-        projectRegistry,
-        workspaceRegistry: cloudWorkspaceRegistry,
-        workspaceContainerRegistry: cloudContainerRegistry,
-        workspaceGitService,
-        logger,
-        containerWorkspaceId: CONTAINER,
-        migrationRepoUrlSeed: "https://github.com/acme/app",
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService: gitService,
+          logger,
+          containerWorkspaceId: CONTAINER,
+          migrationRepoUrlSeed: "https://github.com/acme/app",
+        });
+
+        const migrated = await projectRegistry.get("remote:github.com/acme/app");
+        expect(migrated?.workspaceId).toBe(CONTAINER);
+        // Even with a live remote, the persisted repoUrl is credential-free.
+        expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
+        expect(migrated?.repoUrl).not.toContain("ghs_TOKEN");
       });
-
-      const projects = await projectRegistry.list();
-      // No spurious cwd-keyed project; the good row survives unchanged.
-      expect(projects).toHaveLength(1);
-      const migrated = await projectRegistry.get("remote:github.com/acme/app");
-      expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
-      expect(migrated?.rootPath).toBe(CLONE);
-      expect(migrated?.workspaceId).toBe(CONTAINER);
-    });
-
-    test("warm boot (clone present, live remote) derives the project from git facts", async () => {
-      const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
-      const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
-      // getCheckout reports a real git checkout with a tokenized remote.
-      const gitService = createNoopWorkspaceGitService({
-        getCheckout: async (cwd: string) => ({
-          cwd,
-          isGit: true,
-          currentBranch: "main",
-          remoteUrl: "https://x-access-token:ghs_TOKEN@github.com/acme/app.git",
-          worktreeRoot: cwd,
-          isPaseoOwnedWorktree: false,
-          mainRepoRoot: cwd,
-        }),
-      });
-      await agentStorage.initialize();
-      await agentStorage.upsert(agentRecord({ id: "agent-1", cwd: CLONE }));
-
-      await bootstrapWorkspaceRegistries({
-        paseoHome,
-        agentStorage,
-        projectRegistry,
-        workspaceRegistry: cloudWorkspaceRegistry,
-        workspaceContainerRegistry: cloudContainerRegistry,
-        workspaceGitService: gitService,
-        logger,
-        containerWorkspaceId: CONTAINER,
-        migrationRepoUrlSeed: "https://github.com/acme/app",
-      });
-
-      const migrated = await projectRegistry.get("remote:github.com/acme/app");
-      expect(migrated?.workspaceId).toBe(CONTAINER);
-      // Even with a live remote, the persisted repoUrl is credential-free.
-      expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
-      expect(migrated?.repoUrl).not.toContain("ghs_TOKEN");
-    });
-  });
+    },
+  );
 });

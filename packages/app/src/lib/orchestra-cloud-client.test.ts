@@ -533,15 +533,73 @@ describe("normalizeCloudProvidersSnapshot", () => {
 });
 
 describe("listGithubRepos", () => {
-  it("calls GET /api/v1/cloud/github/repos", async () => {
+  it("calls GET /api/v1/cloud/github/repos and normalizes the new contract", async () => {
     await storeSessionToken(TOKEN);
-    const repos = [{ full_name: "user/repo", private: false, updated_at: "2026-01-01" }];
-    mockFetch(200, repos);
+    mockFetch(200, {
+      repos: [
+        {
+          fullName: "acme/repo-one",
+          cloneUrl: "https://github.com/acme/repo-one.git",
+          private: false,
+          defaultBranch: "main",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      nextPage: 2,
+    });
 
     const result = await listGithubRepos();
 
-    expect(result).toEqual(repos);
-    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(result.repos).toEqual([
+      {
+        fullName: "acme/repo-one",
+        cloneUrl: "https://github.com/acme/repo-one.git",
+        private: false,
+        defaultBranch: "main",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    expect(result.nextPage).toBe(2);
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
     expect(url).toContain("/api/v1/cloud/github/repos");
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("forwards page, perPage and search as query params", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { repos: [], nextPage: null });
+
+    await listGithubRepos({ page: 3, perPage: 50, search: "  paseo  " });
+
+    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(url).toContain("page=3");
+    expect(url).toContain("perPage=50");
+    expect(url).toContain("search=paseo");
+  });
+
+  it("drops malformed rows (missing fullName / cloneUrl) and defaults nextPage to null", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      repos: [
+        { fullName: "acme/good", cloneUrl: "https://github.com/acme/good.git" },
+        { fullName: "acme/no-clone" },
+        { cloneUrl: "https://github.com/acme/no-name.git" },
+      ],
+    });
+
+    const result = await listGithubRepos();
+
+    expect(result.repos.map((r) => r.fullName)).toEqual(["acme/good"]);
+    expect(result.repos[0].defaultBranch).toBe("main");
+    expect(result.nextPage).toBeNull();
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(listGithubRepos()).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });
