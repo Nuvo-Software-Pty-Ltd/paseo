@@ -82,6 +82,7 @@ const ScheduleUpdateNewAgentConfigSchema = z.object({
   provider: z.string().trim().min(1).optional(),
   model: z.string().trim().min(1).nullable().optional(),
   modeId: z.string().trim().min(1).nullable().optional(),
+  thinkingOptionId: z.string().trim().min(1).nullable().optional(),
   cwd: z.string().trim().min(1).optional(),
 });
 

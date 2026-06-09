@@ -22,6 +22,7 @@ import {
   draftToScheduleTarget,
   scheduleTargetToDraft,
 } from "@/components/automations/automation-target-picker";
+import { ExpiresAtPicker } from "@/components/automations/expires-at-picker";
 import { WebhookSecretReveal } from "@/components/automations/webhook-secret-reveal";
 import { SegmentedTabs, type SegmentedTab } from "@/components/automations/segmented-tabs";
 import {
@@ -42,11 +43,13 @@ const KIND_TABS: ReadonlyArray<SegmentedTab<FormKind>> = [
 const MULTILINE_INPUT_STYLE = [automationInputStyles.input, automationInputStyles.multiline];
 
 // EDIT (schedule): build the restricted newAgentConfig the daemon accepts
-// (provider/model/modeId/cwd only). Returns undefined for the existing-agent
-// mode, which scheduleUpdate cannot re-target (see FIX #3).
+// (provider/model/modeId/thinkingOptionId/cwd only). Returns undefined for the
+// existing-agent mode, which scheduleUpdate cannot re-target (see FIX #3).
 function buildScheduleNewAgentConfig(
   targetDraft: TargetDraft,
-): { provider: string; model?: string; modeId?: string; cwd?: string } | undefined {
+):
+  | { provider: string; model?: string; modeId?: string; thinkingOptionId?: string; cwd?: string }
+  | undefined {
   if (targetDraft.mode !== "new-agent") {
     return undefined;
   }
@@ -54,6 +57,7 @@ function buildScheduleNewAgentConfig(
     provider: targetDraft.provider.trim(),
     ...(targetDraft.model ? { model: targetDraft.model } : {}),
     ...(targetDraft.modeId ? { modeId: targetDraft.modeId } : {}),
+    ...(targetDraft.thinkingOptionId ? { thinkingOptionId: targetDraft.thinkingOptionId } : {}),
     ...(targetDraft.cwd.trim() ? { cwd: targetDraft.cwd.trim() } : {}),
   };
 }
@@ -148,7 +152,7 @@ export function AutomationCreateForm({
     if (isEdit && editContext) {
       // EDIT (schedule): scheduleUpdate only patches name/prompt/cadence/
       // maxRuns/expiresAt and a restricted newAgentConfig (provider/model/
-      // modeId/cwd). No target-kind switch — see FIX #3 in the picker.
+      // modeId/thinkingOptionId/cwd). No target-kind switch — see FIX #3.
       const newAgentConfig = buildScheduleNewAgentConfig(targetDraft);
       const result = await updateSchedule.mutateAsync({
         id: editContext.record.id,
@@ -333,16 +337,8 @@ export function AutomationCreateForm({
               accessibilityLabel="automation-max-runs"
             />
           </Field>
-          <Field label="Expires at (ISO 8601, optional)">
-            <AutomationTextInput
-              style={automationInputStyles.input}
-              value={expiresAt}
-              onChangeText={setExpiresAt}
-              placeholder="2026-12-31T00:00:00.000Z"
-              autoCapitalize="none"
-              autoCorrect={false}
-              accessibilityLabel="automation-expires-at"
-            />
+          <Field label="Expires at (optional)">
+            <ExpiresAtPicker value={expiresAt} onChange={setExpiresAt} />
           </Field>
           {!isEdit ? (
             <View style={styles.toggleRow}>

@@ -709,6 +709,45 @@ describe("ScheduleService", () => {
     expect(clearModel.target.config.modeId).toBe("bypassPermissions");
   });
 
+  test("update patches and clears the new-agent thinkingOptionId independently", async () => {
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "ok" }),
+    });
+
+    const created = await service.create({
+      prompt: "p",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: { provider: "claude", cwd: tempDir, model: "opus" },
+      },
+    });
+
+    const withEffort = await service.update({
+      id: created.id,
+      newAgentConfig: { thinkingOptionId: "high" },
+    });
+    if (withEffort.target.type !== "new-agent") {
+      throw new Error("target type changed unexpectedly");
+    }
+    expect(withEffort.target.config.thinkingOptionId).toBe("high");
+    expect(withEffort.target.config.model).toBe("opus");
+
+    const cleared = await service.update({
+      id: created.id,
+      newAgentConfig: { thinkingOptionId: null },
+    });
+    if (cleared.target.type !== "new-agent") {
+      throw new Error("target type changed unexpectedly");
+    }
+    expect(cleared.target.config.thinkingOptionId).toBeUndefined();
+  });
+
   test("update returns a schedule that round-trips through the store", async () => {
     const service = new ScheduleService({
       store: makeStore(tempDir),
