@@ -22,6 +22,7 @@ import {
   draftToScheduleTarget,
   scheduleTargetToDraft,
 } from "@/components/automations/automation-target-picker";
+import { formatSubmitError } from "./format-submit-error";
 import { ExpiresAtPicker } from "@/components/automations/expires-at-picker";
 import { WebhookSecretReveal } from "@/components/automations/webhook-secret-reveal";
 import { SegmentedTabs, type SegmentedTab } from "@/components/automations/segmented-tabs";
@@ -154,17 +155,24 @@ export function AutomationCreateForm({
       // maxRuns/expiresAt and a restricted newAgentConfig (provider/model/
       // modeId/thinkingOptionId/cwd). No target-kind switch — see FIX #3.
       const newAgentConfig = buildScheduleNewAgentConfig(targetDraft);
-      const result = await updateSchedule.mutateAsync({
-        id: editContext.record.id,
-        name: name.trim() ? name.trim() : null,
-        prompt: prompt.trim(),
-        cadence: cadenceValidation.cadence,
-        maxRuns: parsedMaxRuns,
-        expiresAt: expiresAt.trim() ? expiresAt.trim() : null,
-        ...(newAgentConfig ? { newAgentConfig } : {}),
-      });
-      if (result.error) {
-        setSubmitError(result.error);
+      try {
+        const result = await updateSchedule.mutateAsync({
+          id: editContext.record.id,
+          name: name.trim() ? name.trim() : null,
+          prompt: prompt.trim(),
+          cadence: cadenceValidation.cadence,
+          maxRuns: parsedMaxRuns,
+          expiresAt: expiresAt.trim() ? expiresAt.trim() : null,
+          ...(newAgentConfig ? { newAgentConfig } : {}),
+        });
+        if (result.error) {
+          setSubmitError(result.error);
+          return;
+        }
+      } catch (err) {
+        // mutateAsync rejects when the daemon RPC throws — surface it instead of
+        // letting the rejection vanish into the caller's `void`.
+        setSubmitError(formatSubmitError(err, "save"));
         return;
       }
       onClose();
@@ -175,17 +183,22 @@ export function AutomationCreateForm({
       setSubmitError(targetValidation.error ?? "Invalid target.");
       return;
     }
-    const result = await createSchedule.mutateAsync({
-      prompt: prompt.trim(),
-      cadence: cadenceValidation.cadence,
-      target: targetValidation.target,
-      ...(name.trim() ? { name: name.trim() } : {}),
-      ...(parsedMaxRuns != null ? { maxRuns: parsedMaxRuns } : {}),
-      ...(expiresAt.trim() ? { expiresAt: expiresAt.trim() } : {}),
-      ...(runOnCreate ? { runOnCreate: true } : {}),
-    });
-    if (result.error) {
-      setSubmitError(result.error);
+    try {
+      const result = await createSchedule.mutateAsync({
+        prompt: prompt.trim(),
+        cadence: cadenceValidation.cadence,
+        target: targetValidation.target,
+        ...(name.trim() ? { name: name.trim() } : {}),
+        ...(parsedMaxRuns != null ? { maxRuns: parsedMaxRuns } : {}),
+        ...(expiresAt.trim() ? { expiresAt: expiresAt.trim() } : {}),
+        ...(runOnCreate ? { runOnCreate: true } : {}),
+      });
+      if (result.error) {
+        setSubmitError(result.error);
+        return;
+      }
+    } catch (err) {
+      setSubmitError(formatSubmitError(err, "create"));
       return;
     }
     onClose();
@@ -217,34 +230,44 @@ export function AutomationCreateForm({
     const normalizedTemplate = payloadTemplate.trim() ? payloadTemplate : null;
 
     if (isEdit && editContext) {
-      const result = await updateWebhook.mutateAsync({
-        id: editContext.record.id,
-        name: name.trim() ? name.trim() : null,
-        prompt: prompt.trim(),
-        target: targetValidation.target,
-        payloadTemplate: normalizedTemplate,
-      });
-      if (result.error) {
-        setSubmitError(result.error);
+      try {
+        const result = await updateWebhook.mutateAsync({
+          id: editContext.record.id,
+          name: name.trim() ? name.trim() : null,
+          prompt: prompt.trim(),
+          target: targetValidation.target,
+          payloadTemplate: normalizedTemplate,
+        });
+        if (result.error) {
+          setSubmitError(result.error);
+          return;
+        }
+      } catch (err) {
+        setSubmitError(formatSubmitError(err, "save"));
         return;
       }
       onClose();
       return;
     }
 
-    const result = await createWebhook.mutateAsync({
-      prompt: prompt.trim(),
-      target: targetValidation.target,
-      ...(name.trim() ? { name: name.trim() } : {}),
-      ...(normalizedTemplate !== null ? { payloadTemplate: normalizedTemplate } : {}),
-    });
-    if (result.error) {
-      setSubmitError(result.error);
-      return;
-    }
-    if (result.secret) {
-      // One-time secret reveal — keep the form mounted to show it.
-      setSecretReveal({ secret: result.secret, ingressUrl: result.ingressUrl });
+    try {
+      const result = await createWebhook.mutateAsync({
+        prompt: prompt.trim(),
+        target: targetValidation.target,
+        ...(name.trim() ? { name: name.trim() } : {}),
+        ...(normalizedTemplate !== null ? { payloadTemplate: normalizedTemplate } : {}),
+      });
+      if (result.error) {
+        setSubmitError(result.error);
+        return;
+      }
+      if (result.secret) {
+        // One-time secret reveal — keep the form mounted to show it.
+        setSecretReveal({ secret: result.secret, ingressUrl: result.ingressUrl });
+        return;
+      }
+    } catch (err) {
+      setSubmitError(formatSubmitError(err, "create"));
       return;
     }
     onClose();
