@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CloudWorkspaceState, WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import {
   filterChoosableWorkspaces,
+  nextStepAfterWorkspacePick,
   setupHeaderTitle,
   setupMintErrorMessage,
   shouldShowWorkspaceChooser,
@@ -54,6 +55,16 @@ describe("shouldShowWorkspaceChooser", () => {
     expect(
       shouldShowWorkspaceChooser("credential", "auto", [workspace({ workspaceId: "ws_a" })]),
     ).toBe(false);
+  });
+});
+
+describe("nextStepAfterWorkspacePick", () => {
+  it("skips the credential step straight to connecting when the account credential is set", () => {
+    expect(nextStepAfterWorkspacePick(true)).toBe("connecting");
+  });
+
+  it("routes to the credential step on first-run when no account credential exists", () => {
+    expect(nextStepAfterWorkspacePick(false)).toBe("credential");
   });
 });
 

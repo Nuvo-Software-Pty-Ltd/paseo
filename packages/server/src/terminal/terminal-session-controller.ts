@@ -48,6 +48,13 @@ export interface TerminalSessionControllerOptions {
   hasBinaryChannel: () => boolean;
   isPathWithinRoot: (rootPath: string, candidatePath: string) => boolean;
   sessionLogger: pino.Logger;
+  // D-3.5c — the shared scoped-env resolver (DECISION P-2). Resolved
+  // SERVER-SIDE from the terminal's cwd — the create_terminal_request
+  // carries no `env` field, so scope is never trusted off the wire
+  // (mirrors F3: config from server context). The SAME resolver instance
+  // backs the agent injection site, so a terminal and an agent in the same
+  // project see byte-identical scoped env. Omitted → no scoped env (legacy).
+  resolveScopedEnv?: (cwd: string) => Promise<Record<string, string>>;
 }
 
 export interface TerminalSessionControllerMetrics {
@@ -85,6 +92,7 @@ export class TerminalSessionController {
   private readonly hasBinaryChannel: () => boolean;
   private readonly isPathWithinRoot: (rootPath: string, candidatePath: string) => boolean;
   private readonly sessionLogger: pino.Logger;
+  private readonly resolveScopedEnv: ((cwd: string) => Promise<Record<string, string>>) | null;
 
   private readonly subscribedDirectories = new Set<string>();
   private unsubscribeTerminalsChanged: (() => void) | null = null;
@@ -100,6 +108,7 @@ export class TerminalSessionController {
     this.hasBinaryChannel = options.hasBinaryChannel;
     this.isPathWithinRoot = options.isPathWithinRoot;
     this.sessionLogger = options.sessionLogger;
+    this.resolveScopedEnv = options.resolveScopedEnv ?? null;
   }
 
   start(): void {
@@ -397,11 +406,27 @@ export class TerminalSessionController {
         return;
       }
 
+      // D-3.5c — resolve scoped env (workspace + project vars) server-side
+      // from the terminal's cwd and inject it. The platform overlays
+      // (TERM/ZDOTDIR) in buildTerminalEnvironment are applied AFTER this,
+      // so they still win; the resolver also strips reserved keys.
+      let scopedEnv: Record<string, string> | undefined;
+      if (this.resolveScopedEnv) {
+        try {
+          scopedEnv = await this.resolveScopedEnv(msg.cwd);
+        } catch (error) {
+          this.sessionLogger.warn(
+            { err: error, cwd: msg.cwd },
+            "Failed to resolve scoped env for terminal; spawning without scoped vars",
+          );
+        }
+      }
       const session = await this.terminalManager.createTerminal({
         cwd: msg.cwd,
         name: msg.name,
         command: msg.command,
         args: msg.args,
+        ...(scopedEnv ? { env: scopedEnv } : {}),
       });
       this.ensureExitSubscription(session);
       this.emit({

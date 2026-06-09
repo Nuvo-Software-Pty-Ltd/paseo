@@ -28,6 +28,9 @@ import {
   listWorkspaces,
   createWorkspace,
   setAnthropicCredential,
+  getAccountCredentialStatus,
+  setAccountAnthropicCredential,
+  removeAccountAnthropicCredential,
   mintWorkspaceToken,
   listGithubRepos,
   archiveCloudWorkspace,
@@ -210,6 +213,82 @@ describe("setAnthropicCredential", () => {
     expect(url).toContain("/api/v1/cloud/workspaces/ws_002/anthropic-credential");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-test" });
+  });
+});
+
+describe("account-scoped Anthropic credential (D-3.5b)", () => {
+  // Cross-user isolation: the account endpoints derive identity from the
+  // session bearer ONLY. There must be NO accountId anywhere in the URL — the
+  // app cannot address another user's account because there is no id to tamper.
+  const ACCOUNT_PATH = "/api/v1/cloud/account/anthropic-credential";
+
+  function lastCall(): [string, RequestInit] {
+    const calls = (global.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    return calls[calls.length - 1] as [string, RequestInit];
+  }
+
+  it("getAccountCredentialStatus GETs the account path with no accountId and no secret body", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { set: true, updatedAt: "2026-06-01T00:00:00.000Z" });
+
+    const status = await getAccountCredentialStatus();
+
+    expect(status).toEqual({ set: true, updatedAt: "2026-06-01T00:00:00.000Z" });
+    const [url, init] = lastCall();
+    expect(url).toContain(ACCOUNT_PATH);
+    // No accountId segment: the path ends at /account/anthropic-credential.
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    // A GET must not carry a credential value in its body.
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("getAccountCredentialStatus reports set:false when no credential exists", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { set: false });
+    expect(await getAccountCredentialStatus()).toEqual({ set: false });
+  });
+
+  it("setAccountAnthropicCredential POSTs {apiKey} to the account path (no accountId)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { status: "ok" });
+
+    const result = await setAccountAnthropicCredential("sk-ant-account-key");
+
+    expect(result).toEqual({ status: "ok" });
+    const [url, init] = lastCall();
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    expect(url).not.toContain("/workspaces/");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ apiKey: "sk-ant-account-key" });
+  });
+
+  it("setAccountAnthropicCredential surfaces the server's validation error verbatim", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(400, "Invalid Anthropic API key");
+    await expect(setAccountAnthropicCredential("nope")).rejects.toThrow(
+      /Invalid Anthropic API key/,
+    );
+  });
+
+  it("removeAccountAnthropicCredential DELETEs the account path (no accountId, no body)", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { status: "ok" });
+
+    const result = await removeAccountAnthropicCredential();
+
+    expect(result).toEqual({ status: "ok" });
+    const [url, init] = lastCall();
+    expect(url).toMatch(/\/account\/anthropic-credential$/);
+    expect(init.method).toBe("DELETE");
+    expect(init.body).toBeUndefined();
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(getAccountCredentialStatus()).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });
 
@@ -454,15 +533,73 @@ describe("normalizeCloudProvidersSnapshot", () => {
 });
 
 describe("listGithubRepos", () => {
-  it("calls GET /api/v1/cloud/github/repos", async () => {
+  it("calls GET /api/v1/cloud/github/repos and normalizes the new contract", async () => {
     await storeSessionToken(TOKEN);
-    const repos = [{ full_name: "user/repo", private: false, updated_at: "2026-01-01" }];
-    mockFetch(200, repos);
+    mockFetch(200, {
+      repos: [
+        {
+          fullName: "acme/repo-one",
+          cloneUrl: "https://github.com/acme/repo-one.git",
+          private: false,
+          defaultBranch: "main",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      nextPage: 2,
+    });
 
     const result = await listGithubRepos();
 
-    expect(result).toEqual(repos);
-    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(result.repos).toEqual([
+      {
+        fullName: "acme/repo-one",
+        cloneUrl: "https://github.com/acme/repo-one.git",
+        private: false,
+        defaultBranch: "main",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    expect(result.nextPage).toBe(2);
+    const [url, init] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
     expect(url).toContain("/api/v1/cloud/github/repos");
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("forwards page, perPage and search as query params", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, { repos: [], nextPage: null });
+
+    await listGithubRepos({ page: 3, perPage: 50, search: "  paseo  " });
+
+    const [url] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(url).toContain("page=3");
+    expect(url).toContain("perPage=50");
+    expect(url).toContain("search=paseo");
+  });
+
+  it("drops malformed rows (missing fullName / cloneUrl) and defaults nextPage to null", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(200, {
+      repos: [
+        { fullName: "acme/good", cloneUrl: "https://github.com/acme/good.git" },
+        { fullName: "acme/no-clone" },
+        { cloneUrl: "https://github.com/acme/no-name.git" },
+      ],
+    });
+
+    const result = await listGithubRepos();
+
+    expect(result.repos.map((r) => r.fullName)).toEqual(["acme/good"]);
+    expect(result.repos[0].defaultBranch).toBe("main");
+    expect(result.nextPage).toBeNull();
+  });
+
+  it("throws OrchestraSessionExpiredError on 401", async () => {
+    await storeSessionToken(TOKEN);
+    mockFetch(401, { error: "unauthorized" });
+    await expect(listGithubRepos()).rejects.toThrow(OrchestraSessionExpiredError);
   });
 });

@@ -3,8 +3,10 @@ import { promises as fs } from "node:fs";
 import pino from "pino";
 import {
   fetchAnthropicCredential,
+  fetchAnthropicCredentialForAccount,
   materializeClaudeHome,
   provisionCloudClaudeHome,
+  resolveAccountProviderSelection,
   type SecretsManagerLike,
 } from "./cloud-credentials.js";
 import { workspaceAuthStorage } from "./cloud-auth.js";
@@ -18,6 +20,47 @@ function fakeSecretsManager(payload: { SecretString?: string } | Error): Secrets
         throw payload;
       }
       return payload as never;
+    },
+  };
+}
+
+// Routing fake for provisionCloudClaudeHome tests: distinguishes the account
+// secret path from the per-workspace path so a single client can model
+// account-hit / account-miss→workspace-hit / both-miss. `undefined` for a
+// branch raises a ResourceNotFoundException-shaped error (the steady-state
+// "no credential" signal). Records which branches were read.
+function notFound(): Error {
+  return Object.assign(new Error("Secrets Manager can't find the specified secret."), {
+    name: "ResourceNotFoundException",
+  });
+}
+
+interface RoutingSecretsManager extends SecretsManagerLike {
+  readonly reads: { account: number; workspace: number };
+}
+
+function routingSecretsManager(map: {
+  account?: string | Error;
+  workspace?: string | Error;
+}): RoutingSecretsManager {
+  const reads = { account: 0, workspace: 0 };
+  return {
+    reads,
+    async getSecretValue(secretId: string) {
+      const isAccount = secretId.includes("/account/");
+      const value = isAccount ? map.account : map.workspace;
+      if (isAccount) {
+        reads.account += 1;
+      } else {
+        reads.workspace += 1;
+      }
+      if (value === undefined) {
+        throw notFound();
+      }
+      if (value instanceof Error) {
+        throw value;
+      }
+      return { SecretString: value } as never;
     },
   };
 }
@@ -204,6 +247,172 @@ describe("materializeClaudeHome", () => {
 
     await home.cleanup();
     await expect(fs.stat(home.homeDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("fetchAnthropicCredentialForAccount", () => {
+  beforeEach(() => {
+    delete process.env.ORCHESTRA_STAGE;
+  });
+
+  test("returns the SecretString when the account secret is present", async () => {
+    const credential = await fetchAnthropicCredentialForAccount({
+      accountId: "acc_abc",
+      logger: silentLogger,
+      client: fakeSecretsManager({ SecretString: "sk-ant-account" }),
+    });
+    expect(credential).toBe("sk-ant-account");
+  });
+
+  test("reads the account-scoped secret id (account/<accountId>/anthropic-credential)", async () => {
+    let seenSecretId = "";
+    const client: SecretsManagerLike = {
+      async getSecretValue(secretId: string) {
+        seenSecretId = secretId;
+        return { SecretString: "sk-ant-account" } as never;
+      },
+    };
+    await fetchAnthropicCredentialForAccount({
+      accountId: "acc_xyz",
+      logger: silentLogger,
+      client,
+    });
+    // Byte-identical to the cloud-side keys.accountAnthropicCredential layout.
+    expect(seenSecretId).toBe("orchestra/dev/account/acc_xyz/anthropic-credential");
+  });
+
+  test("returns null (fall back) when the account secret is not found", async () => {
+    const credential = await fetchAnthropicCredentialForAccount({
+      accountId: "acc_abc",
+      logger: silentLogger,
+      client: fakeSecretsManager(notFound()),
+    });
+    expect(credential).toBeNull();
+  });
+
+  test("returns null (fall back) when the account read is IAM-denied (pre-grant migration window)", async () => {
+    const accessDeny = Object.assign(new Error("not authorized to perform: GetSecretValue"), {
+      name: "AccessDeniedException",
+    });
+    const credential = await fetchAnthropicCredentialForAccount({
+      accountId: "acc_abc",
+      logger: silentLogger,
+      client: fakeSecretsManager(accessDeny),
+    });
+    expect(credential).toBeNull();
+  });
+
+  test("returns null (fall back) when the account secret is empty", async () => {
+    const credential = await fetchAnthropicCredentialForAccount({
+      accountId: "acc_abc",
+      logger: silentLogger,
+      client: fakeSecretsManager({ SecretString: "" }),
+    });
+    expect(credential).toBeNull();
+  });
+});
+
+describe("resolveAccountProviderSelection", () => {
+  // Day-N seam: hard-defaults to "anthropic". M2 — the daemon does NOT read the
+  // account-keyed provider-config DDB row (IAM-denied); this stays a constant
+  // until the selection arrives via a daemon-granted path.
+  test("hard-defaults to anthropic", () => {
+    expect(resolveAccountProviderSelection({ accountId: "acc_abc", logger: silentLogger })).toBe(
+      "anthropic",
+    );
+  });
+});
+
+describe("provisionCloudClaudeHome — account-first / workspace-fallback", () => {
+  const written: string[] = [];
+  afterEach(async () => {
+    await Promise.all(written.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  async function runInContext<T>(
+    client: SecretsManagerLike,
+    fn: (home: Awaited<ReturnType<typeof provisionCloudClaudeHome>>) => T,
+  ): Promise<T> {
+    return workspaceAuthStorage.run(
+      { accountId: "acc_a", workspaceId: "ws_b", expiresAt: Date.now() / 1000 + 3600 },
+      async () => {
+        const home = await provisionCloudClaudeHome({ logger: silentLogger, client });
+        written.push(home.homeDir);
+        return fn(home);
+      },
+    );
+  }
+
+  test("account-hit: materializes from the account credential and never reads the workspace path", async () => {
+    const client = routingSecretsManager({ account: "sk-ant-account" });
+    await runInContext(client, (home) => {
+      expect(home.env.ANTHROPIC_API_KEY).toBe("sk-ant-account");
+    });
+    expect(client.reads.account).toBe(1);
+    expect(client.reads.workspace).toBe(0);
+  });
+
+  test("account-miss → workspace-hit: falls back to the per-workspace credential", async () => {
+    const client = routingSecretsManager({ account: undefined, workspace: "sk-ant-workspace" });
+    await runInContext(client, (home) => {
+      expect(home.env.ANTHROPIC_API_KEY).toBe("sk-ant-workspace");
+    });
+    expect(client.reads.account).toBe(1);
+    expect(client.reads.workspace).toBe(1);
+  });
+
+  test("both-miss: throws naming BOTH the accountId and the workspaceId", async () => {
+    const client = routingSecretsManager({ account: undefined, workspace: undefined });
+    await expect(
+      workspaceAuthStorage.run(
+        { accountId: "acc_a", workspaceId: "ws_b", expiresAt: Date.now() / 1000 + 3600 },
+        () => provisionCloudClaudeHome({ logger: silentLogger, client }),
+      ),
+    ).rejects.toThrow(/acc_a[\s\S]*ws_b/);
+  });
+});
+
+// T-4 — cold-boot resume read proof. On resume the daemon container is replaced
+// (fresh process, no in-memory credential cache — none exists; the credential
+// is fetched fresh per spawn). Given an account secret + ALS context, the spawn
+// materializes from the ACCOUNT path with NO client-supplied key, for both the
+// API-key and OAuth shapes — the daemon-side proof that resume needs no
+// credential re-entry.
+describe("provisionCloudClaudeHome — cold-boot resume (account credential)", () => {
+  const written: string[] = [];
+  afterEach(async () => {
+    await Promise.all(written.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+  });
+
+  test("API-key account credential → config.json + ANTHROPIC_API_KEY, no re-entry", async () => {
+    const client = routingSecretsManager({ account: "sk-ant-resumed" });
+    await workspaceAuthStorage.run(
+      { accountId: "acc_resume", workspaceId: "ws_resume", expiresAt: Date.now() / 1000 + 3600 },
+      async () => {
+        const home = await provisionCloudClaudeHome({ logger: silentLogger, client });
+        written.push(home.homeDir);
+        expect(home.env.ANTHROPIC_API_KEY).toBe("sk-ant-resumed");
+        const config = JSON.parse(await fs.readFile(`${home.configDir}/config.json`, "utf8"));
+        expect(config.primaryApiKey).toBe("sk-ant-resumed");
+      },
+    );
+    expect(client.reads.account).toBe(1);
+    expect(client.reads.workspace).toBe(0);
+  });
+
+  test("OAuth account credential → .credentials.json + CLAUDE_CODE_OAUTH_TOKEN, no re-entry", async () => {
+    const client = routingSecretsManager({ account: "sk-ant-oat01-resumed" });
+    await workspaceAuthStorage.run(
+      { accountId: "acc_resume", workspaceId: "ws_resume", expiresAt: Date.now() / 1000 + 3600 },
+      async () => {
+        const home = await provisionCloudClaudeHome({ logger: silentLogger, client });
+        written.push(home.homeDir);
+        expect(home.env.CLAUDE_CODE_OAUTH_TOKEN).toBe("sk-ant-oat01-resumed");
+        expect(home.env.ANTHROPIC_API_KEY).toBeUndefined();
+        const creds = JSON.parse(await fs.readFile(`${home.configDir}/.credentials.json`, "utf8"));
+        expect(creds.oauthToken).toBe("sk-ant-oat01-resumed");
+      },
+    );
   });
 });
 

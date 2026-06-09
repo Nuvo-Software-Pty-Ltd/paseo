@@ -391,6 +391,7 @@ export function buildHostNewWorkspaceRoute(
 
 export const SETTINGS_SECTION_SLUGS = [
   "general",
+  "provider-credential",
   "shortcuts",
   "integrations",
   "permissions",

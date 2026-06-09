@@ -11,6 +11,8 @@ import {
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
+import { useHosts } from "@/runtime/host-runtime";
+import { isWeb } from "@/constants/platform";
 
 const isDesktop = shouldUseDesktopDaemon();
 
@@ -19,6 +21,7 @@ export default function Index() {
   const bootstrapState = useHostRuntimeBootstrapState();
   const anyOnlineHostServerId = useEarliestOnlineHostServerId();
   const workspaceSelection = useActiveWorkspaceSelection();
+  const hosts = useHosts();
 
   const redirectRoute = resolveStartupRedirectRoute({
     pathname,
@@ -26,6 +29,8 @@ export default function Index() {
     workspaceSelection,
     isWorkspaceSelectionLoaded: true,
     hasGivenUpWaitingForHost: bootstrapState.hasGivenUpWaitingForHost,
+    hosts,
+    isWeb,
   });
   const startupWorkspaceSelection = resolveStartupWorkspaceSelection({
     pathname,
@@ -33,6 +38,8 @@ export default function Index() {
     workspaceSelection,
     isWorkspaceSelectionLoaded: true,
     hasGivenUpWaitingForHost: bootstrapState.hasGivenUpWaitingForHost,
+    hosts,
+    isWeb,
   });
 
   React.useEffect(() => {

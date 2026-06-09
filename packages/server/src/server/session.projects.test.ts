@@ -30,6 +30,7 @@ import {
 
 interface ProjectsTestSession {
   handleMessage(message: unknown): Promise<unknown>;
+  cleanup(): Promise<void>;
 }
 
 // D-3.5a (T-3/T-8) — exercise the explicit project RPCs end-to-end against
@@ -120,7 +121,11 @@ describe("Session project RPCs (D-3.5a)", () => {
     session = buildSession();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Dispose the Session so its timers/subscriptions/abort controllers are
+    // torn down — undisposed Sessions leak handles across test files in a
+    // reused vitest worker and destabilize later suites (D-3.5a CI flake).
+    await session.cleanup();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

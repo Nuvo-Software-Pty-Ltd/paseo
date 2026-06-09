@@ -9,6 +9,7 @@ import {
 } from "@server/client/daemon-client";
 import {
   connectionFromListen,
+  isCloudHostProfile,
   normalizeStoredHostProfile,
   upsertHostConnectionInProfiles,
   registryHasConnection,
@@ -2085,15 +2086,7 @@ export function useIsCloudHost(serverId: string | null | undefined): boolean {
   return useMemo(() => {
     if (!serverId) return false;
     const host = hosts.find((entry) => entry.serverId === serverId);
-    if (!host) return false;
-    const preferred = host.connections.find(
-      (connection) => connection.id === host.preferredConnectionId,
-    );
-    return (
-      preferred?.type === "directTcp" &&
-      typeof preferred.workspaceId === "string" &&
-      preferred.workspaceId.length > 0
-    );
+    return isCloudHostProfile(host);
   }, [hosts, serverId]);
 }
 

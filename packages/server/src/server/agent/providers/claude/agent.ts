@@ -2397,6 +2397,12 @@ class ClaudeAgentSession implements AgentSession {
           MCP_TIMEOUT: "600000",
           MCP_TOOL_TIMEOUT: "600000",
         },
+        // D-3.5c — scoped env vars (workspace + project) ride `launchEnv`.
+        // It sits ABOVE the MCP-timeout overlay, so the resolver explicitly
+        // strips MCP_TIMEOUT/MCP_TOOL_TIMEOUT (and PASEO_*/ANTHROPIC_*/
+        // CLAUDE_CODE_*) before it reaches here — a scoped var can never
+        // shadow them (VERIFY-3.5c fix #1). `cloudEnvOverlay` (credential)
+        // stays last/highest.
         this.launchEnv,
         cloudEnvOverlay,
       ],

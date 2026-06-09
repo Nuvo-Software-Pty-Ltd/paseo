@@ -5,13 +5,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowLeft, Check } from "lucide-react-native";
+import { ArrowLeft } from "lucide-react-native";
 import { CLOUD_WORKSPACES_QUERY_KEY } from "@/hooks/use-cloud-workspaces";
 import { AdaptiveTextInput } from "@/components/adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import {
   createWorkspace,
-  setAnthropicCredential,
+  setAccountAnthropicCredential,
+  getAccountCredentialStatus,
   mintWorkspaceToken,
   listWorkspaces,
   clearSession,
@@ -28,6 +29,7 @@ import { extractHostPortFromWebSocketUrl } from "@server/shared/daemon-endpoints
 
 import {
   filterChoosableWorkspaces,
+  nextStepAfterWorkspacePick,
   setupHeaderTitle,
   setupMintErrorMessage,
   shouldShowWorkspaceChooser,
@@ -173,8 +175,6 @@ export function OrchestraSetupScreen() {
 
   const [step, setStep] = useState<SetupStep>("workspace");
   const [workspaceStepView, setWorkspaceStepView] = useState<WorkspaceStepView>("auto");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [repoLess, setRepoLess] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
@@ -194,6 +194,20 @@ export function OrchestraSetupScreen() {
     () => filterChoosableWorkspaces(workspacesQuery.data ?? []),
     [workspacesQuery.data],
   );
+
+  // D-3.5b: the Anthropic credential is per-account, set once and inherited by
+  // every workspace. When the account already has one, the wizard skips the
+  // credential step and connects directly. Short staleTime so a credential
+  // removed elsewhere is noticed soon; a connect-time "no credential" failure
+  // also bounces back to the credential step (see connectWorkspace).
+  const credentialStatusQuery = useQuery({
+    queryKey: ["orchestra", "account-credential-status"],
+    queryFn: () => getAccountCredentialStatus(),
+    enabled: step === "workspace",
+    staleTime: 10_000,
+    retry: false,
+  });
+  const hasAccountCredential = credentialStatusQuery.data?.set ?? false;
   const shouldShowChooser = shouldShowWorkspaceChooser(
     step,
     workspaceStepView,
@@ -245,27 +259,114 @@ export function OrchestraSetupScreen() {
     return null;
   }, [workspace]);
 
+  // Mint a workspace token, connect+probe the daemon, persist the direct
+  // connection, and navigate to the host. Shared by the first-run credential
+  // path AND the skip-credential path (D-3.5b): once the account has a
+  // credential, picking/creating a workspace connects directly. Manages `step`
+  // and inline errors but NOT `isBusy` — every caller owns the busy lifecycle.
+  // Any connect-time failure bounces to the credential step, which also serves
+  // as the recovery surface if the cached "is it set?" status was stale and the
+  // daemon finds no credential at spawn (threat note: stale status cache).
+  const connectWorkspace = useCallback(
+    async (fresh: WorkspaceRecord) => {
+      setStep("connecting");
+      try {
+        const mintResult = await mintWorkspaceToken(fresh.workspaceId);
+        if (mintResult.status !== "active") {
+          setStep("credential");
+          setError(setupMintErrorMessage(mintResult));
+          return;
+        }
+        const token = mintResult.token;
+        // D-3.4: WS URL is derived from the workspaceId so a single app build
+        // can address every workspace the user owns.
+        // EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL remains a dev-only override.
+        const wsUrl = getOrchestraDaemonWsUrl(fresh.workspaceId);
+        const clientId = await getOrCreateClientId();
+        const transportFactory = createWorkspaceTokenTransportFactory(token);
+
+        const { client, serverId } = await connectAndProbe(
+          {
+            url: wsUrl,
+            clientId,
+            clientType: "browser",
+            appVersion: resolveAppVersion() ?? undefined,
+            suppressSendErrors: true,
+            reconnect: { enabled: false },
+            transportFactory,
+          },
+          10_000,
+        );
+
+        // parseHostPort downstream requires a literal `host:port`. When the
+        // daemon URL omits the port (ALB on default :80 / :443), the regex
+        // strip leaves a bare hostname and fails. Use the URL-aware helper.
+        const wsEndpoint = extractHostPortFromWebSocketUrl(wsUrl);
+        const store = getHostRuntimeStore();
+        await store.upsertDirectConnection({
+          serverId,
+          endpoint: wsEndpoint,
+          useTls: wsUrl.startsWith("wss"),
+          workspaceId: fresh.workspaceId,
+          label: fresh.displayName ?? fresh.workspaceId,
+        });
+
+        void client.close();
+
+        // Refresh the cached cloud workspaces so the project picker on the
+        // host screen reflects the just-created workspace immediately.
+        void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
+
+        setStep("done");
+        router.replace(`/h/${serverId}`);
+      } catch (err) {
+        setStep("credential");
+        if (err instanceof OrchestraSessionExpiredError) {
+          // Defer to the global session-expired bounce; don't paint an inline
+          // error the user would see for a single frame.
+          return;
+        }
+        // D-3.9: surface the underlying transport-close reason (e.g. "code 1006")
+        // in the inline error so a support session can read it without DevTools.
+        // See paseo-cloud-daemon/D-3-9-investigation.md.
+        if (err instanceof DaemonConnectionTestError) {
+          setError(
+            `${err.message}${err.lastError && err.lastError !== err.message ? ` (${err.lastError})` : ""}`,
+          );
+          return;
+        }
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [router, queryClient],
+  );
+
   const handleCreateWorkspace = useCallback(async () => {
     if (isBusy) return;
     setIsBusy(true);
     setError("");
 
     try {
-      const url = repoLess ? null : repoUrl.trim() || null;
-      if (!repoLess && !url) {
-        setError("Enter a repo URL or check repo-less.");
-        return;
-      }
-
+      // D-3.5a (T-2) — the cloud workspace shell is created repo-less (name
+      // only). Projects are added AFTER connecting to the workspace's daemon
+      // (where projectSource + add_project live), via the GitHub project
+      // picker. `repoUrl` must be present and explicitly null (the cloud
+      // CreateWorkspaceBody schema is `.nullable()`, not `.optional()`).
       const ws = await createWorkspace({
-        repoUrl: url,
+        repoUrl: null,
         displayName: displayName.trim() || undefined,
       });
       // Refresh the cached list so the chooser/picker reflects the new row
       // immediately on a future re-visit.
       void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
       setWorkspace(ws);
-      setStep("credential");
+      // D-3.5b: skip the credential step when the account already has a
+      // credential; first-run (no credential) still routes through it once.
+      if (nextStepAfterWorkspacePick(hasAccountCredential) === "connecting") {
+        await connectWorkspace(ws);
+      } else {
+        setStep("credential");
+      }
     } catch (err) {
       // Session-expired bounces via OrchestraSessionProvider — don't render an
       // inline string the user would see for a single frame before the route swap.
@@ -276,13 +377,28 @@ export function OrchestraSetupScreen() {
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, repoLess, repoUrl, displayName, queryClient]);
+  }, [isBusy, displayName, queryClient, hasAccountCredential, connectWorkspace]);
 
-  const handlePickExistingWorkspace = useCallback((picked: WorkspaceRecord) => {
-    setWorkspace(picked);
-    setStep("credential");
-    setError("");
-  }, []);
+  const handlePickExistingWorkspace = useCallback(
+    async (picked: WorkspaceRecord) => {
+      if (isBusy) return;
+      setWorkspace(picked);
+      setError("");
+      // D-3.5b: skip the credential prompt and connect directly when the
+      // account credential is already set; otherwise show the credential step.
+      if (nextStepAfterWorkspacePick(hasAccountCredential) === "credential") {
+        setStep("credential");
+        return;
+      }
+      setIsBusy(true);
+      try {
+        await connectWorkspace(picked);
+      } finally {
+        setIsBusy(false);
+      }
+    },
+    [isBusy, hasAccountCredential, connectWorkspace],
+  );
 
   const handleSwitchToCreate = useCallback(() => {
     setWorkspaceStepView("create");
@@ -310,82 +426,21 @@ export function OrchestraSetupScreen() {
         return;
       }
 
-      await setAnthropicCredential(fresh.workspaceId, trimmedKey);
-      setStep("connecting");
-
-      const mintResult = await mintWorkspaceToken(fresh.workspaceId);
-      if (mintResult.status !== "active") {
-        // The workspace was created moments ago in this same flow, so any
-        // non-active state here is unexpected (the lifecycle worker hasn't
-        // had time to suspend / archive / lock anything yet). Surface a
-        // friendly inline error and bounce back to the credential step.
-        setStep("credential");
-        setError(setupMintErrorMessage(mintResult));
-        return;
-      }
-      const token = mintResult.token;
-      // D-3.4: WS URL is derived from the workspaceId so a single app build
-      // can address every workspace the user owns. EXPO_PUBLIC_ORCHESTRA_DAEMON_WS_URL
-      // remains as a dev-only single-workspace override.
-      const wsUrl = getOrchestraDaemonWsUrl(fresh.workspaceId);
-      const clientId = await getOrCreateClientId();
-      const transportFactory = createWorkspaceTokenTransportFactory(token);
-
-      const { client, serverId } = await connectAndProbe(
-        {
-          url: wsUrl,
-          clientId,
-          clientType: "browser",
-          appVersion: resolveAppVersion() ?? undefined,
-          suppressSendErrors: true,
-          reconnect: { enabled: false },
-          transportFactory,
-        },
-        10_000,
-      );
-
-      // parseHostPort downstream requires a literal `host:port`. When the
-      // daemon URL omits the port (ALB on default :80 / :443), the regex
-      // strip leaves a bare hostname and fails. Use the URL-aware helper.
-      const wsEndpoint = extractHostPortFromWebSocketUrl(wsUrl);
-      const store = getHostRuntimeStore();
-      await store.upsertDirectConnection({
-        serverId,
-        endpoint: wsEndpoint,
-        useTls: wsUrl.startsWith("wss"),
-        workspaceId: fresh.workspaceId,
-        label: fresh.displayName ?? fresh.workspaceId,
-      });
-
-      void client.close();
-
-      // Refresh the cached cloud workspaces so the project picker on the
-      // host screen reflects the just-created workspace immediately.
-      void queryClient.invalidateQueries({ queryKey: CLOUD_WORKSPACES_QUERY_KEY });
-
-      setStep("done");
-      router.replace(`/h/${serverId}`);
+      // D-3.5b: write the ACCOUNT-scoped credential (set once, inherited by all
+      // workspaces) — NOT the per-workspace endpoint. Surfaces the auth
+      // service's 400 "Invalid Anthropic API key" as an inline error here.
+      await setAccountAnthropicCredential(trimmedKey);
+      await connectWorkspace(fresh);
     } catch (err) {
       setStep("credential");
       if (err instanceof OrchestraSessionExpiredError) {
-        // Same as handleCreateWorkspace: defer to the global session-expired
-        // bounce; don't paint an inline error the user would see one-frame.
-        return;
-      }
-      // D-3.9: surface the underlying transport-close reason (e.g. "code 1006")
-      // in the inline error so a support session can read it without DevTools.
-      // See paseo-cloud-daemon/D-3-9-investigation.md.
-      if (err instanceof DaemonConnectionTestError) {
-        setError(
-          `${err.message}${err.lastError && err.lastError !== err.message ? ` (${err.lastError})` : ""}`,
-        );
         return;
       }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsBusy(false);
     }
-  }, [isBusy, workspace, apiKey, router, queryClient, reconcileCachedWorkspace]);
+  }, [isBusy, workspace, apiKey, reconcileCachedWorkspace, connectWorkspace]);
 
   const scrollContentStyle = useMemo(
     () => [styles.container, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }],
@@ -416,10 +471,6 @@ export function OrchestraSetupScreen() {
 
           {step === "workspace" && !shouldShowChooser && (
             <WorkspaceStep
-              repoUrl={repoUrl}
-              setRepoUrl={setRepoUrl}
-              repoLess={repoLess}
-              setRepoLess={setRepoLess}
               displayName={displayName}
               setDisplayName={setDisplayName}
               error={error}
@@ -540,20 +591,12 @@ function ChooserExistingWorkspaceCard({
 }
 
 function WorkspaceStep({
-  repoUrl,
-  setRepoUrl,
-  repoLess,
-  setRepoLess,
   displayName,
   setDisplayName,
   error,
   isBusy,
   onSubmit,
 }: {
-  repoUrl: string;
-  setRepoUrl: (v: string) => void;
-  repoLess: boolean;
-  setRepoLess: (v: boolean) => void;
   displayName: string;
   setDisplayName: (v: string) => void;
   error: string;
@@ -566,63 +609,27 @@ function WorkspaceStep({
     onSubmit();
   }, [onSubmit]);
 
-  const toggleRepoLess = useCallback(() => {
-    setRepoLess(!repoLess);
-  }, [repoLess, setRepoLess]);
-
-  const checkboxStyle = useMemo(
-    () => [styles.checkbox, repoLess ? styles.checkboxChecked : null],
-    [repoLess],
-  );
-
   return (
     <>
+      {/* D-3.5a (T-2) — name-only create. The workspace is a container; you add
+          GitHub projects to it after connecting, via the project picker. No
+          repo URL is required (or accepted) here anymore. */}
       <Text style={styles.subtitle}>
-        Point a workspace at a GitHub repo, or create a repo-less workspace to explore ideas.
+        Name your workspace. You&apos;ll add GitHub projects to it after it connects.
       </Text>
 
       <View style={styles.field}>
-        <Text style={styles.label}>GitHub repo URL</Text>
-        <AdaptiveTextInput
-          testID="orchestra-repo-url"
-          accessibilityLabel="GitHub repo URL"
-          value={repoUrl}
-          onChangeText={setRepoUrl}
-          placeholder="https://github.com/owner/repo"
-          placeholderTextColor={theme.colors.foregroundMuted}
-          style={styles.input}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          editable={!isBusy && !repoLess}
-        />
-      </View>
-
-      <Pressable
-        style={styles.checkboxRow}
-        onPress={toggleRepoLess}
-        disabled={isBusy}
-        accessibilityRole="checkbox"
-        accessibilityLabel="Repo-less workspace"
-        testID="orchestra-repoless-toggle"
-      >
-        <View style={checkboxStyle}>
-          {repoLess ? <Check size={14} color={theme.colors.palette.white} /> : null}
-        </View>
-        <Text style={styles.label}>Repo-less workspace</Text>
-      </Pressable>
-
-      <View style={styles.field}>
-        <Text style={styles.label}>Display name (optional)</Text>
+        <Text style={styles.label}>Workspace name</Text>
         <AdaptiveTextInput
           testID="orchestra-display-name"
-          accessibilityLabel="Display name"
+          accessibilityLabel="Workspace name"
           value={displayName}
           onChangeText={setDisplayName}
-          placeholder="My Project"
+          placeholder="My workspace"
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.input}
           editable={!isBusy}
+          onSubmitEditing={handleSubmit}
         />
       </View>
 

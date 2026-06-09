@@ -955,7 +955,10 @@ interface OpenCodeAgentClientDeps {
 class ProductionOpenCodeRuntime implements OpenCodeRuntime {
   constructor(private readonly serverManager: OpenCodeServerManager) {}
 
-  async acquireServer(options: { force: boolean }): Promise<OpenCodeServerAcquisition> {
+  async acquireServer(options: {
+    force: boolean;
+    launchEnv?: Record<string, string>;
+  }): Promise<OpenCodeServerAcquisition> {
     return this.serverManager.acquire(options);
   }
 
@@ -1006,11 +1009,18 @@ export class OpenCodeAgentClient implements AgentClient {
 
   async createSession(
     config: AgentSessionConfig,
-    _launchContext?: AgentLaunchContext,
+    launchContext?: AgentLaunchContext,
     options?: AgentCreateSessionOptions,
   ): Promise<AgentSession> {
     const openCodeConfig = this.assertConfig(config);
-    const acquisition = await this.runtime.acquireServer({ force: false });
+    // D-3.5c — forward the scoped-env overlay to the (shared) OpenCode
+    // server process so workspace + project vars reach the agent. Applies
+    // at server boot; see runtime.ts / server-manager.ts for the shared-
+    // server caveat.
+    const acquisition = await this.runtime.acquireServer({
+      force: false,
+      ...(launchContext?.env ? { launchEnv: launchContext.env } : {}),
+    });
     const { url } = acquisition.server;
     const client = this.runtime.createClient({
       baseUrl: url,
@@ -1055,7 +1065,7 @@ export class OpenCodeAgentClient implements AgentClient {
   async resumeSession(
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
-    _launchContext?: AgentLaunchContext,
+    launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
     const cwd = overrides?.cwd ?? (handle.metadata?.cwd as string);
     if (!cwd) {
@@ -1068,7 +1078,11 @@ export class OpenCodeAgentClient implements AgentClient {
       ...overrides,
     };
     const openCodeConfig = this.assertConfig(config);
-    const acquisition = await this.runtime.acquireServer({ force: false });
+    // D-3.5c — forward the scoped-env overlay (see createSession).
+    const acquisition = await this.runtime.acquireServer({
+      force: false,
+      ...(launchContext?.env ? { launchEnv: launchContext.env } : {}),
+    });
     const { url } = acquisition.server;
     const client = this.runtime.createClient({
       baseUrl: url,

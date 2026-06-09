@@ -28,6 +28,7 @@ import {
   Puzzle,
   Plus,
   FolderGit2,
+  KeyRound,
 } from "lucide-react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
 import { SidebarSeparator } from "@/components/sidebar/sidebar-separator";
@@ -74,6 +75,8 @@ import { useVoiceAudioEngineOptional } from "@/contexts/voice-context";
 import { HostPage, HostRenameButton } from "@/screens/settings/host-page";
 import ProjectsScreen from "@/screens/projects-screen";
 import ProjectSettingsScreen from "@/screens/project-settings-screen";
+import { ProviderCredentialScreen } from "@/screens/settings/provider-credential-screen";
+import { useHasOrchestraSession } from "@/hooks/use-has-orchestra-session";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
@@ -102,10 +105,15 @@ interface SidebarSectionItem {
   label: string;
   icon: ComponentType<{ size: number; color: string }>;
   desktopOnly?: boolean;
+  // Cloud-only: shown only when an Orchestra cloud session is present. Pure
+  // on-host self-host has no cloud account and uses the operator's own
+  // ~/.claude, so the per-account provider credential page is meaningless.
+  cloudOnly?: boolean;
 }
 
 const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
   { id: "general", label: "General", icon: Settings },
+  { id: "provider-credential", label: "Provider credential", icon: KeyRound, cloudOnly: true },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard, desktopOnly: true },
   { id: "integrations", label: "Integrations", icon: Puzzle, desktopOnly: true },
   { id: "permissions", label: "Permissions", icon: Shield, desktopOnly: true },
@@ -719,7 +727,10 @@ function SettingsSidebar({
     return next;
   }, [hosts, localServerId]);
   const isDesktopApp = isElectronRuntime();
-  const items = SIDEBAR_SECTION_ITEMS.filter((item) => !item.desktopOnly || isDesktopApp);
+  const hasOrchestraSession = useHasOrchestraSession();
+  const items = SIDEBAR_SECTION_ITEMS.filter(
+    (item) => (!item.desktopOnly || isDesktopApp) && (!item.cloudOnly || hasOrchestraSession),
+  );
   const padding = useWindowControlsPadding("sidebar");
   const isDesktop = layout === "desktop";
   const containerStyle = isDesktop ? sidebarStyles.desktopContainer : sidebarStyles.mobileContainer;
@@ -1026,6 +1037,8 @@ export default function SettingsScreen({ view }: SettingsScreenProps) {
               handleServiceUrlBehaviorChange={handleServiceUrlBehaviorChange}
             />
           );
+        case "provider-credential":
+          return <ProviderCredentialScreen />;
         case "shortcuts":
           return isDesktopApp ? <KeyboardShortcutsSection /> : null;
         case "integrations":

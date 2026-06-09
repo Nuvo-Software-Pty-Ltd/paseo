@@ -43,6 +43,8 @@ import type {
 import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
 import { buildProviderRegistry, createClientsFromRegistry } from "./agent/provider-registry.js";
 import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspace-git-service.js";
+import type { ScopedEnvResolver } from "./env/scoped-env-resolver.js";
+import type { EnvVarStore } from "./env/env-var-store.js";
 import { buildWorkspaceGitMetadataFromSnapshot } from "./workspace-git-metadata.js";
 import { PushTokenStore } from "./push/token-store.js";
 import { createPushNotificationSender, type PushNotificationSender } from "./push/notifications.js";
@@ -398,6 +400,13 @@ export class VoiceAssistantWebSocketServer {
   // requires the `paseo.workspace.<jwt>` subprotocol instead of `paseo.bearer.*`.
   // Null in on-host mode so the bcrypt-Bearer path remains the sole authority.
   private readonly workspaceAuth: WorkspaceAuthCallback | null;
+  // D-3.5c — the shared scoped-env resolver, forwarded to each Session so
+  // its TerminalSessionController resolves env from cwd (DECISION P-2).
+  // Null when not injected (tests / legacy callers) → terminals get no
+  // scoped env, identical to pre-3.5c behavior.
+  private readonly resolveScopedEnv: ScopedEnvResolver | null;
+  // D-3.5c — scoped env-var store backing the list/set/delete RPCs.
+  private readonly envVarStore: EnvVarStore | null;
   private readonly runtimeMetrics = new WebSocketRuntimeMetricsWindow();
   private runtimeMetricsInterval: ReturnType<typeof setInterval> | null = null;
   private unsubscribeSpeechReadiness: (() => void) | null = null;
@@ -446,6 +455,8 @@ export class VoiceAssistantWebSocketServer {
     pushNotificationSender?: PushNotificationSender,
     workspaceAuth?: WorkspaceAuthCallback | null,
     workspaceContainerRegistry?: WorkspaceContainerRegistry,
+    resolveScopedEnv?: ScopedEnvResolver,
+    envVarStore?: EnvVarStore,
     triggerService?: TriggerService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
@@ -459,6 +470,8 @@ export class VoiceAssistantWebSocketServer {
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceContainerRegistry = workspaceContainerRegistry ?? null;
+    this.resolveScopedEnv = resolveScopedEnv ?? null;
+    this.envVarStore = envVarStore ?? null;
     const requiredServices = requireWebSocketServices({
       chatService,
       loopService,
@@ -959,6 +972,8 @@ export class VoiceAssistantWebSocketServer {
       ...(this.workspaceContainerRegistry
         ? { workspaceContainerRegistry: this.workspaceContainerRegistry }
         : {}),
+      ...(this.resolveScopedEnv ? { resolveScopedEnv: this.resolveScopedEnv } : {}),
+      ...(this.envVarStore ? { envVarStore: this.envVarStore } : {}),
       chatService: this.chatService,
       loopService: this.loopService,
       scheduleService: this.scheduleService,
@@ -1150,6 +1165,12 @@ export class VoiceAssistantWebSocketServer {
         // the trigger backend (D-3.5d). The app gates the whole webhook
         // automation UI on this; old clients ignore the unknown key.
         ...(this.triggerService ? { webhookTriggers: true } : {}),
+        // COMPAT(scopedEnvVars): added in v0.1.74 (D-3.5c), drop the gate
+        // when floor >= v0.1.74. Storage + injection are always in core, so
+        // this daemon always supports the feature → unconditionally true.
+        // The app gates its env-var editor on this; an old daemon (no field)
+        // → client treats it as absent and shows "Update the host to use this."
+        scopedEnvVars: true,
       },
     };
   }

@@ -19,6 +19,7 @@ import type {
 import type {
   ServerInfoStatusPayload,
   ProjectPlacementPayload,
+  ProjectDescriptorPayload,
   ServerCapabilities,
   WorkspaceDescriptorPayload,
 } from "@server/shared/messages";
@@ -109,8 +110,34 @@ export interface Agent {
   projectPlacement?: ProjectPlacementPayload | null;
 }
 
+// D-3.5a (app T-1) — a Project as the client models it: a repo or local
+// directory contained by a Workspace. Mirrors the daemon's
+// ProjectDescriptorPayload (from `list_projects`). `repoUrl` is ALWAYS
+// credential-free (the daemon canonicalizes before emitting).
+export interface ProjectDescriptor {
+  projectId: string;
+  workspaceId: string;
+  displayName: string;
+  rootPath: string;
+  repoUrl: string | null;
+  kind: ProjectDescriptorPayload["kind"];
+  archivedAt: string | null;
+}
+
 export interface WorkspaceDescriptor {
   id: string;
+  // D-3.5a (app T-1) — the refounded model is workspace → projects[] (1:N).
+  // `displayName` and `projects` are the canonical shape; the singular
+  // `projectId`/`projectDisplayName`/`projectRootPath`/`projectKind` fields
+  // below are kept as a COMPAT shim (derived from the first project) so legacy
+  // single-project screens keep working. Read multi-project state through the
+  // helpers in `@/lib/workspace-projects`. Both are optional on the type so
+  // existing literal construction sites keep compiling; `normalizeWorkspaceDescriptor`
+  // always populates them and the helpers default safely.
+  // COMPAT(workspaceSingularProject): added in v0.1.x, drop the singular fields
+  // once all screens read projects[].
+  displayName?: string;
+  projects?: ProjectDescriptor[];
   projectId: string;
   projectDisplayName: string;
   projectRootPath: string;
@@ -130,8 +157,16 @@ export interface WorkspaceDescriptor {
 export function normalizeWorkspaceDescriptor(
   payload: WorkspaceDescriptorPayload,
 ): WorkspaceDescriptor {
+  const id = normalizeWorkspaceOpaqueId(payload.id) ?? payload.id;
   return {
-    id: normalizeWorkspaceOpaqueId(payload.id) ?? payload.id,
+    id,
+    displayName: payload.name,
+    // D-3.5a (app T-1): a WorkspaceDescriptorPayload still carries a single
+    // derived project placement (the daemon's back-compat cache). Seed
+    // `projects[]` from it so the 1:N store shape holds even before a
+    // `list_projects` round-trip; the source-of-truth multi-project list is
+    // merged in later via `withWorkspaceProjects` from the helpers module.
+    projects: projectsFromPlacement(id, payload.projectId, payload.project),
     projectId: payload.projectId,
     projectDisplayName: payload.projectDisplayName,
     projectRootPath: payload.projectRootPath,
@@ -147,6 +182,31 @@ export function normalizeWorkspaceDescriptor(
     githubRuntime: payload.githubRuntime,
     project: payload.project,
   };
+}
+
+// D-3.5a (app T-1): derive a single ProjectDescriptor from the legacy
+// per-workspace placement so the new projects[] is never empty for a
+// repo-bound workspace. Returns [] when the workspace has no placement (a
+// repo-less / empty workspace), which is the valid 0-project case.
+function projectsFromPlacement(
+  workspaceId: string,
+  projectId: string,
+  placement: ProjectPlacementPayload | undefined,
+): ProjectDescriptor[] {
+  if (!placement) {
+    return [];
+  }
+  return [
+    {
+      projectId,
+      workspaceId,
+      displayName: placement.projectName,
+      rootPath: placement.checkout.cwd,
+      repoUrl: placement.checkout.remoteUrl ?? null,
+      kind: placement.checkout.isGit ? "git" : "non_git",
+      archivedAt: null,
+    },
+  ];
 }
 
 function preserveWorkspaceDescriptorIdentity(
