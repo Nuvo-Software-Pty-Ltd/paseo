@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { Alert, Modal, ScrollView, Text, View } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
+import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,6 +13,7 @@ import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { ScheduleRunRow } from "@/components/schedule-failed-run-row";
 import { isLastRunFailure } from "@/components/schedule-failed-run-row-model";
 import { WebhookSecretReveal } from "@/components/automations/webhook-secret-reveal";
+import { WebhookConfigInstructions } from "@/components/automations/webhook-config-instructions";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import {
   schedulesQueryKey,
@@ -74,6 +76,7 @@ function AutomationDetailScreenContent({
   const webhookSupported = useWebhookTriggersFeatureFlag(serverId);
 
   const [isEditOpen, setIsEditOpen] = useState(false);
+  const [ingressUrlCopied, setIngressUrlCopied] = useState(false);
   const [rotatedSecret, setRotatedSecret] = useState<{
     secret: string;
     ingressUrl: string | null;
@@ -200,6 +203,12 @@ function AutomationDetailScreenContent({
   const handleCloseEditModal = useCallback(() => setIsEditOpen(false), []);
   const handleDismissRotated = useCallback(() => setRotatedSecret(null), []);
 
+  const handleCopyIngressUrl = useCallback(() => {
+    if (detail?.kind !== "webhook" || !detail.record.ingressUrl) return;
+    void Clipboard.setStringAsync(detail.record.ingressUrl);
+    setIngressUrlCopied(true);
+  }, [detail]);
+
   const editContext = useMemo<AutomationEditContext | null>(() => {
     if (!detail) return null;
     if (detail.kind === "schedule") {
@@ -286,6 +295,10 @@ function AutomationDetailScreenContent({
                 <Text style={styles.ingressUrl} selectable>
                   {detail.record.ingressUrl}
                 </Text>
+                <Button size="sm" variant="secondary" onPress={handleCopyIngressUrl}>
+                  {ingressUrlCopied ? "Copied" : "Copy URL"}
+                </Button>
+                <WebhookConfigInstructions ingressUrl={detail.record.ingressUrl} />
               </>
             ) : null}
             <Button

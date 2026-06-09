@@ -4,6 +4,7 @@ import { StyleSheet } from "react-native-unistyles";
 import * as Clipboard from "expo-clipboard";
 import { Button } from "@/components/ui/button";
 import { Fonts } from "@/constants/theme";
+import { WebhookConfigInstructions } from "@/components/automations/webhook-config-instructions";
 
 // The one-time secret reveal shown right after a webhook trigger is created or
 // its secret is rotated. The full secret is served by the daemon exactly once;
@@ -58,6 +59,8 @@ export function WebhookSecretReveal({ secret, ingressUrl, onDismiss }: WebhookSe
           </Button>
         </View>
       ) : null}
+
+      {ingressUrl ? <WebhookConfigInstructions ingressUrl={ingressUrl} /> : null}
 
       <Button variant="default" onPress={onDismiss}>
         Done
