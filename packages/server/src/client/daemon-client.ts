@@ -422,6 +422,38 @@ type ScheduleUpdatePayload = Extract<
   SessionOutboundMessage,
   { type: "schedule/update/response" }
 >["payload"];
+type TriggerCreatePayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/create/response" }
+>["payload"];
+type TriggerListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/list/response" }
+>["payload"];
+type TriggerInspectPayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/inspect/response" }
+>["payload"];
+type TriggerLogsPayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/logs/response" }
+>["payload"];
+type TriggerUpdatePayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/update/response" }
+>["payload"];
+type TriggerDeletePayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/delete/response" }
+>["payload"];
+type TriggerRunOncePayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/run-once/response" }
+>["payload"];
+type TriggerRotateSecretPayload = Extract<
+  SessionOutboundMessage,
+  { type: "trigger/rotate-secret/response" }
+>["payload"];
 export type FetchAgentTimelinePayload = FetchAgentTimelineResponseMessage["payload"];
 
 export type FetchAgentTimelineDirection = FetchAgentTimelinePayload["direction"];
@@ -619,6 +651,35 @@ export interface UpdateScheduleOptions {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  requestId?: string;
+}
+// D-3.5d — webhook trigger client options. The spawn `target` shape is
+// identical to a schedule's (reused from CreateScheduleOptions).
+export type AutomationTarget = CreateScheduleOptions["target"];
+export interface CreateTriggerOptions {
+  prompt: string;
+  name?: string | null;
+  target: AutomationTarget;
+  payloadTemplate?: string | null;
+  enabled?: boolean;
+  requestId?: string;
+}
+export interface InspectTriggerOptions {
+  id: string;
+  requestId?: string;
+}
+export interface UpdateTriggerOptions {
+  id: string;
+  name?: string | null;
+  prompt?: string;
+  target?: AutomationTarget;
+  payloadTemplate?: string | null;
+  enabled?: boolean;
+  requestId?: string;
+}
+export interface RunOnceTriggerOptions {
+  id: string;
+  payload?: unknown;
   requestId?: string;
 }
 type ListAvailableEditorsPayload = ListAvailableEditorsResponseMessage["payload"];
@@ -4035,6 +4096,101 @@ export class DaemonClient {
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
       },
       responseType: "schedule/update/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerCreate(options: CreateTriggerOptions): Promise<TriggerCreatePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "trigger/create",
+        prompt: options.prompt,
+        target: options.target,
+        ...(options.name !== undefined ? { name: options.name } : {}),
+        ...(options.payloadTemplate !== undefined
+          ? { payloadTemplate: options.payloadTemplate }
+          : {}),
+        ...(typeof options.enabled === "boolean" ? { enabled: options.enabled } : {}),
+      },
+      responseType: "trigger/create/response",
+      timeout: 15000,
+    });
+  }
+
+  async triggerList(requestId?: string): Promise<TriggerListPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "trigger/list" },
+      responseType: "trigger/list/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerInspect(options: InspectTriggerOptions): Promise<TriggerInspectPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "trigger/inspect", triggerId: options.id },
+      responseType: "trigger/inspect/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerLogs(options: InspectTriggerOptions): Promise<TriggerLogsPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "trigger/logs", triggerId: options.id },
+      responseType: "trigger/logs/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerUpdate(options: UpdateTriggerOptions): Promise<TriggerUpdatePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "trigger/update",
+        triggerId: options.id,
+        ...(options.name !== undefined ? { name: options.name } : {}),
+        ...(options.prompt !== undefined ? { prompt: options.prompt } : {}),
+        ...(options.target !== undefined ? { target: options.target } : {}),
+        ...(options.payloadTemplate !== undefined
+          ? { payloadTemplate: options.payloadTemplate }
+          : {}),
+        ...(typeof options.enabled === "boolean" ? { enabled: options.enabled } : {}),
+      },
+      responseType: "trigger/update/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerDelete(options: InspectTriggerOptions): Promise<TriggerDeletePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "trigger/delete", triggerId: options.id },
+      responseType: "trigger/delete/response",
+      timeout: 10000,
+    });
+  }
+
+  async triggerRunOnce(options: RunOnceTriggerOptions): Promise<TriggerRunOncePayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: {
+        type: "trigger/run-once",
+        triggerId: options.id,
+        ...(options.payload !== undefined ? { payload: options.payload } : {}),
+      },
+      responseType: "trigger/run-once/response",
+      timeout: 15000,
+    });
+  }
+
+  async triggerRotateSecret(options: InspectTriggerOptions): Promise<TriggerRotateSecretPayload> {
+    return this.sendCorrelatedSessionRequest({
+      requestId: options.requestId,
+      message: { type: "trigger/rotate-secret", triggerId: options.id },
+      responseType: "trigger/rotate-secret/response",
       timeout: 10000,
     });
   }

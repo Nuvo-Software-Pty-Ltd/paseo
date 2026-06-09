@@ -9,6 +9,8 @@ import { cloneWorkspaceRepo, resolveStage } from "./cloud-clone.js";
 import { workspaceAuthStorage } from "./cloud-auth.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { ScheduleStore } from "./schedule/store.js";
+import type { TriggerService } from "./trigger/service.js";
+import type { WebhookTriggerStore } from "./trigger/store.js";
 
 const CloneRepoBody = z.object({
   accountId: z.string().min(1),
@@ -33,6 +35,27 @@ const ScheduleFireBody = z
   })
   .strict();
 
+// D-3.5d — POST /api/internal/webhook-fire (HMAC-validated).
+//
+// The cloud ingress edge verifies the per-trigger signature, resolves the
+// public webhookId → internal triggerId via the global
+// `webhook-route#<webhookId>` item, and forwards `{ triggerId, payload }`.
+// FIX (VERIFY-3.5d #2): the body carries the INTERNAL `triggerId`, NOT the
+// public `webhookId` — the daemon does a DIRECT `store.get(triggerId)`
+// (rows are keyed `sk="<triggerId>#meta"`), so there is no partition scan
+// and no webhookId→trigger ambiguity on the hot fire path. `.strict()` so
+// any drift from the cloud side surfaces as a 400 here.
+//
+// Cloud contract the ingress MUST honor: forward the daemon the internal
+// `triggerId` (held alongside accountId/workspaceId in the
+// `webhook-route#<webhookId>` item), never the raw webhookId.
+const WebhookFireBody = z
+  .object({
+    triggerId: z.string().min(1),
+    payload: z.unknown().optional(),
+  })
+  .strict();
+
 // T-16 — download-token internal redemption. Auth's
 // `GET /api/files/download/:tokenId` 302-redirects to the per-workspace
 // daemon's `/api/files/download/internal/:tokenId`. No body — the
@@ -48,6 +71,12 @@ export interface InternalRoutesOptions {
    */
   scheduleService?: ScheduleService;
   scheduleStore?: ScheduleStore;
+  /**
+   * D-3.5d webhook-trigger fire path. Injected in cloud mode alongside the
+   * schedule services.
+   */
+  triggerService?: TriggerService;
+  triggerStore?: WebhookTriggerStore;
   /**
    * Bound workspace identity from PASEO_WORKSPACE_ID. Used to assert
    * the schedule-fire body's workspaceId matches what the worker
@@ -247,6 +276,73 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
 
   router.post("/api/internal/schedule-fire", (req, res) => {
     void handleScheduleFire(req, res);
+  });
+
+  // D-3.5d — POST /api/internal/webhook-fire (HMAC-validated).
+  //
+  // Same trust boundary as schedule-fire: the daemon trusts the
+  // internal-HMAC caller; the per-trigger signature was verified upstream
+  // at the cloud ingress edge. Resolves the trigger by internal triggerId
+  // (direct get), re-checks the forwarded workspace against
+  // PASEO_WORKSPACE_ID (defense in depth), restores ALS, and fires.
+  const handleWebhookFire = async (
+    req: import("express").Request,
+    res: import("express").Response,
+  ): Promise<void> => {
+    const { triggerService, triggerStore, expectedWorkspaceId } = options;
+    if (!triggerService || !triggerStore) {
+      res.status(503).json({ error: "webhook-fire route not configured" });
+      return;
+    }
+    try {
+      const rawBody = JSON.stringify(req.body);
+      const hmacHeader = req.headers["x-orchestra-internal-hmac"] as string | undefined;
+      if (!verifyHmac(rawBody, hmacHeader, hmacKey)) {
+        logger.warn("Rejected /api/internal/webhook-fire: HMAC verification failed");
+        res.status(401).json({ error: "Unauthorized: invalid HMAC signature" });
+        return;
+      }
+      const parsed = WebhookFireBody.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: "Invalid body", details: parsed.error.issues });
+        return;
+      }
+      const { triggerId, payload } = parsed.data;
+      const trigger = await triggerStore.get(triggerId);
+      if (!trigger) {
+        logger.info({ triggerId }, "webhook-fire: trigger not found — treat as no-op");
+        res.status(404).json({ error: "trigger_not_found" });
+        return;
+      }
+      // Cross-tenant defense in depth — a forwarded trigger whose persisted
+      // workspace doesn't match this daemon's binding is rejected, never
+      // fired (mirrors schedule-fire's expected-workspace check).
+      if (
+        expectedWorkspaceId &&
+        trigger.cloudOwnerWorkspaceId &&
+        trigger.cloudOwnerWorkspaceId !== expectedWorkspaceId
+      ) {
+        logger.warn(
+          { triggerId, expected: expectedWorkspaceId, got: trigger.cloudOwnerWorkspaceId },
+          "webhook-fire: cross-workspace trigger rejected (defense-in-depth)",
+        );
+        res.status(403).json({ error: "workspace_mismatch" });
+        return;
+      }
+      // TriggerService.fire restores ALS internally from the trigger's
+      // persisted cloudOwner* claims, so no wrapping is needed here.
+      await triggerService.fire(trigger, payload ?? {});
+      res.status(200).json({ ok: true, triggerId });
+    } catch (err) {
+      logger.error({ err }, "Unhandled error in webhook-fire handler");
+      if (!res.headersSent) {
+        res.status(500).json({ error: "internal_error" });
+      }
+    }
+  };
+
+  router.post("/api/internal/webhook-fire", (req, res) => {
+    void handleWebhookFire(req, res);
   });
 
   // T-16 — GET /api/files/download/internal/:tokenId.

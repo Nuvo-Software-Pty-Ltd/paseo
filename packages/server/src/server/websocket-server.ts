@@ -16,6 +16,7 @@ import { resolveProjectSource } from "./paseo-env.js";
 import type { ChatService } from "./chat/chat-service.js";
 import type { LoopService } from "./loop-service.js";
 import type { ScheduleService } from "./schedule/service.js";
+import type { TriggerService } from "./trigger/service.js";
 import type { CheckoutDiffManager, CheckoutDiffMetrics } from "./checkout-diff-manager.js";
 import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-store.js";
 import { applyMutableProviderConfigToOverrides } from "./daemon-config-store.js";
@@ -361,6 +362,9 @@ export class VoiceAssistantWebSocketServer {
   private readonly chatService: ChatService;
   private readonly loopService: LoopService;
   private readonly scheduleService: ScheduleService;
+  // D-3.5d — webhook triggers (optional; present when the daemon was built
+  // with the trigger backend). Gates the `features.webhookTriggers` flag.
+  private readonly triggerService: TriggerService | null;
   private readonly checkoutDiffManager: CheckoutDiffManager;
   private readonly github: GitHubService;
   private readonly workspaceGitService: WorkspaceGitService;
@@ -453,6 +457,7 @@ export class VoiceAssistantWebSocketServer {
     workspaceContainerRegistry?: WorkspaceContainerRegistry,
     resolveScopedEnv?: ScopedEnvResolver,
     envVarStore?: EnvVarStore,
+    triggerService?: TriggerService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.serverId = serverId;
@@ -476,6 +481,7 @@ export class VoiceAssistantWebSocketServer {
     this.chatService = requiredServices.chatService;
     this.loopService = requiredServices.loopService;
     this.scheduleService = requiredServices.scheduleService;
+    this.triggerService = triggerService ?? null;
     this.checkoutDiffManager = requiredServices.checkoutDiffManager;
     this.github = github ?? createGitHubService();
     this.workspaceGitService = workspaceGitService ?? createFallbackWorkspaceGitService();
@@ -971,6 +977,7 @@ export class VoiceAssistantWebSocketServer {
       chatService: this.chatService,
       loopService: this.loopService,
       scheduleService: this.scheduleService,
+      ...(this.triggerService ? { triggerService: this.triggerService } : {}),
       checkoutDiffManager: this.checkoutDiffManager,
       github: this.github,
       workspaceGitService: this.workspaceGitService,
@@ -1153,6 +1160,11 @@ export class VoiceAssistantWebSocketServer {
         // via resolveProjectSource (PASEO_PROJECT_SOURCE), NOT a cloud
         // branch — open-core discipline (VERIFY-3.5a Locked Decision #1).
         projectSource: resolveProjectSource(),
+        // COMPAT(webhookTriggers): added in v0.1.74, drop the gate when
+        // floor >= v0.1.74. Advertised only when the daemon was built with
+        // the trigger backend (D-3.5d). The app gates the whole webhook
+        // automation UI on this; old clients ignore the unknown key.
+        ...(this.triggerService ? { webhookTriggers: true } : {}),
         // COMPAT(scopedEnvVars): added in v0.1.74 (D-3.5c), drop the gate
         // when floor >= v0.1.74. Storage + injection are always in core, so
         // this daemon always supports the feature → unconditionally true.

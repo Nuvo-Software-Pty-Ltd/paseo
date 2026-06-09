@@ -162,6 +162,15 @@ export function shouldBypassBearerAuth(method: string, path: string): boolean {
   if (method === "OPTIONS") {
     return true;
   }
+  // D-3.5d — the self-host webhook receiver authenticates each request by
+  // a per-trigger HMAC signature (not the daemon password), so it must
+  // bypass the Bearer/workspace-token gate. The receiver itself fails
+  // closed on a bad/missing signature. In cloud mode /hooks is not mounted
+  // (the proprietary ingress handles inbound webhooks), so this is a
+  // harmless 404 there.
+  if (path.startsWith("/hooks/")) {
+    return true;
+  }
   return path === "/api/health";
 }
 

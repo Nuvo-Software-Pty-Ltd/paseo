@@ -2,12 +2,9 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-storage.js";
-import type { AgentSessionConfig } from "../agent/agent-sdk-types.js";
-import { curateAgentActivity } from "../agent/activity-curator.js";
-import { ensureAgentLoaded } from "../agent/agent-loading.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
-import { getUnattendedModeId } from "../agent/provider-manifest.js";
 import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
+import { spawnFromAutomation } from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import type {
@@ -115,23 +112,6 @@ function completeSchedule(schedule: StoredSchedule, now: Date): StoredSchedule {
     pausedAt: null,
     updatedAt: now.toISOString(),
   };
-}
-
-function buildRunOutput(params: {
-  output: string | null;
-  timelineText: string;
-  finalText: string;
-}): string | null {
-  if (params.output && params.output.trim().length > 0) {
-    return params.output;
-  }
-  if (params.finalText.trim().length > 0) {
-    return params.finalText.trim();
-  }
-  if (params.timelineText.trim().length > 0) {
-    return params.timelineText.trim();
-  }
-  return null;
 }
 
 export interface ScheduleServiceOptions {
@@ -562,63 +542,21 @@ export class ScheduleService {
     schedule: StoredSchedule,
     runId: string,
   ): Promise<ScheduleExecutionResult> {
+    // D-3.5d — spawn through the shared automation path so schedules and
+    // webhook triggers reach `createAgent`/`runAgent` via one helper.
     const wrappedPrompt = formatSystemNotificationPrompt(buildScheduleFireBody(schedule, runId));
-
-    if (schedule.target.type === "agent") {
-      const record = await this.agentStorage.get(schedule.target.agentId);
-      if (record?.archivedAt) {
-        throw new Error(`Agent ${schedule.target.agentId} is archived`);
-      }
-
-      const agent = await ensureAgentLoaded(schedule.target.agentId, {
+    return spawnFromAutomation({
+      target: schedule.target,
+      wrappedPrompt,
+      labels: {
+        "paseo.schedule-id": schedule.id,
+        "paseo.schedule-run": runId,
+      },
+      deps: {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.logger,
-      });
-      if (this.agentManager.hasInFlightRun(agent.id)) {
-        throw new Error(`Agent ${agent.id} already has an active run`);
-      }
-      const result = await this.agentManager.runAgent(agent.id, wrappedPrompt);
-      const timelineText = curateAgentActivity(result.timeline);
-      return {
-        agentId: agent.id,
-        output: buildRunOutput({
-          output: null,
-          timelineText,
-          finalText: result.finalText,
-        }),
-      };
-    }
-
-    const config: AgentSessionConfig = {
-      provider: schedule.target.config.provider,
-      cwd: schedule.target.config.cwd,
-      modeId: schedule.target.config.modeId ?? getUnattendedModeId(schedule.target.config.provider),
-      model: schedule.target.config.model,
-      thinkingOptionId: schedule.target.config.thinkingOptionId,
-      title: schedule.target.config.title,
-      approvalPolicy: schedule.target.config.approvalPolicy,
-      sandboxMode: schedule.target.config.sandboxMode,
-      networkAccess: schedule.target.config.networkAccess,
-      webSearch: schedule.target.config.webSearch,
-      extra: schedule.target.config.extra,
-      systemPrompt: schedule.target.config.systemPrompt,
-      mcpServers: schedule.target.config.mcpServers as AgentSessionConfig["mcpServers"],
-    };
-    const labels = {
-      "paseo.schedule-id": schedule.id,
-      "paseo.schedule-run": runId,
-    };
-    const agent = await this.agentManager.createAgent(config, undefined, { labels });
-    const result = await this.agentManager.runAgent(agent.id, wrappedPrompt);
-    const timelineText = curateAgentActivity(result.timeline);
-    return {
-      agentId: agent.id,
-      output: buildRunOutput({
-        output: null,
-        timelineText,
-        finalText: result.finalText,
-      }),
-    };
+      },
+    });
   }
 }
