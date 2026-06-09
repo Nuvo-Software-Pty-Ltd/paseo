@@ -11,6 +11,8 @@ import {
   type WorkspaceExecutionAuthorityResult,
 } from "@/utils/workspace-execution";
 import { resolveProjectSource, type ProjectSource } from "@/lib/project-source";
+import { workspaceProjects } from "@/lib/workspace-projects";
+import type { AutomationProjectOption } from "@/components/automations/automation-target-model";
 import { useSessionStore, type WorkspaceDescriptor } from "./session-store";
 
 // These are the ONLY supported ways to read workspaces from the session store.
@@ -35,6 +37,7 @@ type SessionStoreSnapshot = ReturnType<typeof useSessionStore.getState>;
 
 const EMPTY_WORKSPACE_KEYS: string[] = [];
 const EMPTY_WORKSPACE_STRUCTURE: WorkspaceStructure = { projects: [] };
+const EMPTY_SERVER_PROJECTS: AutomationProjectOption[] = [];
 
 function getWorkspaceOrderScopeKey(serverId: string, projectKey: string): string {
   return `${serverId.trim()}::${projectKey.trim()}`;
@@ -349,6 +352,42 @@ export function useProjectSource(serverId: string | null): ProjectSource {
       return resolveProjectSource(state.sessions[serverId]?.serverInfo ?? null);
     },
     Object.is,
+  );
+}
+
+// D-3.5d (automation form UX) — the non-archived projects across all of a
+// server's workspaces, shaped for the automation "Working directory" picker
+// (id = projectId, label = displayName, value = rootPath). Deduped by
+// projectId so a project shared by several workspaces appears once. Returns a
+// stable empty array when the server has no workspaces (self-host / empty),
+// which the picker uses to fall back to a freeform path input.
+export function useServerProjects(serverId: string | null): AutomationProjectOption[] {
+  return useStoreWithEqualityFn(
+    useSessionStore,
+    (state) => {
+      if (!serverId) {
+        return EMPTY_SERVER_PROJECTS;
+      }
+      const workspaces = state.sessions[serverId]?.workspaces;
+      if (!workspaces || workspaces.size === 0) {
+        return EMPTY_SERVER_PROJECTS;
+      }
+      const byId = new Map<string, AutomationProjectOption>();
+      for (const workspace of workspaces.values()) {
+        for (const project of workspaceProjects(workspace)) {
+          if (project.archivedAt !== null || byId.has(project.projectId)) {
+            continue;
+          }
+          byId.set(project.projectId, {
+            projectId: project.projectId,
+            displayName: project.displayName,
+            rootPath: project.rootPath,
+          });
+        }
+      }
+      return byId.size === 0 ? EMPTY_SERVER_PROJECTS : Array.from(byId.values());
+    },
+    equal,
   );
 }
 

@@ -633,6 +633,7 @@ export interface UpdateScheduleNewAgentConfig {
   provider?: string;
   model?: string | null;
   modeId?: string | null;
+  thinkingOptionId?: string | null;
   cwd?: string;
 }
 export interface UpdateScheduleOptions {
