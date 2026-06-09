@@ -3,14 +3,14 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { cloudHmacFetch } from "../cloud-hmac-fetch.js";
 import type { TriggerSecretStore } from "./secret-store.js";
-import type { TriggerProvisionResult } from "./types.js";
+import type { TriggerProvisionResult, TriggerRotateResult } from "./types.js";
 
 // D-3.5d — the ONLY place cloud and self-host webhook triggers differ.
 // Resolved exactly like `DynamoScheduleStore.notifyRegister`: the
 // discriminator is the PRESENCE/ABSENCE of an injected internal URL, not
 // an `if (cloud)` branch. The bootstrap composes the cloud provisioner
-// when `ORCHESTRA_LIFECYCLE_INTERNAL_URL` (or the auth internal URL) is
-// set, and the self-host provisioner otherwise.
+// when `ORCHESTRA_AUTH_INTERNAL_URL` is set (registration is auth-owned —
+// VERIFY-3.5d #4), and the self-host provisioner otherwise.
 
 export interface TriggerProvisioner {
   /**
@@ -20,10 +20,11 @@ export interface TriggerProvisioner {
    */
   provision(triggerId: string): Promise<TriggerProvisionResult>;
   /**
-   * Rotate the signing secret for an existing trigger. Returns the new
-   * one-time secret (+ unchanged webhookId/ingressUrl).
+   * Rotate the signing secret for an existing trigger. Returns ONLY the
+   * new one-time secret — the public webhookId/ingressUrl are stable
+   * across a rotate, so the caller reuses the existing record's values.
    */
-  rotate(triggerId: string, webhookId: string): Promise<TriggerProvisionResult>;
+  rotate(triggerId: string, webhookId: string): Promise<TriggerRotateResult>;
   /** Tear down the public ingress when a trigger is deleted. */
   deprovision(triggerId: string, webhookId: string): Promise<void>;
 }
@@ -64,10 +65,13 @@ export class SelfHostTriggerProvisioner implements TriggerProvisioner {
     return this.buildResult(generateWebhookId());
   }
 
-  async rotate(_triggerId: string, webhookId: string): Promise<TriggerProvisionResult> {
+  async rotate(_triggerId: string, webhookId: string): Promise<TriggerRotateResult> {
     // Same public webhookId / URL, new secret (overwrites the stored one,
-    // invalidating signatures made with the old secret).
-    return this.buildResult(webhookId);
+    // invalidating signatures made with the old secret). Only the secret
+    // changes across a rotate, so return it alone.
+    const secret = generateSecret();
+    await this.secretStore.put(webhookId, secret);
+    return { secret };
   }
 
   async deprovision(_triggerId: string, webhookId: string): Promise<void> {
@@ -81,20 +85,30 @@ const RegisterWebhookResponseSchema = z.object({
   secret: z.string().min(1),
 });
 
+// rotate-webhook-secret returns ONLY the new secret — webhookId/ingressUrl
+// are stable across a rotate (the route never re-issues them).
+const RotateWebhookResponseSchema = z.object({
+  secret: z.string().min(1),
+});
+
 export interface CloudTriggerProvisionerOptions {
   internalUrl: string;
   hmacKey: string;
   workspaceId: string;
+  accountId: string;
   logger: Logger;
   fetchImpl?: typeof fetch;
 }
 
 /**
- * Cloud provisioner: HMAC-POSTs the lifecycle-worker register/rotate/
- * deregister routes. The control plane generates + stores the secret and
- * owns the global `webhook-route#<webhookId>` → triggerId map; the daemon
- * persists only `ingressUrl` + `secretFingerprint` and passes the
- * one-time secret straight through to the create/rotate RPC response.
+ * Cloud provisioner: HMAC-POSTs the auth-service `/api/auth-internal/*`
+ * register/rotate/deregister routes (VERIFY-3.5d #4 — registration is
+ * co-located in auth, the service that owns the ingress + secret store,
+ * so no cross-service KMS grant is needed). The control plane generates +
+ * stores the secret and owns the global `webhook-route#<webhookId>` →
+ * triggerId map; the daemon persists only `ingressUrl` +
+ * `secretFingerprint` and passes the one-time secret straight through to
+ * the create/rotate RPC response.
  *
  * Reuses `cloudHmacFetch` (same primitive as schedule register) but needs
  * the response body, so it performs the signed fetch and parses the JSON
@@ -104,6 +118,7 @@ export class CloudTriggerProvisioner implements TriggerProvisioner {
   private readonly internalUrl: string;
   private readonly hmacKey: string;
   private readonly workspaceId: string;
+  private readonly accountId: string;
   private readonly logger: Logger;
   private readonly fetchImpl: typeof fetch;
 
@@ -111,6 +126,7 @@ export class CloudTriggerProvisioner implements TriggerProvisioner {
     this.internalUrl = options.internalUrl.replace(/\/$/, "");
     this.hmacKey = options.hmacKey;
     this.workspaceId = options.workspaceId;
+    this.accountId = options.accountId;
     this.logger = options.logger.child({ component: "cloud-trigger-provisioner" });
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -135,18 +151,21 @@ export class CloudTriggerProvisioner implements TriggerProvisioner {
   }
 
   async provision(triggerId: string): Promise<TriggerProvisionResult> {
-    const raw = await this.post("/api/lifecycle-internal/register-webhook", { triggerId });
+    const raw = await this.post("/api/auth-internal/register-webhook", {
+      accountId: this.accountId,
+      triggerId,
+    });
     return RegisterWebhookResponseSchema.parse(raw);
   }
 
-  async rotate(triggerId: string, webhookId: string): Promise<TriggerProvisionResult> {
-    const raw = await this.post("/api/lifecycle-internal/rotate-webhook", { triggerId, webhookId });
-    return RegisterWebhookResponseSchema.parse(raw);
+  async rotate(triggerId: string, webhookId: string): Promise<TriggerRotateResult> {
+    const raw = await this.post("/api/auth-internal/rotate-webhook-secret", { triggerId, webhookId });
+    return RotateWebhookResponseSchema.parse(raw);
   }
 
   async deprovision(triggerId: string, webhookId: string): Promise<void> {
     await cloudHmacFetch({
-      url: `${this.internalUrl}/api/lifecycle-internal/deregister-webhook`,
+      url: `${this.internalUrl}/api/auth-internal/deregister-webhook`,
       hmacKey: this.hmacKey,
       body: JSON.stringify({ workspaceId: this.workspaceId, triggerId, webhookId }),
       logger: this.logger,

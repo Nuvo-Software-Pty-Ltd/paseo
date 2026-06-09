@@ -76,3 +76,14 @@ export interface TriggerProvisionResult {
   ingressUrl: string;
   secret: string;
 }
+
+/**
+ * Result of rotating a trigger's signing secret. Only the new `secret`
+ * changes — the public `webhookId` and `ingressUrl` are stable across a
+ * rotate, so they are NOT re-returned (the cloud auth `rotate-webhook-
+ * secret` route returns `{secret}` only; the caller reuses the existing
+ * record's webhookId/ingressUrl).
+ */
+export interface TriggerRotateResult {
+  secret: string;
+}

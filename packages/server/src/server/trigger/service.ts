@@ -219,16 +219,17 @@ export class TriggerService {
 
   async rotateSecret(id: string): Promise<TriggerWithSecret> {
     const trigger = await this.inspect(id);
-    const rotated = await this.provisioner.rotate(trigger.id, trigger.webhookId);
+    // Rotate changes ONLY the secret; the public webhookId/ingressUrl are
+    // stable, so reuse the existing record's values (the cloud
+    // rotate-webhook-secret route returns {secret} only — VERIFY-3.5d #4).
+    const { secret } = await this.provisioner.rotate(trigger.id, trigger.webhookId);
     const updated: WebhookTrigger = {
       ...trigger,
-      webhookId: rotated.webhookId,
-      ingressUrl: rotated.ingressUrl,
-      secretFingerprint: fingerprint(rotated.secret),
+      secretFingerprint: fingerprint(secret),
       updatedAt: this.now().toISOString(),
     };
     await this.store.put(updated);
-    return { trigger: updated, secret: rotated.secret, ingressUrl: rotated.ingressUrl };
+    return { trigger: updated, secret, ingressUrl: trigger.ingressUrl ?? "" };
   }
 
   /**

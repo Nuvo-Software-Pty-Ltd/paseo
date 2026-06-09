@@ -1333,21 +1333,29 @@ function buildTriggerService(
   },
 ): TriggerService {
   const { logger } = deps;
+  // Registration is auth-owned (VERIFY-3.5d #4): the provisioner HMAC-POSTs
+  // the `/api/auth-internal/*` register/rotate/deregister routes, so it
+  // needs the auth-internal URL. Fall back to the lifecycle URL only if
+  // auth's is unset (it is the one set on the cloud daemon today).
   const cloudInternalUrl =
-    process.env.ORCHESTRA_LIFECYCLE_INTERNAL_URL?.trim() ||
-    process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim();
+    process.env.ORCHESTRA_AUTH_INTERNAL_URL?.trim() ||
+    process.env.ORCHESTRA_LIFECYCLE_INTERNAL_URL?.trim();
   const internalHmacKey = process.env.ORCHESTRA_INTERNAL_HMAC_KEY?.trim();
   const workspaceId = isPaseoCloudMode() ? process.env.PASEO_WORKSPACE_ID?.trim() : undefined;
-  const useCloudProvisioner = Boolean(cloudInternalUrl && internalHmacKey && workspaceId);
+  const accountId = isPaseoCloudMode() ? process.env.PASEO_ACCOUNT_ID?.trim() : undefined;
+  const useCloudProvisioner = Boolean(
+    cloudInternalUrl && internalHmacKey && workspaceId && accountId,
+  );
   const secretStore = useCloudProvisioner
     ? null
     : new FileBackedTriggerSecretStore(path.join(deps.paseoHome, "triggers", "secrets"));
   const provisioner: TriggerProvisioner =
-    useCloudProvisioner && cloudInternalUrl && internalHmacKey && workspaceId
+    useCloudProvisioner && cloudInternalUrl && internalHmacKey && workspaceId && accountId
       ? new CloudTriggerProvisioner({
           internalUrl: cloudInternalUrl,
           hmacKey: internalHmacKey,
           workspaceId,
+          accountId,
           logger,
         })
       : new SelfHostTriggerProvisioner(

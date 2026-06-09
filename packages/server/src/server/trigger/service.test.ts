@@ -18,9 +18,7 @@ function fakeProvisioner(): TriggerProvisioner {
       ingressUrl: "https://host/hooks/wh_public",
       secret: `secret-${n++}`,
     })),
-    rotate: vi.fn(async (_id: string, webhookId: string) => ({
-      webhookId,
-      ingressUrl: `https://host/hooks/${webhookId}`,
+    rotate: vi.fn(async () => ({
       secret: `rotated-${n++}`,
     })),
     deprovision: vi.fn(async () => undefined),
