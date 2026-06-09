@@ -1372,7 +1372,7 @@ function buildTriggerService(
     ? null
     : new FileBackedTriggerSecretStore(path.join(deps.paseoHome, "triggers", "secrets"));
   const provisioner: TriggerProvisioner =
-    useCloudProvisioner && cloudInternalUrl && internalHmacKey && workspaceId && accountId
+    cloudInternalUrl && internalHmacKey && workspaceId && accountId
       ? new CloudTriggerProvisioner({
           internalUrl: cloudInternalUrl,
           hmacKey: internalHmacKey,

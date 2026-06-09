@@ -159,7 +159,10 @@ export class CloudTriggerProvisioner implements TriggerProvisioner {
   }
 
   async rotate(triggerId: string, webhookId: string): Promise<TriggerRotateResult> {
-    const raw = await this.post("/api/auth-internal/rotate-webhook-secret", { triggerId, webhookId });
+    const raw = await this.post("/api/auth-internal/rotate-webhook-secret", {
+      triggerId,
+      webhookId,
+    });
     return RotateWebhookResponseSchema.parse(raw);
   }
 
