@@ -44,7 +44,7 @@ function AutomationsListScreenContent({ serverId }: { serverId: string }) {
 
   const handlePressRow = useCallback(
     (automation: Automation) => {
-      router.push(buildHostAutomationDetailRoute(serverId, automation.id));
+      router.push(buildHostAutomationDetailRoute(serverId, automation.id, automation.kind));
     },
     [serverId],
   );

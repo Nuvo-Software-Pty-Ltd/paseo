@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHostAgentDetailRoute,
+  buildHostAutomationDetailRoute,
   buildHostRootRoute,
   buildHostWorkspaceOpenRoute,
   buildHostWorkspaceRoute,
@@ -133,6 +134,25 @@ describe("workspace route parsing", () => {
     const encoded = encodeWorkspaceIdForPathSegment(id);
     expect(encoded).toBe("b64_dGVhbS9zZXR1cDppZCMx");
     expect(decodeWorkspaceIdFromPathSegment(encoded)).toBe("team/setup:id#1");
+  });
+});
+
+describe("buildHostAutomationDetailRoute", () => {
+  it("omits the kind query param when kind is not provided", () => {
+    expect(buildHostAutomationDetailRoute("local", "auto-1")).toBe("/h/local/automations/auto-1");
+  });
+
+  it("carries the kind as a query param so the detail screen inspects directly", () => {
+    expect(buildHostAutomationDetailRoute("local", "auto-1", "webhook")).toBe(
+      "/h/local/automations/auto-1?kind=webhook",
+    );
+    expect(buildHostAutomationDetailRoute("local", "auto-1", "schedule")).toBe(
+      "/h/local/automations/auto-1?kind=schedule",
+    );
+  });
+
+  it("returns root when the id is empty", () => {
+    expect(buildHostAutomationDetailRoute("local", "", "webhook")).toBe("/");
   });
 });
 
