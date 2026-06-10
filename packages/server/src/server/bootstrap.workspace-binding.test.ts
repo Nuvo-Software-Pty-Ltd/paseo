@@ -7,25 +7,39 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { createRequireWorkspaceMiddleware } from "./auth.js";
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
+import { createInternalRoutes } from "./internal-routes.js";
+import type { ScheduleService } from "./schedule/service.js";
+import type { ScheduleStore } from "./schedule/store.js";
 
 // T-10 / T-11 (synthesis carryover): a regression suite asserting that
 // the daemon's `requireWorkspaceAuth` middleware rejects cross-workspace
-// JWTs at every HTTP route the cloud exposes. The D-2 ACCEPTANCE post-
-// mortem (LEARNINGS.md 2026-05-25 (later)) caught a missed workspace_id
+// JWTs at every JWT-authed HTTP route the cloud exposes. The D-2 ACCEPTANCE
+// post-mortem (LEARNINGS.md 2026-05-25 (later)) caught a missed workspace_id
 // binding via probe 7 on `/api/status`; PR #5 added the binding. This
-// suite extends the coverage to:
+// suite covers:
 //
 //   - /api/status (probe 7 baseline — already validated in D-2)
 //   - /api/files/download (T-10 acceptance criterion — D-3's file
 //     download surface)
-//   - /api/files/download/internal (T-16 surface)
 //   - /mcp/agents POST + GET + DELETE (T-10 acceptance — the spawned
 //     agent MCP callback route)
-//   - /api/internal/schedule-fire (T-15 surface)
 //
 // The WS-upgrade variant of probe 7 lives in cloud-auth.test.ts which
 // directly tests the JWT callback. The middleware test here is the
 // HTTP-side complement — both layers must reject cross-tenant traffic.
+//
+// D-3.5d — the HMAC-authed internal routes (`/api/internal/*` and
+// `/api/files/download/internal/*`) are DELIBERATELY exempt from the
+// workspace-token gate (shouldBypassBearerAuth bypasses them), because their
+// real auth boundary is the per-request internal HMAC, not a workspace JWT —
+// the legitimate cloud caller forwards an HMAC and NO JWT. The two tests for
+// those surfaces below therefore mount the REAL internal-routes HMAC layer and
+// assert it rejects any request lacking a valid internal HMAC (401), regardless
+// of the JWT it carries. Their cross-tenant defense-in-depth — the in-handler
+// expectedWorkspaceId check once a valid HMAC IS present — is covered by
+// internal-routes-schedule-fire.test.ts and internal-routes-webhook-fire.test.ts
+// ("cross-workspace … → 403"), and the bypass-reachability path by
+// internal-routes-auth-bypass.e2e.test.ts.
 
 const silentLogger = pino({ level: "silent" });
 
@@ -83,9 +97,6 @@ async function buildFixture(): Promise<TestFixture> {
   app.get("/api/files/download/:tokenId", (req, res) => {
     res.status(200).json({ tokenId: req.params.tokenId });
   });
-  app.get("/api/files/download/internal/:tokenId", (req, res) => {
-    res.status(200).json({ tokenId: req.params.tokenId });
-  });
   app.get("/mcp/agents", (_req, res) => {
     res.status(200).json({ ok: true });
   });
@@ -95,9 +106,24 @@ async function buildFixture(): Promise<TestFixture> {
   app.delete("/mcp/agents", (_req, res) => {
     res.status(200).json({ ok: true });
   });
-  app.post("/api/internal/schedule-fire", (_req, res) => {
-    res.status(200).json({ ok: true });
-  });
+
+  // D-3.5d — the HMAC-authed internal routes bypass the workspace gate, so we
+  // mount the REAL internal-routes layer here (mirroring bootstrap's late
+  // mount). A request reaching these handlers without a valid internal HMAC is
+  // rejected by `verifyHmac` (401), which is the actual auth boundary. The
+  // service/dep stubs only matter once the HMAC passes — never reached for the
+  // no-HMAC cross-tenant probes below.
+  app.use(
+    createInternalRoutes({
+      hmacKey: "test-internal-hmac-key",
+      logger: silentLogger,
+      scheduleService: {} as unknown as ScheduleService,
+      scheduleStore: {} as unknown as ScheduleStore,
+      expectedWorkspaceId: SELF_WORKSPACE,
+      authInternalUrl: "http://unused.example",
+      workspaceRoot: "/workspace/ws_self",
+    }),
+  );
 
   const server = await new Promise<HttpServer>((resolve) => {
     const s = createHttpServer(app);
@@ -157,7 +183,11 @@ describe("workspace-binding middleware — defense-in-depth at every HTTP route"
     expect(response.status).toBe(401);
   });
 
-  test("/api/files/download/internal/:tokenId — cross-tenant JWT rejected (T-16 surface)", async () => {
+  test("/api/files/download/internal/:tokenId — gated by internal HMAC, not the JWT (T-16 surface)", async () => {
+    // This route bypasses the workspace-token gate (D-3.5d): a JWT alone — even
+    // a cross-tenant one — cannot reach the file stream. With no internal HMAC
+    // header, the route's own `verifyHmac` rejects with 401. The JWT is
+    // irrelevant; the HMAC is the boundary.
     const crossTenant = await signWorkspaceJwt(fixture.privateKey, {
       account_id: SELF_ACCOUNT,
       workspace_id: OTHER_WORKSPACE,
@@ -223,11 +253,14 @@ describe("workspace-binding middleware — defense-in-depth at every HTTP route"
     expect(response.status).toBe(200);
   });
 
-  test("/api/internal/schedule-fire (T-15) — cross-tenant JWT rejected with 401", async () => {
-    // T-15 mounts under /api/internal/* which is HMAC-validated in
-    // production; this test asserts the workspace-binding layer
-    // additionally rejects any JWT-bearing request whose workspace_id
-    // claim does not match the daemon's binding (defense-in-depth).
+  test("/api/internal/schedule-fire (T-15) — gated by internal HMAC, not the JWT", async () => {
+    // T-15 mounts under /api/internal/*, which is HMAC-validated and
+    // DELIBERATELY exempt from the workspace-token gate (D-3.5d) — the
+    // legitimate lifecycle-worker caller forwards an internal HMAC and no JWT.
+    // A JWT-bearing request (even cross-tenant) with no internal HMAC is
+    // rejected 401 by the route's own `verifyHmac`. Cross-tenant defense once a
+    // valid HMAC is present (the in-handler expectedWorkspaceId check) is
+    // covered in internal-routes-schedule-fire.test.ts.
     const crossTenant = await signWorkspaceJwt(fixture.privateKey, {
       account_id: SELF_ACCOUNT,
       workspace_id: OTHER_WORKSPACE,
@@ -238,7 +271,7 @@ describe("workspace-binding middleware — defense-in-depth at every HTTP route"
         Authorization: `Bearer ${crossTenant}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ workspaceId: SELF_WORKSPACE }),
+      body: JSON.stringify({ scheduleId: "sched_x" }),
     });
     expect(response.status).toBe(401);
   });
