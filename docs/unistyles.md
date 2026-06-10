@@ -196,6 +196,12 @@ Keep layout and typography in `StyleSheet.create`; move only the stale theme-dep
 
 The same rule applies to bottom-sheet component props such as `backgroundStyle` and `handleIndicatorStyle`: they are library props, not the direct React Native `style` prop Unistyles registers. Prefer a custom `backgroundComponent` that calls `useUnistyles()`, or pass a small inline object from the hook theme.
 
+## Bottom Sheets Don't Present on Web
+
+`@gorhom/bottom-sheet`'s `BottomSheetModal.present()` does **not** reliably present on react-native-web — on **mobile Safari** especially, the call succeeds (state flips to open) but the sheet never appears. Any compact picker that renders a gorhom sheet looks dead on the deployed web app: the trigger taps, but nothing opens.
+
+So gate the gorhom sheet to **native only**, and render an RN `Modal` on **web + compact**. RN `Modal` is the same web-proven primitive the desktop popovers already use. The shared `Combobox` does this via `resolveComboboxPresentation()` (`native-sheet` | `web-modal` | `desktop`) in `components/ui/combobox.tsx` — follow that split for any new compact sheet rather than reaching for `useIsCompactFormFactor()` alone (which is true on mobile web too, and would route web users into the broken gorhom path).
+
 ## Memoized Style Objects
 
 When a third-party library receives a plain style object, it is outside Unistyles' native tracking path. Make sure any memo that builds that style object depends on the actual theme values it reads.
