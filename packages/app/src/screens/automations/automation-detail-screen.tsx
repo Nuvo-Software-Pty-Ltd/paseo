@@ -5,8 +5,11 @@ import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ScheduleRun, StoredSchedule } from "@server/server/schedule/types";
-import type { WebhookTrigger } from "@server/server/trigger/types";
+import type { AutomationKind } from "@/lib/automations/automation-model";
+import {
+  type AutomationDetailRecord,
+  resolveAutomationDetail,
+} from "@/lib/automations/automation-detail-model";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
@@ -38,37 +41,39 @@ function automationDetailQueryKey(serverId: string, automationId: string) {
   return ["automations", "detail", serverId, automationId] as const;
 }
 
-function detailStatusLabel(detail: DetailRecord): string {
+function detailStatusLabel(detail: AutomationDetailRecord): string {
   if (detail.kind === "schedule") {
     return detail.record.status;
   }
   return detail.record.enabled ? "active" : "disabled";
 }
 
-type DetailRecord =
-  | { kind: "schedule"; record: StoredSchedule; runs: ScheduleRun[] }
-  | { kind: "webhook"; record: WebhookTrigger; runs: ScheduleRun[] };
-
 export function AutomationDetailScreen({
   serverId,
   automationId,
+  kind,
 }: {
   serverId: string;
   automationId: string;
+  kind?: AutomationKind;
 }) {
   const isFocused = useIsFocused();
   if (!isFocused) {
     return <View style={styles.container} />;
   }
-  return <AutomationDetailScreenContent serverId={serverId} automationId={automationId} />;
+  return (
+    <AutomationDetailScreenContent serverId={serverId} automationId={automationId} kind={kind} />
+  );
 }
 
 function AutomationDetailScreenContent({
   serverId,
   automationId,
+  kind,
 }: {
   serverId: string;
   automationId: string;
+  kind?: AutomationKind;
 }) {
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
@@ -82,36 +87,17 @@ function AutomationDetailScreenContent({
     ingressUrl: string | null;
   } | null>(null);
 
-  // The id alone does not tell us the kind — try schedule first, fall back to
-  // webhook (only if the capability is present).
+  // The kind (carried from the list row) tells us which store to inspect. For
+  // kind-less deep links the resolver probes schedule first, falling through to
+  // webhook only on a genuine not-found — see `resolveAutomationDetail`.
   const query = useQuery({
     queryKey: automationDetailQueryKey(serverId, automationId),
     enabled: Boolean(serverId && client && isConnected),
-    queryFn: async (): Promise<DetailRecord> => {
+    queryFn: async (): Promise<AutomationDetailRecord> => {
       if (!client) {
         throw new Error("Host is not connected");
       }
-      const scheduleResult = await client.scheduleInspect({ id: automationId });
-      if (scheduleResult.schedule) {
-        const logs = await client.scheduleLogs({ id: automationId });
-        return {
-          kind: "schedule",
-          record: scheduleResult.schedule,
-          runs: logs.runs ?? [],
-        };
-      }
-      if (webhookSupported) {
-        const triggerResult = await client.triggerInspect({ id: automationId });
-        if (triggerResult.trigger) {
-          const logs = await client.triggerLogs({ id: automationId });
-          return {
-            kind: "webhook",
-            record: triggerResult.trigger,
-            runs: logs.runs ?? [],
-          };
-        }
-      }
-      throw new Error("Automation not found");
+      return resolveAutomationDetail({ client, automationId, kind, webhookSupported });
     },
   });
 
@@ -255,13 +241,14 @@ function AutomationDetailScreenContent({
     return (
       <View style={styles.container}>
         <MenuHeader title="Automation" />
-        <View style={styles.body}>
+        {/* Scrollable so the rotated-secret reveal reaches Done on mobile. */}
+        <ScrollView contentContainerStyle={styles.body}>
           <WebhookSecretReveal
             secret={rotatedSecret.secret}
             ingressUrl={rotatedSecret.ingressUrl}
             onDismiss={handleDismissRotated}
           />
-        </View>
+        </ScrollView>
       </View>
     );
   }

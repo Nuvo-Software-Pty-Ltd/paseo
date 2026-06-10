@@ -293,14 +293,17 @@ export function AutomationCreateForm({
   }, [kind, submitSchedule, submitWebhook]);
 
   if (secretReveal) {
+    // Mirror the main form branch so the reveal (secret + URL + "How to call
+    // it" + curl + Done) scrolls on a narrow viewport — otherwise Done is
+    // unreachable on mobile. See WebhookSecretReveal.
     return (
-      <View style={styles.container}>
+      <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         <WebhookSecretReveal
           secret={secretReveal.secret}
           ingressUrl={secretReveal.ingressUrl}
           onDismiss={onClose}
         />
-      </View>
+      </ScrollView>
     );
   }
 

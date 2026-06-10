@@ -355,13 +355,20 @@ export function buildHostAutomationsRoute(serverId: string) {
   return `${base}/automations` as const;
 }
 
-export function buildHostAutomationDetailRoute(serverId: string, automationId: string) {
+// `kind`, when known, is carried as a query param so the detail screen inspects
+// the right daemon store directly instead of probing. Deep links may omit it.
+export function buildHostAutomationDetailRoute(
+  serverId: string,
+  automationId: string,
+  kind?: "schedule" | "webhook",
+) {
   const base = buildHostRootRoute(serverId);
   const normalizedAutomationId = trimNonEmpty(automationId);
   if (base === "/" || !normalizedAutomationId) {
     return "/" as const;
   }
-  return `${base}/automations/${encodeSegment(normalizedAutomationId)}` as const;
+  const path = `${base}/automations/${encodeSegment(normalizedAutomationId)}` as const;
+  return kind ? (`${path}?kind=${kind}` as const) : path;
 }
 
 export function buildHostOpenProjectRoute(serverId: string) {
