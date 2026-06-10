@@ -43,6 +43,7 @@ import {
   IsolatedBottomSheetModal,
   useIsolatedBottomSheetVisibility,
 } from "./isolated-bottom-sheet-modal";
+import { resolveComboboxPresentation } from "./combobox-presentation";
 
 const IS_WEB = isWeb;
 
@@ -1008,6 +1009,98 @@ function MobileComboboxBody(props: MobileBodyProps): ReactElement {
   );
 }
 
+interface WebMobileBodyProps {
+  isOpen: boolean;
+  handleClose: () => void;
+  titleColor: string;
+  title: string;
+  stickyHeader: ReactNode;
+  searchable: boolean;
+  hasChildren: boolean;
+  searchPlaceholder: string;
+  searchQuery: string;
+  setSearchQueryWithCallback: (query: string) => void;
+  handleSubmitSearch: () => void;
+  orderedVisibleOptions: ComboboxOption[];
+  value: string;
+  activeIndex: number;
+  emptyText: string;
+  handleSelect: (id: string) => void;
+  renderOption: RenderOptionFn | undefined;
+  children: ReactNode;
+}
+
+// Compact picker for web (mobile Safari / narrow browser). It mirrors
+// MobileComboboxBody — same title, search, options, select, backdrop dismiss —
+// but renders through an RN `Modal` instead of @gorhom/bottom-sheet, because the
+// gorhom BottomSheetModal does not reliably present on react-native-web (the tap
+// flips isOpen but no sheet appears). RN `Modal` is the same web-proven primitive
+// the desktop popover uses, so web users get a working bottom sheet while native
+// keeps the gesture-driven gorhom sheet. See ./combobox-presentation.ts.
+function WebMobileComboboxBody(props: WebMobileBodyProps): ReactElement {
+  const comboboxTitleStyle = useMemo(
+    () => [styles.comboboxTitle, { color: props.titleColor }],
+    [props.titleColor],
+  );
+
+  const body = props.hasChildren ? (
+    props.children
+  ) : (
+    <OptionsList
+      options={props.orderedVisibleOptions}
+      value={props.value}
+      activeIndex={props.activeIndex}
+      emptyText={props.emptyText}
+      onSelect={props.handleSelect}
+      renderOption={props.renderOption}
+    />
+  );
+
+  return (
+    <Modal
+      transparent
+      animationType="fade"
+      visible={props.isOpen}
+      onRequestClose={props.handleClose}
+    >
+      <View style={styles.webMobileOverlay}>
+        <Pressable
+          style={styles.desktopBackdrop}
+          onPress={props.handleClose}
+          accessibilityLabel="Dismiss"
+        />
+        <View testID="combobox-mobile-web-container" style={styles.webMobileSheet}>
+          <View style={styles.webMobileHandle} />
+          <View style={styles.bottomSheetHeader}>
+            <Text key={props.titleColor} style={comboboxTitleStyle}>
+              {props.title}
+            </Text>
+          </View>
+          {props.stickyHeader}
+          {!props.hasChildren && props.searchable ? (
+            <SearchInput
+              placeholder={props.searchPlaceholder}
+              value={props.searchQuery}
+              onChangeText={props.setSearchQueryWithCallback}
+              onSubmitEditing={props.handleSubmitSearch}
+              autoFocus={false}
+              useBottomSheetInput={false}
+            />
+          ) : null}
+          <ScrollView
+            contentContainerStyle={styles.comboboxScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            style={styles.webMobileScroll}
+          >
+            {body}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 interface DesktopBodyProps {
   isOpen: boolean;
   handleClose: () => void;
@@ -1201,6 +1294,10 @@ export function Combobox({
 }: ComboboxProps): ReactElement | null {
   const { theme } = useUnistyles();
   const isMobile = useIsCompactFormFactor();
+  const presentation = resolveComboboxPresentation({
+    isCompact: isMobile,
+    isNativeRuntime: isNative,
+  });
   const titleColor = theme.colors.foreground;
   const effectiveOptionsPosition = resolveEffectiveOptionsPosition(isMobile, optionsPosition);
   const isDesktopAboveSearch = resolveIsDesktopAboveSearch(isMobile, effectiveOptionsPosition);
@@ -1307,7 +1404,9 @@ export function Combobox({
     handleSheetDismiss,
   } = useIsolatedBottomSheetVisibility({
     visible: isOpen,
-    isEnabled: isMobile,
+    // Only the native gorhom sheet is imperatively presented. Web-compact uses an
+    // RN Modal (WebMobileComboboxBody), so it must NOT try to present the gorhom sheet.
+    isEnabled: presentation === "native-sheet",
     onClose: handleClose,
   });
 
@@ -1455,7 +1554,7 @@ export function Combobox({
   const effectiveSearchPlaceholder = searchPlaceholder ?? placeholder;
   const hasChildren = Boolean(children);
 
-  if (isMobile) {
+  if (presentation === "native-sheet") {
     return (
       <MobileComboboxBody
         bottomSheetRef={bottomSheetRef}
@@ -1481,6 +1580,32 @@ export function Combobox({
       >
         {children}
       </MobileComboboxBody>
+    );
+  }
+
+  if (presentation === "web-modal") {
+    return (
+      <WebMobileComboboxBody
+        isOpen={isOpen}
+        handleClose={handleClose}
+        titleColor={titleColor}
+        title={title}
+        stickyHeader={stickyHeader}
+        searchable={searchable}
+        hasChildren={hasChildren}
+        searchPlaceholder={effectiveSearchPlaceholder}
+        searchQuery={searchQuery}
+        setSearchQueryWithCallback={setSearchQueryWithCallback}
+        handleSubmitSearch={handleSubmitSearch}
+        orderedVisibleOptions={orderedVisibleOptions}
+        value={value}
+        activeIndex={activeIndex}
+        emptyText={emptyText}
+        handleSelect={handleSelect}
+        renderOption={renderOption}
+      >
+        {children}
+      </WebMobileComboboxBody>
     );
   }
 
@@ -1621,6 +1746,30 @@ const styles = StyleSheet.create((theme) => ({
     paddingBottom: theme.spacing[8],
     paddingHorizontal: theme.spacing[2],
     paddingTop: theme.spacing[1],
+  },
+  webMobileOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+  },
+  webMobileSheet: {
+    backgroundColor: theme.colors.surface0,
+    borderTopLeftRadius: theme.borderRadius["2xl"],
+    borderTopRightRadius: theme.borderRadius["2xl"],
+    maxHeight: "90%",
+    paddingTop: theme.spacing[2],
+    overflow: "hidden",
+  },
+  webMobileScroll: {
+    flexShrink: 1,
+    minHeight: 0,
+  },
+  webMobileHandle: {
+    alignSelf: "center",
+    width: 36,
+    height: 4,
+    borderRadius: theme.borderRadius.full,
+    backgroundColor: theme.colors.palette.zinc[600],
+    marginBottom: theme.spacing[2],
   },
   desktopOverlay: {
     flex: 1,
