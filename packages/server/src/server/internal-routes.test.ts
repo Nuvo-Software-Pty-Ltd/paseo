@@ -214,6 +214,119 @@ describe("POST /api/internal/clone-repo", () => {
   });
 });
 
+// Reproduces the bootstrap double-mount: an EARLY clone-repo-only mount
+// (no services) followed by a LATE service-equipped mount on the SAME app.
+// Before the fix the early mount registered schedule-fire/webhook-fire
+// unconditionally and won Express's matcher, returning its 503 "not
+// configured" guard and shadowing the late handler. After the fix the early
+// mount no longer registers the gated routes, so the late, service-equipped
+// handler is reached.
+function createDoubleMountedApp(services: {
+  scheduleService?: unknown;
+  scheduleStore?: unknown;
+  triggerService?: unknown;
+  triggerStore?: unknown;
+}) {
+  const app = express();
+  // EARLY mount — clone-repo only, as bootstrap does pre-service.
+  app.use(createInternalRoutes({ hmacKey: TEST_HMAC_KEY, logger }));
+  // LATE mount — services injected, as bootstrap's mountLateInternalRoutes does.
+  app.use(
+    createInternalRoutes({
+      hmacKey: TEST_HMAC_KEY,
+      logger,
+      ...(services as object),
+    } as never),
+  );
+  return app;
+}
+
+describe("early/late double-mount shadow — webhook-fire", () => {
+  it("valid HMAC + known trigger reaches the real handler and fires (not 503)", async () => {
+    const fire = vi.fn(async () => {});
+    const trigger = { id: "trg_1", cloudOwnerWorkspaceId: null, cloudOwnerAccountId: null };
+    const app = createDoubleMountedApp({
+      triggerService: { fire },
+      triggerStore: { get: vi.fn(async () => trigger) },
+    });
+    const body = JSON.stringify({ triggerId: "trg_1", payload: { hello: "world" } });
+
+    const res = await makeRequest(app, {
+      path: "/api/internal/webhook-fire",
+      headers: { "X-Orchestra-Internal-HMAC": signBody(body) },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(fire).toHaveBeenCalledTimes(1);
+  });
+
+  it("bad HMAC returns 401 (past the 503 'not configured' shadow)", async () => {
+    const fire = vi.fn(async () => {});
+    const app = createDoubleMountedApp({
+      triggerService: { fire },
+      triggerStore: { get: vi.fn(async () => ({ id: "trg_1" })) },
+    });
+    const body = JSON.stringify({ triggerId: "trg_1" });
+
+    const res = await makeRequest(app, {
+      path: "/api/internal/webhook-fire",
+      headers: {
+        "X-Orchestra-Internal-HMAC":
+          "0000000000000000000000000000000000000000000000000000000000000000",
+      },
+      body,
+    });
+
+    expect(res.status).toBe(401);
+    expect(fire).not.toHaveBeenCalled();
+  });
+});
+
+describe("early/late double-mount shadow — schedule-fire", () => {
+  it("valid HMAC + known active schedule reaches the real handler and fires (not 503)", async () => {
+    const runOnce = vi.fn(async () => {});
+    const schedule = { status: "active", cloudOwnerWorkspaceId: null, cloudOwnerAccountId: null };
+    const app = createDoubleMountedApp({
+      scheduleService: { runOnce },
+      scheduleStore: { get: vi.fn(async () => schedule) },
+    });
+    const body = JSON.stringify({ scheduleId: "sch_1" });
+
+    const res = await makeRequest(app, {
+      path: "/api/internal/schedule-fire",
+      headers: { "X-Orchestra-Internal-HMAC": signBody(body) },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(runOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it("bad HMAC returns 401 (past the 503 'not configured' shadow)", async () => {
+    const runOnce = vi.fn(async () => {});
+    const app = createDoubleMountedApp({
+      scheduleService: { runOnce },
+      scheduleStore: { get: vi.fn(async () => ({ status: "active" })) },
+    });
+    const body = JSON.stringify({ scheduleId: "sch_1" });
+
+    const res = await makeRequest(app, {
+      path: "/api/internal/schedule-fire",
+      headers: {
+        "X-Orchestra-Internal-HMAC":
+          "0000000000000000000000000000000000000000000000000000000000000000",
+      },
+      body,
+    });
+
+    expect(res.status).toBe(401);
+    expect(runOnce).not.toHaveBeenCalled();
+  });
+});
+
 describe("module boundary", () => {
   it("createInternalRoutes is a function export", async () => {
     const mod = await import("./internal-routes.js");

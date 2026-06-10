@@ -274,9 +274,18 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
     }
   };
 
-  router.post("/api/internal/schedule-fire", (req, res) => {
-    void handleScheduleFire(req, res);
-  });
+  // Gate registration on the schedule services being present. bootstrap.ts
+  // mounts this router TWICE in cloud mode: an EARLY clone-repo-only mount
+  // (no services) and a LATE service-equipped mount. Registering the route
+  // unconditionally let the early mount win in Express's matcher and return
+  // its 503 "not configured" guard, shadowing the late handler. Gating means
+  // only the late, service-equipped mount owns this route. The handler keeps
+  // its defensive 503 check as belt-and-suspenders.
+  if (options.scheduleService && options.scheduleStore) {
+    router.post("/api/internal/schedule-fire", (req, res) => {
+      void handleScheduleFire(req, res);
+    });
+  }
 
   // D-3.5d — POST /api/internal/webhook-fire (HMAC-validated).
   //
@@ -341,9 +350,15 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
     }
   };
 
-  router.post("/api/internal/webhook-fire", (req, res) => {
-    void handleWebhookFire(req, res);
-  });
+  // Gated for the same early/late double-mount reason as schedule-fire above:
+  // only the late, trigger-service-equipped mount registers this route, so the
+  // early clone-repo-only mount can't shadow it with a 503. Defensive 503
+  // check inside the handler is kept as belt-and-suspenders.
+  if (options.triggerService && options.triggerStore) {
+    router.post("/api/internal/webhook-fire", (req, res) => {
+      void handleWebhookFire(req, res);
+    });
+  }
 
   // T-16 — GET /api/files/download/internal/:tokenId.
   //
@@ -490,9 +505,16 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
     streamFileForDownload(res, workspaceRoot, payload.filePath, tokenId);
   };
 
-  router.get("/api/files/download/internal/:tokenId", (req, res) => {
-    void handleDownloadInternal(req, res);
-  });
+  // Gated for the same early/late double-mount reason as the fire routes
+  // above: this download route needs authInternalUrl + workspaceRoot +
+  // expectedWorkspaceId (all injected only at the late mount), so registering
+  // it only when those deps are present keeps the early clone-repo-only mount
+  // from shadowing it with a 503. The handler keeps its defensive 503 check.
+  if (options.authInternalUrl && options.workspaceRoot && options.expectedWorkspaceId) {
+    router.get("/api/files/download/internal/:tokenId", (req, res) => {
+      void handleDownloadInternal(req, res);
+    });
+  }
 
   return router;
 }
