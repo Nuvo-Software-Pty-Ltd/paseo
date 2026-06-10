@@ -171,6 +171,28 @@ export function shouldBypassBearerAuth(method: string, path: string): boolean {
   if (path.startsWith("/hooks/")) {
     return true;
   }
+  // D-3.5d — internal service routes each verify their OWN per-request internal
+  // HMAC signature (`X-Orchestra-Internal-HMAC`) and re-check the bound
+  // PASEO_WORKSPACE_ID as defense-in-depth — see internal-routes.ts. They carry
+  // an internal HMAC, NOT a daemon password or workspace-token JWT, so the
+  // Bearer/workspace-token gate is the wrong boundary for them and must be
+  // bypassed: the HMAC is the real auth boundary. Without this, the LATE
+  // internal-routes mount (bootstrap.ts) — which sits BEHIND the auth
+  // middleware — 401s every webhook-fire/schedule-fire/download with "invalid
+  // workspace token". The early clone-repo mount escaped only by accident of
+  // being mounted before the middleware; this makes the bypass explicit and
+  // mount-order-independent. In cloud mode the proprietary ingress fails closed
+  // on a bad signature before forwarding; the daemon handlers fail closed too.
+  //
+  // Two prefixes cover the four HMAC-authed routes: clone-repo, schedule-fire
+  // and webhook-fire live under `/api/internal/`; the T-16 download redemption
+  // route is mounted at `/api/files/download/internal/:tokenId`. The latter
+  // prefix is deliberately specific so it does NOT match the workspace-token-
+  // authed `/api/files/download` query-param route (bootstrap.ts), which stays
+  // gated.
+  if (path.startsWith("/api/internal/") || path.startsWith("/api/files/download/internal/")) {
+    return true;
+  }
   return path === "/api/health";
 }
 

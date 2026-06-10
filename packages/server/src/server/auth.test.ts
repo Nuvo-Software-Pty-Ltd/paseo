@@ -9,6 +9,7 @@ import {
   hashDaemonPassword,
   isBearerTokenValidAsync,
   isBearerTokenValid,
+  shouldBypassBearerAuth,
 } from "./auth.js";
 
 const CORRECT_PASSWORD_HASH = "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW";
@@ -65,5 +66,35 @@ describe("daemon bearer validator", () => {
     // mutually exclusive in cloud vs on-host mode.
     expect(extractWsWorkspaceProtocol("paseo.bearer.token")).toBeNull();
     expect(extractWsWorkspaceToken("paseo.bearer.token")).toBeNull();
+  });
+});
+
+describe("shouldBypassBearerAuth", () => {
+  // D-3.5d — the HMAC-authed internal routes must escape BOTH the on-host
+  // Bearer gate and the cloud workspace-token gate (both early-return through
+  // this helper). They authenticate themselves with a per-request internal
+  // HMAC, so the password/JWT gate is the wrong boundary for them.
+  test("bypasses every HMAC-authed internal route", () => {
+    expect(shouldBypassBearerAuth("POST", "/api/internal/webhook-fire")).toBe(true);
+    expect(shouldBypassBearerAuth("POST", "/api/internal/schedule-fire")).toBe(true);
+    expect(shouldBypassBearerAuth("POST", "/api/internal/clone-repo")).toBe(true);
+    // The T-16 download-redemption route lives at /api/files/download/internal/
+    // (NOT under /api/internal/), and self-authenticates with an HMAC over the
+    // empty body, so it must bypass too.
+    expect(shouldBypassBearerAuth("GET", "/api/files/download/internal/tok_abc123")).toBe(true);
+  });
+
+  test("still bypasses /hooks/, OPTIONS, and /api/health", () => {
+    expect(shouldBypassBearerAuth("POST", "/hooks/wh_public")).toBe(true);
+    expect(shouldBypassBearerAuth("OPTIONS", "/api/anything")).toBe(true);
+    expect(shouldBypassBearerAuth("GET", "/api/health")).toBe(true);
+  });
+
+  test("does NOT bypass normal API routes or the workspace-token-authed download", () => {
+    expect(shouldBypassBearerAuth("GET", "/api/agents")).toBe(false);
+    expect(shouldBypassBearerAuth("POST", "/api/agents/create")).toBe(false);
+    // The query-param download (workspace-token authed) must stay gated — only
+    // its deeper /internal/ sibling self-HMACs.
+    expect(shouldBypassBearerAuth("GET", "/api/files/download")).toBe(false);
   });
 });
