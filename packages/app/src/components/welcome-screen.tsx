@@ -18,7 +18,7 @@ import { openExternalUrl } from "@/utils/open-external-url";
 import { isWeb, isNative } from "@/constants/platform";
 import { isSelfHostConnectionsEnabled } from "@/constants/feature-flags";
 import { filterWelcomeActions, type WelcomeActionKey } from "./welcome-actions";
-import { loginWithOAuthPopup } from "@/lib/orchestra-cloud-client";
+import { loginWithOrchestra } from "@/lib/orchestra-cloud-client";
 
 interface WelcomeAction {
   key: WelcomeActionKey;
@@ -225,7 +225,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
   }, [router]);
 
   const handleConnectOrchestra = useCallback(() => {
-    void loginWithOAuthPopup()
+    void loginWithOrchestra()
       .then(() => {
         router.push("/orchestra/setup");
         return undefined;
@@ -271,11 +271,23 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
         },
       ]
     : [
+        // "Connect to Orchestra" is the primary CTA on native too, mirroring
+        // web. On a native cloud build (EXPO_PUBLIC_SELF_HOST_ENABLED="false")
+        // filterWelcomeActions drops the self-host actions below, leaving this
+        // as the only action — so it must stay outside the self-host set.
+        {
+          key: "orchestra-cloud",
+          label: "Connect to Orchestra",
+          testID: "welcome-orchestra-cloud",
+          primary: true,
+          icon: Cloud,
+          onPress: handleConnectOrchestra,
+        },
         {
           key: "scan-qr",
           label: "Scan QR code",
           testID: "welcome-scan-qr",
-          primary: true,
+          primary: false,
           icon: QrCode,
           onPress: handleScanQr,
         },

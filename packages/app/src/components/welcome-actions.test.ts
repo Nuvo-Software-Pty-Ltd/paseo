@@ -12,6 +12,15 @@ const webActions: { key: WelcomeActionKey }[] = [
   { key: "paste-pairing-link" },
 ];
 
+// Mirrors the native welcome list: cloud login first, then the self-host
+// methods (including scan-qr, which only exists on native).
+const nativeActions: { key: WelcomeActionKey }[] = [
+  { key: "orchestra-cloud" },
+  { key: "scan-qr" },
+  { key: "direct-connection" },
+  { key: "paste-pairing-link" },
+];
+
 describe("isSelfHostWelcomeAction", () => {
   it("classifies the self-host connection methods", () => {
     expect(isSelfHostWelcomeAction("scan-qr")).toBe(true);
@@ -31,6 +40,16 @@ describe("filterWelcomeActions", () => {
 
   it("leaves only the cloud login action when self-host is disabled", () => {
     expect(filterWelcomeActions(webActions, false)).toEqual([{ key: "orchestra-cloud" }]);
+  });
+
+  it("leaves only the cloud login action on a native cloud build (self-host disabled)", () => {
+    // Guards the native cloud build: scan-qr/direct/paste are dropped, but
+    // "Connect to Orchestra" must remain so native sign-in is reachable.
+    expect(filterWelcomeActions(nativeActions, false)).toEqual([{ key: "orchestra-cloud" }]);
+  });
+
+  it("keeps every native action when self-host is enabled", () => {
+    expect(filterWelcomeActions(nativeActions, true)).toEqual(nativeActions);
   });
 });
 
