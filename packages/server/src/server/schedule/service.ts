@@ -3,8 +3,12 @@ import type { Logger } from "pino";
 import { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-storage.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
-import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
-import { spawnFromAutomation } from "../automation/spawn.js";
+import {
+  getCurrentWorkspaceAuth,
+  runWithWorkspaceAuth,
+  workspaceAuthStorage,
+} from "../cloud-auth.js";
+import { createAutomationSpawn, spawnFromAutomation } from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import type {
@@ -357,6 +361,130 @@ export class ScheduleService {
     return this.inspect(id);
   }
 
+  /**
+   * Cloud async-ack fire (D-3.5d). Spawns the agent (create-phase, in the
+   * foreground) and runs its first turn DETACHED, resolving the moment the
+   * `running` run record names its agent. The cloud schedule-fire-callback
+   * forwards over an ingress with a finite timeout; the agent turn itself
+   * runs longer, so awaiting it inline times the worker out even on success
+   * → a retry → a duplicate spawn. Create failures (bad cwd/ENOENT,
+   * archived agent, in-flight conflict) still reject HERE, before any ack.
+   *
+   * Uses the same MANUAL semantics as {@link runOnce} (no cadence advance):
+   * in cloud mode EventBridge owns recurrence and the daemon fires one-shot.
+   * Shares the `createAutomationSpawn` core with the tick loop and webhook
+   * triggers — the spawn never forks. `done` settles when the detached turn
+   * + run-record finalization complete and never rejects.
+   */
+  async fireOnceDetached(id: string): Promise<{ runId: string; done: Promise<void> }> {
+    const schedule = await this.inspect(id);
+    if (schedule.status === "completed") {
+      throw new Error(`Schedule ${id} is already completed`);
+    }
+    if (this.runningScheduleIds.has(id)) {
+      throw new Error(`Schedule ${id} is already running`);
+    }
+    this.runningScheduleIds.add(id);
+    const now = this.now();
+    const runId = randomUUID();
+    const runningRun: ScheduleRun = {
+      id: runId,
+      scheduledFor: now.toISOString(),
+      startedAt: now.toISOString(),
+      endedAt: null,
+      status: "running",
+      agentId: null,
+      output: null,
+      error: null,
+    };
+    await this.store.put({
+      ...schedule,
+      updatedAt: now.toISOString(),
+      runs: [...schedule.runs, runningRun],
+    });
+
+    const owner = {
+      workspaceId: schedule.cloudOwnerWorkspaceId,
+      accountId: schedule.cloudOwnerAccountId,
+    };
+    const wrappedPrompt = formatSystemNotificationPrompt(buildScheduleFireBody(schedule, runId));
+
+    // Foreground create-phase, inside the workspace ALS. A create failure
+    // marks the run failed, releases the in-flight lock, and re-throws so the
+    // route surfaces a non-2xx (never a 202).
+    let handle: Awaited<ReturnType<typeof createAutomationSpawn>>;
+    try {
+      handle = await runWithWorkspaceAuth(owner, () =>
+        createAutomationSpawn({
+          target: schedule.target,
+          wrappedPrompt,
+          labels: {
+            "paseo.schedule-id": schedule.id,
+            "paseo.schedule-run": runId,
+          },
+          deps: {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.logger,
+          },
+        }),
+      );
+    } catch (error) {
+      await this.finishRun({
+        scheduleId: id,
+        runId,
+        status: "failed",
+        agentId: null,
+        output: null,
+        error: error instanceof Error ? error.message : String(error),
+        manual: true,
+      });
+      this.runningScheduleIds.delete(id);
+      throw error;
+    }
+
+    // Durable record names its agent before we ack (crash mid-turn → a
+    // recoverable `running` record, recovered to `failed` on restart).
+    await this.markRunSpawned(id, runId, handle.agentId);
+
+    // Detached turn — INSIDE the same ALS so per-spawn oauth still resolves.
+    // Failures route to finishRun(failed); `done` never rejects. The
+    // in-flight lock is held until the turn settles so a concurrent tick /
+    // re-fire can't double-spawn the same schedule.
+    const done = runWithWorkspaceAuth(owner, async () => {
+      try {
+        const result = await handle.runTurn();
+        await this.finishRun({
+          scheduleId: id,
+          runId,
+          status: "succeeded",
+          agentId: result.agentId,
+          output: result.output,
+          error: null,
+          manual: true,
+        });
+      } catch (error) {
+        this.logger.error(
+          { err: error, scheduleId: id, runId },
+          "schedule fire background turn failed",
+        );
+        await this.finishRun({
+          scheduleId: id,
+          runId,
+          status: "failed",
+          agentId: handle.agentId,
+          output: null,
+          error: error instanceof Error ? error.message : String(error),
+          manual: true,
+        });
+      } finally {
+        this.runningScheduleIds.delete(id);
+      }
+    });
+
+    return { runId, done };
+  }
+
   async tick(): Promise<void> {
     const now = this.now();
     const schedules = await this.store.list();
@@ -490,6 +618,16 @@ export class ScheduleService {
     } finally {
       this.runningScheduleIds.delete(schedule.id);
     }
+  }
+
+  /**
+   * Persist the spawned agentId onto a still-`running` run before a detached
+   * fire acks, so the durable record always names its agent at ack time.
+   */
+  private async markRunSpawned(scheduleId: string, runId: string, agentId: string): Promise<void> {
+    const schedule = await this.inspect(scheduleId);
+    const runs = schedule.runs.map((run) => (run.id === runId ? { ...run, agentId } : run));
+    await this.store.put({ ...schedule, runs, updatedAt: this.now().toISOString() });
   }
 
   private async finishRun(params: {

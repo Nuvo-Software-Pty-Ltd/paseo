@@ -1,11 +1,12 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
 import { ScheduleService } from "./service.js";
 import { FileBackedScheduleStore } from "./store.js";
 import type { StoredSchedule, ScheduleExecutionResult } from "./types.js";
@@ -802,4 +803,124 @@ describe("ScheduleService", () => {
 
     await expect(service.runOnce(created.id)).rejects.toThrow("already completed");
   });
+
+  // D-3.5d async-ack — fireOnceDetached (the cloud schedule-fire-callback
+  // path) spawns the agent in the foreground and runs its first turn
+  // detached, bypassing the injected `runner` to use the real spawn core.
+  // Kept as flat tests (not a nested describe) to stay within the repo's
+  // max-nested-callbacks=3 lint ceiling.
+  {
+    const AGENT_ID = "00000000-0000-0000-0000-000000000abc";
+
+    function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    }
+
+    function makeService(manager: AgentManager): ScheduleService {
+      return new ScheduleService({
+        store: makeStore(tempDir),
+        logger: createTestLogger(),
+        agentManager: manager,
+        agentStorage,
+        now: () => now,
+      });
+    }
+
+    // A function, not a const: `tempDir` is only assigned in beforeEach, after
+    // the describe body is evaluated.
+    function newAgentTarget() {
+      return { type: "new-agent" as const, config: { provider: "claude", cwd: tempDir } };
+    }
+
+    test("acks on spawn and finalizes the run record in the background", async () => {
+      const gate = deferred<{ timeline: never[]; finalText: string }>();
+      const runAgent = vi.fn(() => gate.promise);
+      const manager = {
+        createAgent: vi.fn(async () => ({ id: AGENT_ID })),
+        runAgent,
+        hasInFlightRun: vi.fn(() => false),
+      } as unknown as AgentManager;
+      const service = makeService(manager);
+      const created = await service.create({
+        prompt: "deploy",
+        cadence: { type: "every", everyMs: 60_000 },
+        target: newAgentTarget(),
+      });
+
+      const { done } = await service.fireOnceDetached(created.id);
+      // Spawned but turn not finished: run is `running`, names its agent.
+      expect(runAgent).toHaveBeenCalledTimes(1);
+      const running = (await service.inspect(created.id)).runs;
+      expect(running).toHaveLength(1);
+      expect(running[0].status).toBe("running");
+      expect(running[0].agentId).toBe(AGENT_ID);
+
+      gate.resolve({ timeline: [], finalText: "ok" });
+      await done;
+      const settled = (await service.inspect(created.id)).runs;
+      expect(settled[0].status).toBe("succeeded");
+      expect(settled[0].agentId).toBe(AGENT_ID);
+      // Manual semantics: cadence is NOT advanced (EventBridge owns it).
+      expect((await service.inspect(created.id)).nextRunAt).toBe(created.nextRunAt);
+    });
+
+    test("a create failure rejects synchronously and records a failed run", async () => {
+      const runAgent = vi.fn(async () => ({ timeline: [], finalText: "x" }));
+      const manager = {
+        createAgent: vi.fn(async () => {
+          throw new Error("ENOENT: bad cwd");
+        }),
+        runAgent,
+        hasInFlightRun: vi.fn(() => false),
+      } as unknown as AgentManager;
+      const service = makeService(manager);
+      const created = await service.create({
+        prompt: "deploy",
+        cadence: { type: "every", everyMs: 60_000 },
+        target: newAgentTarget(),
+      });
+
+      await expect(service.fireOnceDetached(created.id)).rejects.toThrow(/ENOENT/);
+      expect(runAgent).not.toHaveBeenCalled();
+      const runs = (await service.inspect(created.id)).runs;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].status).toBe("failed");
+      // The in-flight lock is released, so a re-fire is allowed.
+      await expect(service.fireOnceDetached(created.id)).rejects.toThrow(/ENOENT/);
+    });
+
+    test("the detached turn runs inside the schedule's workspace ALS context", async () => {
+      let seen: ReturnType<typeof getCurrentWorkspaceAuth>;
+      const runAgent = vi.fn(async () => {
+        seen = getCurrentWorkspaceAuth();
+        return { timeline: [], finalText: "ok" };
+      });
+      const manager = {
+        createAgent: vi.fn(async () => ({ id: AGENT_ID })),
+        runAgent,
+        hasInFlightRun: vi.fn(() => false),
+      } as unknown as AgentManager;
+      const service = makeService(manager);
+      // Create inside an ALS so the schedule persists cloudOwner* claims.
+      const created = await workspaceAuthStorage.run(
+        { workspaceId: "ws_x", accountId: "acc_x", expiresAt: Number.MAX_SAFE_INTEGER },
+        () =>
+          service.create({
+            prompt: "deploy",
+            cadence: { type: "every", everyMs: 60_000 },
+            target: newAgentTarget(),
+          }),
+      );
+      expect(created.cloudOwnerWorkspaceId).toBe("ws_x");
+
+      // Fire OUTSIDE any ALS — the detached turn must restore the context.
+      const { done } = await service.fireOnceDetached(created.id);
+      await done;
+      expect(seen).toMatchObject({ workspaceId: "ws_x", accountId: "acc_x" });
+    });
+  }
 });

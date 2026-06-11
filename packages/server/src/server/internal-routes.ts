@@ -6,7 +6,6 @@ import { z } from "zod";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Logger } from "pino";
 import { cloneWorkspaceRepo, resolveStage } from "./cloud-clone.js";
-import { workspaceAuthStorage } from "./cloud-auth.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { ScheduleStore } from "./schedule/store.js";
 import type { TriggerService } from "./trigger/service.js";
@@ -228,12 +227,11 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
         res.status(200).json({ ok: true, skipped: true, reason: `status_${schedule.status}` });
         return;
       }
-      // T-7 ALS restoration. If the schedule was created in cloud
-      // mode (cloudOwnerWorkspaceId set), wrap the executeSchedule
-      // call in workspaceAuthStorage.run so the agent spawn finds
-      // its per-spawn ~/.claude credential. Cross-tenant defense:
-      // verify the persisted workspaceId matches PASEO_WORKSPACE_ID
-      // (defense-in-depth).
+      // T-7 ALS restoration is now owned by ScheduleService.fireOnceDetached,
+      // which restores the schedule's persisted cloudOwner* claims around
+      // both the foreground spawn and the detached turn. Here we only enforce
+      // the cross-tenant defense: verify the persisted workspaceId matches
+      // PASEO_WORKSPACE_ID (defense-in-depth) before firing.
       if (
         expectedWorkspaceId &&
         schedule.cloudOwnerWorkspaceId &&
@@ -246,26 +244,16 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
         res.status(403).json({ error: "workspace_mismatch" });
         return;
       }
-      const run = async (): Promise<void> => {
-        // ScheduleService.runOnce is the public manual-fire affordance.
-        // It calls the same internal runSchedule path the tick loop
-        // uses, generating runs[] entries per the on-host code path.
-        // The DynamoStore.putRun side-effect writes the per-run row.
-        await scheduleService.runOnce(scheduleId);
-      };
-      if (schedule.cloudOwnerWorkspaceId && schedule.cloudOwnerAccountId) {
-        await workspaceAuthStorage.run(
-          {
-            workspaceId: schedule.cloudOwnerWorkspaceId,
-            accountId: schedule.cloudOwnerAccountId,
-            expiresAt: Number.MAX_SAFE_INTEGER,
-          },
-          run,
-        );
-      } else {
-        await run();
-      }
-      res.status(200).json({ ok: true, scheduleId });
+      // ScheduleService.fireOnceDetached spawns the agent and runs its first
+      // turn DETACHED, restoring the schedule's persisted cloudOwner* ALS
+      // internally (for both the foreground create-phase and the background
+      // turn). It resolves once the agent is spawned, so this awaits only the
+      // fast create-phase: a create failure (bad cwd/ENOENT, archived agent,
+      // in-flight conflict) throws → 500, while a successful spawn acks 202
+      // well within the worker's finite callback timeout. 202 (Accepted) maps
+      // to the worker's 2xx success branch exactly like 200 did.
+      await scheduleService.fireOnceDetached(scheduleId);
+      res.status(202).json({ ok: true, scheduleId });
     } catch (err) {
       logger.error({ err }, "Unhandled error in schedule-fire handler");
       if (!res.headersSent) {
@@ -339,9 +327,15 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
         return;
       }
       // TriggerService.fire restores ALS internally from the trigger's
-      // persisted cloudOwner* claims, so no wrapping is needed here.
+      // persisted cloudOwner* claims, so no wrapping is needed here. It
+      // resolves once the agent is SPAWNED and runs the turn detached, so
+      // this awaits only the fast create-phase: a create failure (bad
+      // cwd/ENOENT, archived agent, in-flight conflict) throws here → 500,
+      // while a successful spawn acks 202 well within auth's 10s window.
+      // 202 (Accepted) maps to the cloud ingress's `if (dispatch.ok)`
+      // success branch exactly like 200 did.
       await triggerService.fire(trigger, payload ?? {});
-      res.status(200).json({ ok: true, triggerId });
+      res.status(202).json({ ok: true, triggerId });
     } catch (err) {
       logger.error({ err }, "Unhandled error in webhook-fire handler");
       if (!res.headersSent) {

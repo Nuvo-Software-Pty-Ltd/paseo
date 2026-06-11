@@ -45,12 +45,21 @@ interface Fixture {
   fire: ReturnType<typeof vi.fn>;
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 async function buildFixture(opts: {
   triggerByGetId: Record<string, WebhookTrigger | null>;
   expectedWorkspaceId?: string;
+  fireImpl?: () => Promise<{ runId: string | null; done: Promise<void> }>;
 }): Promise<Fixture> {
   const hmacKey = "test-hmac-key";
-  const fire = vi.fn(async () => undefined);
+  const fire = vi.fn(opts.fireImpl ?? (async () => ({ runId: "run-0", done: Promise.resolve() })));
   const triggerStore: WebhookTriggerStore = {
     list: async () => [],
     get: async (id: string) => opts.triggerByGetId[id] ?? null,
@@ -103,17 +112,35 @@ describe("POST /api/internal/webhook-fire (D-3.5d)", () => {
     if (fixture) await fixture.close();
   });
 
-  test("HMAC-valid + matching workspace → 200 and fire invoked with the resolved trigger", async () => {
+  test("HMAC-valid + matching workspace → 202 and fire invoked with the resolved trigger", async () => {
     fixture = await buildFixture({
       triggerByGetId: { abc12345: makeTrigger() },
       expectedWorkspaceId: "ws_self",
     });
     const body = JSON.stringify({ triggerId: "abc12345", payload: { ping: 1 } });
     const res = await post(fixture, body, signBody(fixture.hmacKey, body));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(fixture.fire).toHaveBeenCalledTimes(1);
     expect(fixture.fire.mock.calls[0][0]).toMatchObject({ id: "abc12345" });
     expect(fixture.fire.mock.calls[0][1]).toEqual({ ping: 1 });
+  });
+
+  test("acks 202 without awaiting the detached agent turn (async dispatch)", async () => {
+    // `done` stays pending = the agent turn has not finished. The route must
+    // still respond, proving it acks on spawn and never blocks the ingress's
+    // finite timeout on the full turn (the 502 → retry → double-spawn bug).
+    const turn = deferred<void>();
+    fixture = await buildFixture({
+      triggerByGetId: { abc12345: makeTrigger() },
+      expectedWorkspaceId: "ws_self",
+      fireImpl: async () => ({ runId: "run-1", done: turn.promise }),
+    });
+    const body = JSON.stringify({ triggerId: "abc12345" });
+    const res = await post(fixture, body, signBody(fixture.hmacKey, body));
+    expect(res.status).toBe(202);
+    expect(fixture.fire).toHaveBeenCalledTimes(1);
+    // Release the still-pending turn so the fixture tears down cleanly.
+    turn.resolve();
   });
 
   test("HMAC-invalid → 401, no fire", async () => {

@@ -107,8 +107,12 @@ export function createSelfHostWebhookReceiver(options: SelfHostReceiverOptions):
         // layer sanitizes it.
       }
       try {
+        // fire resolves once the agent is SPAWNED and runs the turn detached,
+        // so this acks promptly (202 Accepted) instead of holding the sender's
+        // connection open for the full agent turn. A create failure still
+        // throws here → 500.
         await triggerService.fire(trigger, payload);
-        res.status(200).json({ ok: true, triggerId: trigger.id });
+        res.status(202).json({ ok: true, triggerId: trigger.id });
       } catch (err) {
         logger.error({ err, webhookId }, "self-host webhook fire failed");
         res.status(500).json({ error: "fire_failed" });

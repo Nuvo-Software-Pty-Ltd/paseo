@@ -144,7 +144,7 @@ describe("internal routes bypass the workspace-token middleware (D-3.5d)", () =>
     expect(await res.json()).toEqual({ error: "Unauthorized" });
   });
 
-  test("VALID HMAC + NO workspace token reaches the late handler and fires (200)", async () => {
+  test("VALID HMAC + NO workspace token reaches the late handler and fires (202)", async () => {
     fixture = await buildFixture();
     // Nested payload — proves the daemon's `JSON.stringify(req.body)` round-trip
     // reproduces the exact bytes the caller signed, so HMAC verification over a
@@ -154,7 +154,7 @@ describe("internal routes bypass the workspace-token middleware (D-3.5d)", () =>
       payload: { event: "push", repo: { name: "paseo", private: true }, commits: [1, 2, 3] },
     });
     const res = await postWebhookFire(fixture, body, signBody(fixture.hmacKey, body));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ ok: true, triggerId: "abc12345" });
     expect(fixture.fire).toHaveBeenCalledTimes(1);
     expect(fixture.fire.mock.calls[0][0]).toMatchObject({ id: "abc12345" });

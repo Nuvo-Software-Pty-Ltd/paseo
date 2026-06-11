@@ -140,3 +140,33 @@ export const workspaceAuthStorage = new AsyncLocalStorage<WorkspaceAuthClaims>()
 export function getCurrentWorkspaceAuth(): WorkspaceAuthClaims | undefined {
   return workspaceAuthStorage.getStore();
 }
+
+/**
+ * Run `fn` inside the cloud workspace ALS so a per-spawn ~/.claude
+ * credential resolves. When both owner claims are present (a cloud-owned
+ * schedule/trigger) the context is restored with a far-future `expiresAt`
+ * — the automation's authority comes from the workspace's existence, not
+ * the original JWT's lifetime. On-host records (both claims null) run `fn`
+ * directly with no ALS, identical to today's self-host behavior.
+ *
+ * Used for both the foreground create-phase and the detached background
+ * turn of an automation fire, so the agent run still observes the workspace
+ * context after the foreground callback returns (the ALS would otherwise
+ * exit at ack time).
+ */
+export function runWithWorkspaceAuth<T>(
+  owner: { workspaceId: string | null; accountId: string | null },
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (owner.workspaceId && owner.accountId) {
+    return workspaceAuthStorage.run(
+      {
+        workspaceId: owner.workspaceId,
+        accountId: owner.accountId,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
+      fn,
+    );
+  }
+  return fn();
+}
