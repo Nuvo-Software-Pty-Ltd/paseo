@@ -27,12 +27,45 @@ export interface AutomationDetailClient {
   triggerLogs(options: { id: string }): Promise<{ runs?: ScheduleRun[] }>;
 }
 
+// Read an error's message structurally — WITHOUT gating on `instanceof Error`.
+// The daemon RPC error is a `DaemonRpcError` subclass of Error, but the app's
+// web bundle re-transpiles that class through Metro/Babel (we import the daemon
+// client from `@server/...` *source*, not a prebuilt dist). A class that
+// `extends Error` transpiled for the browser does not reliably satisfy
+// `error instanceof Error` at runtime, so the old `error instanceof Error`
+// guard returned false for a real not-found on web — which made the kind-less
+// probe re-throw the raw `Schedule not found: <id>` error on the webhook detail
+// view instead of falling through to the webhook store. Reading `.message`
+// off whatever shape we actually get keeps detection bundle-independent.
+function readErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return String(error);
+}
+
 // A not-found is the ONLY outcome we treat as "this id isn't in that store —
 // try the next one". Connection/host errors (timeouts, disconnects) carry
 // different messages and must propagate. The daemon throws `Schedule not
 // found: <id>` / `Webhook trigger not found: <id>`, so match on "not found".
+//
+// We deliberately discriminate on the message text, not the RPC `.code`: a
+// schedule not-found arrives as `code="schedule_request_failed"`, but so does
+// any other schedule failure (permission denied, etc.), and a client-side
+// timeout ("Timeout waiting for message schedule/inspect/response") carries no
+// code at all. Only the "not found" message reliably means "wrong store" — a
+// bare code match would swallow genuine errors we must surface.
 export function isAutomationNotFoundError(error: unknown): boolean {
-  return error instanceof Error && /not found/i.test(error.message);
+  // Only thrown error objects (Error instances or the transpiled RPC error
+  // object that carries `.message`) qualify. A bare string/primitive is not a
+  // structured throw we trust to mean "wrong store".
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  return /not found/i.test(readErrorMessage(error));
 }
 
 async function inspectScheduleDetail(
