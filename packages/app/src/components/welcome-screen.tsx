@@ -16,10 +16,12 @@ import { buildHostRootRoute } from "@/utils/host-routes";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { isWeb, isNative } from "@/constants/platform";
+import { isSelfHostConnectionsEnabled } from "@/constants/feature-flags";
+import { filterWelcomeActions, type WelcomeActionKey } from "./welcome-actions";
 import { loginWithOAuthPopup } from "@/lib/orchestra-cloud-client";
 
 interface WelcomeAction {
-  key: "scan-qr" | "direct-connection" | "paste-pairing-link" | "orchestra-cloud";
+  key: WelcomeActionKey;
   label: string;
   testID: string;
   primary: boolean;
@@ -295,6 +297,10 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
         },
       ];
 
+  // `actions` is rebuilt each render (as it always was), so filter inline —
+  // memoizing on it would never hit the cache.
+  const visibleActions = filterWelcomeActions(actions, isSelfHostConnectionsEnabled());
+
   const scrollContentContainerStyle = useMemo(
     () => [styles.container, { paddingBottom: theme.spacing[6] + insets.bottom }],
     [theme.spacing, insets.bottom],
@@ -328,7 +334,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           ) : null}
 
           <View style={styles.actions}>
-            {actions.map((action) => (
+            {visibleActions.map((action) => (
               <WelcomeActionButton key={action.key} action={action} />
             ))}
           </View>
