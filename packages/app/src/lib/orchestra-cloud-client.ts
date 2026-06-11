@@ -1,4 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Linking from "expo-linking";
+import * as WebBrowser from "expo-web-browser";
 import { isWeb } from "@/constants/platform";
 import { deriveDaemonWsUrlForWorkspace } from "@/utils/orchestra-daemon-url";
 
@@ -129,6 +131,72 @@ export async function clearSession(): Promise<void> {
 export async function hasSession(): Promise<boolean> {
   const token = await getSessionToken();
   return token !== null;
+}
+
+// The native OAuth redirect carries the session JWT in the URL FRAGMENT
+// (#orchestra_session=<jwt>) rather than the query string, so the token never
+// lands in server access logs or a Referer header. Keep this in sync with the
+// auth service's native delivery in oauth-github.ts.
+const SESSION_FRAGMENT_KEY = "orchestra_session";
+
+// Pure extractor: pull the session token out of the deep-link URL that
+// ASWebAuthenticationSession hands back. Exported for unit testing. Returns
+// null when the fragment is absent or carries no token (caller treats that as a
+// failed sign-in rather than storing an empty token).
+export function parseSessionTokenFromRedirectUrl(url: string): string | null {
+  const hashIndex = url.indexOf("#");
+  if (hashIndex === -1) {
+    return null;
+  }
+  // URLSearchParams handles percent-decoding; the auth service encodeURIComponent's
+  // the token (a no-op for base64url JWT chars, but symmetric and defensive).
+  const params = new URLSearchParams(url.slice(hashIndex + 1));
+  const token = params.get(SESSION_FRAGMENT_KEY)?.trim();
+  return token ? token : null;
+}
+
+// Native sign-in handshake. Opens the GitHub OAuth flow in an in-app auth
+// session (ASWebAuthenticationSession on iOS / Custom Tab on Android) and waits
+// for the auth service to 302-redirect back to the app's `paseo://welcome`
+// deep link with the session token in the fragment. The redirect URI MUST match
+// the auth service's native allowlist (ORCHESTRA_NATIVE_REDIRECT_URIS; dev
+// default "paseo://welcome").
+export async function loginWithOAuthNative(): Promise<{ accountId: string }> {
+  if (isWeb) {
+    return Promise.reject(new Error("Native OAuth login is not available on web — use the popup"));
+  }
+
+  // For a standalone build (scheme `paseo`) this resolves to "paseo://welcome".
+  const redirectUri = Linking.createURL("welcome");
+  const authUrl =
+    `${getAuthBaseUrl()}/oauth/github/start` +
+    `?return_to=${encodeURIComponent(redirectUri)}&platform=native`;
+
+  const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUri);
+  if (result.type !== "success") {
+    // cancel / dismiss / locked — the user backed out or the session closed
+    // without a redirect. Surface a typed-ish error for the caller to log.
+    throw new Error(`Orchestra sign-in did not complete (${result.type})`);
+  }
+
+  const token = parseSessionTokenFromRedirectUrl(result.url);
+  if (!token) {
+    throw new Error("Orchestra sign-in redirect did not contain a session token");
+  }
+
+  // Reuse the existing storage + connect path verbatim.
+  await storeSessionToken(token);
+  // The native redirect delivers only the token; the accountId is derived from
+  // the session bearer on subsequent calls. The welcome screen ignores this
+  // value, so "unknown" matches the web popup's fallback shape.
+  return { accountId: "unknown" };
+}
+
+// Platform dispatcher: web keeps the popup + postMessage handshake; native uses
+// the deep-link auth session. Both resolve the same shape and both persist the
+// session via storeSessionToken, so callers stay platform-agnostic.
+export function loginWithOrchestra(): Promise<{ accountId: string }> {
+  return isWeb ? loginWithOAuthPopup() : loginWithOAuthNative();
 }
 
 export function loginWithOAuthPopup(): Promise<{ accountId: string }> {

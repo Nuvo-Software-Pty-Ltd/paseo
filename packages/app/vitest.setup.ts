@@ -93,4 +93,12 @@ vi.mock("react-native-svg", () => {
 
 vi.mock("expo-linking", () => ({
   openURL: vi.fn().mockResolvedValue(undefined),
+  createURL: vi.fn((path: string) => `paseo://${path}`),
+  addEventListener: vi.fn(() => ({ remove() {} })),
+  getInitialURL: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("expo-web-browser", () => ({
+  openAuthSessionAsync: vi.fn().mockResolvedValue({ type: "cancel" }),
+  maybeCompleteAuthSession: vi.fn(),
 }));
