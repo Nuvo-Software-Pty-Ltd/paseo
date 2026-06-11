@@ -11,9 +11,10 @@ import type { ScheduleService } from "./schedule/service.js";
 import type { ScheduleStore } from "./schedule/store.js";
 
 // T-15 — `/api/internal/schedule-fire` HMAC-validated handler. Lifecycle
-// worker POSTs `{ scheduleId }`; daemon looks up the schedule, restores
-// the ALS context via T-7's persisted cloudOwner* fields, and invokes
-// `scheduleService.runOnce`.
+// worker POSTs `{ scheduleId }`; daemon looks up the schedule, enforces the
+// cross-tenant defense, and invokes `scheduleService.fireOnceDetached`,
+// which spawns the agent and runs its first turn detached (D-3.5d
+// async-ack), restoring the schedule's persisted cloudOwner* ALS internally.
 
 const logger = pino({ level: "silent" });
 
@@ -23,7 +24,7 @@ interface Fixture {
   hmacKey: string;
   scheduleStore: ScheduleStore;
   scheduleService: ScheduleService;
-  runOnce: ReturnType<typeof vi.fn>;
+  fireOnceDetached: ReturnType<typeof vi.fn>;
 }
 
 function makeSchedule(overrides: Partial<StoredSchedule> = {}): StoredSchedule {
@@ -50,13 +51,13 @@ function makeSchedule(overrides: Partial<StoredSchedule> = {}): StoredSchedule {
 
 async function buildFixture(opts: {
   scheduleByGetId: Record<string, StoredSchedule | null>;
-  runOnceImpl?: (id: string) => Promise<StoredSchedule>;
+  fireImpl?: (id: string) => Promise<{ runId: string; done: Promise<void> }>;
   expectedWorkspaceId?: string;
 }): Promise<Fixture> {
   const hmacKey = "test-hmac-key";
-  const runOnce = vi.fn(async (id: string) => {
-    if (opts.runOnceImpl) return opts.runOnceImpl(id);
-    return makeSchedule({ id });
+  const fireOnceDetached = vi.fn(async (id: string) => {
+    if (opts.fireImpl) return opts.fireImpl(id);
+    return { runId: `run-${id}`, done: Promise.resolve() };
   });
   const scheduleStore: ScheduleStore = {
     list: async () => [],
@@ -66,7 +67,7 @@ async function buildFixture(opts: {
     delete: async () => {},
   };
   const scheduleService = {
-    runOnce,
+    fireOnceDetached,
   } as unknown as ScheduleService;
 
   const app = express();
@@ -90,7 +91,7 @@ async function buildFixture(opts: {
     hmacKey,
     scheduleStore,
     scheduleService,
-    runOnce,
+    fireOnceDetached,
     close: () =>
       new Promise<void>((resolve) => {
         httpServer.close(() => resolve());
@@ -102,6 +103,14 @@ function signBody(key: string, body: string): string {
   return createHmac("sha256", key).update(body).digest("hex");
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("POST /api/internal/schedule-fire (T-15)", () => {
   let fixture: Fixture;
 
@@ -109,7 +118,7 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
     if (fixture) await fixture.close();
   });
 
-  test("HMAC-valid + active schedule + matching workspaceId → 200 and runOnce invoked", async () => {
+  test("HMAC-valid + active schedule + matching workspaceId → 202 and fireOnceDetached invoked", async () => {
     fixture = await buildFixture({
       scheduleByGetId: { abc12345: makeSchedule() },
       expectedWorkspaceId: "ws_self",
@@ -123,8 +132,31 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
       },
       body,
     });
-    expect(res.status).toBe(200);
-    expect(fixture.runOnce).toHaveBeenCalledWith("abc12345");
+    expect(res.status).toBe(202);
+    expect(fixture.fireOnceDetached).toHaveBeenCalledWith("abc12345");
+  });
+
+  test("acks 202 without awaiting the detached agent turn (async dispatch)", async () => {
+    // `done` stays pending = the agent turn has not finished. The route must
+    // still respond well within the worker's finite callback timeout.
+    const turn = deferred<void>();
+    fixture = await buildFixture({
+      scheduleByGetId: { abc12345: makeSchedule() },
+      expectedWorkspaceId: "ws_self",
+      fireImpl: async () => ({ runId: "run-1", done: turn.promise }),
+    });
+    const body = JSON.stringify({ scheduleId: "abc12345" });
+    const res = await fetch(`${fixture.url}/api/internal/schedule-fire`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Orchestra-Internal-HMAC": signBody(fixture.hmacKey, body),
+      },
+      body,
+    });
+    expect(res.status).toBe(202);
+    expect(fixture.fireOnceDetached).toHaveBeenCalledWith("abc12345");
+    turn.resolve();
   });
 
   test("HMAC-invalid → 401", async () => {
@@ -141,7 +173,7 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
       body,
     });
     expect(res.status).toBe(401);
-    expect(fixture.runOnce).not.toHaveBeenCalled();
+    expect(fixture.fireOnceDetached).not.toHaveBeenCalled();
   });
 
   test("cross-workspace cloudOwnerWorkspaceId → 403 (defense-in-depth)", async () => {
@@ -161,7 +193,7 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
       body,
     });
     expect(res.status).toBe(403);
-    expect(fixture.runOnce).not.toHaveBeenCalled();
+    expect(fixture.fireOnceDetached).not.toHaveBeenCalled();
   });
 
   test("unknown scheduleId → 404", async () => {
@@ -201,7 +233,7 @@ describe("POST /api/internal/schedule-fire (T-15)", () => {
     const json = (await res.json()) as { skipped?: boolean; reason?: string };
     expect(json.skipped).toBe(true);
     expect(json.reason).toBe("status_paused");
-    expect(fixture.runOnce).not.toHaveBeenCalled();
+    expect(fixture.fireOnceDetached).not.toHaveBeenCalled();
   });
 
   test("invalid body shape → 400", async () => {

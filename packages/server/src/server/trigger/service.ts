@@ -3,8 +3,8 @@ import type { Logger } from "pino";
 import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-storage.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
-import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
-import { spawnFromAutomation } from "../automation/spawn.js";
+import { getCurrentWorkspaceAuth, runWithWorkspaceAuth } from "../cloud-auth.js";
+import { createAutomationSpawn } from "../automation/spawn.js";
 import type { ScheduleRun } from "../schedule/types.js";
 import type { WebhookTriggerStore } from "./store.js";
 import type { TriggerProvisioner } from "./provisioner.js";
@@ -73,6 +73,20 @@ function buildTriggerFireBody(trigger: WebhookTrigger, runId: string, payload: u
     ? trigger.payloadTemplate.split(PAYLOAD_PLACEHOLDER).join(sanitizePayload(payload))
     : trigger.payloadTemplate;
   return `${heading}\n${rendered}`;
+}
+
+/**
+ * Outcome of {@link TriggerService.fire}. The promise resolves once the
+ * agent is SPAWNED (created + run record persisted with its agentId) — the
+ * fire path acks here. `done` settles when the detached first turn and its
+ * run-record finalization complete; it never rejects (turn failures are
+ * caught and routed to `finishRun(failed)`). Callers that only need the ack
+ * (the cloud route, the self-host receiver) ignore `done`; tests await it to
+ * observe the terminal run state deterministically.
+ */
+export interface TriggerFireResult {
+  runId: string | null;
+  done: Promise<void>;
 }
 
 export interface TriggerServiceOptions {
@@ -253,13 +267,22 @@ export class TriggerService {
   /**
    * Core fire path — shared by the internal webhook-fire route (cloud),
    * the self-host receiver, and manual run-once. Spawns through the SAME
-   * `spawnFromAutomation` helper schedules use. A disabled trigger is a
+   * `createAutomationSpawn` helper schedules use. A disabled trigger is a
    * logged no-op (never spawns).
+   *
+   * Async-ack split (D-3.5d): the returned promise resolves as soon as the
+   * agent is SPAWNED — the `running` run record is persisted with its
+   * agentId — and the first turn + run-record finalization run detached.
+   * The cloud ingress that forwards here has a finite (10s) timeout; the
+   * agent turn alone takes ~12s, so awaiting it inline 502s the sender even
+   * on success → a retry → a duplicate spawn. Create failures (bad
+   * cwd/ENOENT, archived agent, in-flight conflict) still throw HERE, in the
+   * foreground, before any ack.
    */
-  async fire(trigger: WebhookTrigger, payload: unknown): Promise<void> {
+  async fire(trigger: WebhookTrigger, payload: unknown): Promise<TriggerFireResult> {
     if (!trigger.enabled) {
       this.logger.info({ triggerId: trigger.id }, "webhook fire skipped — trigger disabled");
-      return;
+      return { runId: null, done: Promise.resolve() };
     }
     const now = this.now();
     const runId = randomUUID();
@@ -278,39 +301,28 @@ export class TriggerService {
     const wrappedPrompt = formatSystemNotificationPrompt(
       buildTriggerFireBody(trigger, runId, payload),
     );
-    const spawn = () =>
-      spawnFromAutomation({
-        target: trigger.target,
-        wrappedPrompt,
-        labels: { "paseo.trigger-id": trigger.id, "paseo.trigger-run": runId },
-        deps: {
-          agentManager: this.agentManager,
-          agentStorage: this.agentStorage,
-          logger: this.logger,
-        },
-      });
+    const owner = {
+      workspaceId: trigger.cloudOwnerWorkspaceId,
+      accountId: trigger.cloudOwnerAccountId,
+    };
 
+    // Foreground create-phase, inside the workspace ALS so `createAgent`'s
+    // per-spawn home materialization finds the credential. A create failure
+    // marks the run failed and re-throws so the caller surfaces a non-2xx.
+    let handle: Awaited<ReturnType<typeof createAutomationSpawn>>;
     try {
-      // Restore ALS at fire time (cloud) so the agent spawn finds its
-      // per-spawn credential. On-host (null cloudOwner*) → runs without an
-      // ALS context, identical to schedules.
-      const result =
-        trigger.cloudOwnerWorkspaceId && trigger.cloudOwnerAccountId
-          ? await workspaceAuthStorage.run(
-              {
-                workspaceId: trigger.cloudOwnerWorkspaceId,
-                accountId: trigger.cloudOwnerAccountId,
-                expiresAt: Number.MAX_SAFE_INTEGER,
-              },
-              spawn,
-            )
-          : await spawn();
-      await this.finishRun(trigger.id, runId, {
-        status: "succeeded",
-        agentId: result.agentId,
-        output: result.output,
-        error: null,
-      });
+      handle = await runWithWorkspaceAuth(owner, () =>
+        createAutomationSpawn({
+          target: trigger.target,
+          wrappedPrompt,
+          labels: { "paseo.trigger-id": trigger.id, "paseo.trigger-run": runId },
+          deps: {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.logger,
+          },
+        }),
+      );
     } catch (error) {
       await this.finishRun(trigger.id, runId, {
         status: "failed",
@@ -320,6 +332,39 @@ export class TriggerService {
       });
       throw error;
     }
+
+    // Durable record carries the agentId before we ack, so a crash mid-turn
+    // leaves a recoverable `running` record (never a lost one).
+    await this.markRunSpawned(trigger.id, runId, handle.agentId);
+
+    // Detached turn — runs INSIDE the same ALS so the per-spawn oauth still
+    // resolves after the foreground returns. All failures route to
+    // finishRun(failed); `done` never rejects, so there is no unhandled
+    // rejection even though the caller ignores it.
+    const done = runWithWorkspaceAuth(owner, async () => {
+      try {
+        const result = await handle.runTurn();
+        await this.finishRun(trigger.id, runId, {
+          status: "succeeded",
+          agentId: result.agentId,
+          output: result.output,
+          error: null,
+        });
+      } catch (error) {
+        this.logger.error(
+          { err: error, triggerId: trigger.id, runId },
+          "webhook fire background turn failed",
+        );
+        await this.finishRun(trigger.id, runId, {
+          status: "failed",
+          agentId: handle.agentId,
+          output: null,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+
+    return { runId, done };
   }
 
   private async appendRun(triggerId: string, run: ScheduleRun, now: Date): Promise<void> {
@@ -331,6 +376,17 @@ export class TriggerService {
       lastFiredAt: now.toISOString(),
       updatedAt: now.toISOString(),
     });
+  }
+
+  /**
+   * Persist the spawned agentId onto a still-`running` run before the fire
+   * acks. Invariant: the durable record names its agent at ack time, so the
+   * detached turn (or a crash recovery) can always be tied back to it.
+   */
+  private async markRunSpawned(triggerId: string, runId: string, agentId: string): Promise<void> {
+    const trigger = await this.inspect(triggerId);
+    const runs = trigger.runs.map((run) => (run.id === runId ? { ...run, agentId } : run));
+    await this.store.put({ ...trigger, runs, updatedAt: this.now().toISOString() });
   }
 
   private async finishRun(

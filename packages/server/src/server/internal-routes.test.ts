@@ -243,7 +243,7 @@ function createDoubleMountedApp(services: {
 
 describe("early/late double-mount shadow — webhook-fire", () => {
   it("valid HMAC + known trigger reaches the real handler and fires (not 503)", async () => {
-    const fire = vi.fn(async () => {});
+    const fire = vi.fn(async () => ({ runId: "run-1", done: Promise.resolve() }));
     const trigger = { id: "trg_1", cloudOwnerWorkspaceId: null, cloudOwnerAccountId: null };
     const app = createDoubleMountedApp({
       triggerService: { fire },
@@ -257,7 +257,7 @@ describe("early/late double-mount shadow — webhook-fire", () => {
       body,
     });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(res.body.ok).toBe(true);
     expect(fire).toHaveBeenCalledTimes(1);
   });
@@ -286,10 +286,10 @@ describe("early/late double-mount shadow — webhook-fire", () => {
 
 describe("early/late double-mount shadow — schedule-fire", () => {
   it("valid HMAC + known active schedule reaches the real handler and fires (not 503)", async () => {
-    const runOnce = vi.fn(async () => {});
+    const fireOnceDetached = vi.fn(async () => ({ runId: "run-1", done: Promise.resolve() }));
     const schedule = { status: "active", cloudOwnerWorkspaceId: null, cloudOwnerAccountId: null };
     const app = createDoubleMountedApp({
-      scheduleService: { runOnce },
+      scheduleService: { fireOnceDetached },
       scheduleStore: { get: vi.fn(async () => schedule) },
     });
     const body = JSON.stringify({ scheduleId: "sch_1" });
@@ -300,15 +300,15 @@ describe("early/late double-mount shadow — schedule-fire", () => {
       body,
     });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(res.body.ok).toBe(true);
-    expect(runOnce).toHaveBeenCalledTimes(1);
+    expect(fireOnceDetached).toHaveBeenCalledTimes(1);
   });
 
   it("bad HMAC returns 401 (past the 503 'not configured' shadow)", async () => {
-    const runOnce = vi.fn(async () => {});
+    const fireOnceDetached = vi.fn(async () => ({ runId: "run-1", done: Promise.resolve() }));
     const app = createDoubleMountedApp({
-      scheduleService: { runOnce },
+      scheduleService: { fireOnceDetached },
       scheduleStore: { get: vi.fn(async () => ({ status: "active" })) },
     });
     const body = JSON.stringify({ scheduleId: "sch_1" });
@@ -323,7 +323,7 @@ describe("early/late double-mount shadow — schedule-fire", () => {
     });
 
     expect(res.status).toBe(401);
-    expect(runOnce).not.toHaveBeenCalled();
+    expect(fireOnceDetached).not.toHaveBeenCalled();
   });
 });
 

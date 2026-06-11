@@ -22,6 +22,26 @@ export interface AutomationSpawnDeps {
   logger: Logger;
 }
 
+/**
+ * A spawn whose agent already exists (created, or an existing agent that
+ * passed its pre-run checks) but whose first turn has not yet run. The
+ * caller can ack on `agentId` and defer `runTurn()` to the background.
+ *
+ * D-3.5d async-ack split: cloud automations are fired over an HTTP ingress
+ * with a finite timeout (auth's `postDaemonInternal` is 10s). The agent
+ * turn itself takes ~12s, so awaiting it inline times the caller out even
+ * though the spawn succeeded — a 502 the sender then retries, double-
+ * spawning. By returning a handle the moment the agent is CREATED, the
+ * fire path can persist the run record + agentId, ack, and finish the turn
+ * detached. `createAgent`/the existing-agent pre-run validation stay in the
+ * foreground so genuine create failures (bad cwd/ENOENT, archived agent,
+ * in-flight conflict) still surface synchronously.
+ */
+export interface AutomationSpawnHandle {
+  agentId: string;
+  runTurn: () => Promise<ScheduleExecutionResult>;
+}
+
 function buildRunOutput(params: {
   output: string | null;
   timelineText: string;
@@ -40,20 +60,33 @@ function buildRunOutput(params: {
 }
 
 /**
- * Spawn (or re-prompt) an agent for an automation fire. `wrappedPrompt`
- * is the already-system-notification-wrapped prompt text. `labels` are
- * attached to a freshly-created agent (e.g. `paseo.schedule-id` /
- * `paseo.trigger-id`). Existing-agent targets respect `hasInFlightRun`
- * exactly like schedules do.
+ * Create-phase of an automation spawn. Awaits everything up to and
+ * including a successful `createAgent` (new-agent target) / the pre-run
+ * validation (existing-agent target), then returns a handle whose
+ * `runTurn()` performs the actual agent turn. Synchronous failures —
+ * archived agent, `hasInFlightRun` conflict, an unconstructable agent —
+ * reject here, in the foreground, so the fire path surfaces them before
+ * acking. `wrappedPrompt`/`labels` are as in `spawnFromAutomation`.
  */
-export async function spawnFromAutomation(params: {
+export async function createAutomationSpawn(params: {
   target: ScheduleTarget;
   wrappedPrompt: string;
   labels: Record<string, string>;
   deps: AutomationSpawnDeps;
-}): Promise<ScheduleExecutionResult> {
+}): Promise<AutomationSpawnHandle> {
   const { target, wrappedPrompt, labels, deps } = params;
   const { agentManager, agentStorage, logger } = deps;
+
+  const runTurnFor = (agentId: string): (() => Promise<ScheduleExecutionResult>) => {
+    return async () => {
+      const result = await agentManager.runAgent(agentId, wrappedPrompt);
+      const timelineText = curateAgentActivity(result.timeline);
+      return {
+        agentId,
+        output: buildRunOutput({ output: null, timelineText, finalText: result.finalText }),
+      };
+    };
+  };
 
   if (target.type === "agent") {
     const record = await agentStorage.get(target.agentId);
@@ -68,12 +101,7 @@ export async function spawnFromAutomation(params: {
     if (agentManager.hasInFlightRun(agent.id)) {
       throw new Error(`Agent ${agent.id} already has an active run`);
     }
-    const result = await agentManager.runAgent(agent.id, wrappedPrompt);
-    const timelineText = curateAgentActivity(result.timeline);
-    return {
-      agentId: agent.id,
-      output: buildRunOutput({ output: null, timelineText, finalText: result.finalText }),
-    };
+    return { agentId: agent.id, runTurn: runTurnFor(agent.id) };
   }
 
   const config: AgentSessionConfig = {
@@ -92,10 +120,27 @@ export async function spawnFromAutomation(params: {
     mcpServers: target.config.mcpServers as AgentSessionConfig["mcpServers"],
   };
   const agent = await agentManager.createAgent(config, undefined, { labels });
-  const result = await agentManager.runAgent(agent.id, wrappedPrompt);
-  const timelineText = curateAgentActivity(result.timeline);
-  return {
-    agentId: agent.id,
-    output: buildRunOutput({ output: null, timelineText, finalText: result.finalText }),
-  };
+  return { agentId: agent.id, runTurn: runTurnFor(agent.id) };
+}
+
+/**
+ * Spawn (or re-prompt) an agent for an automation fire and run its first
+ * turn to completion. `wrappedPrompt` is the already-system-notification-
+ * wrapped prompt text. `labels` are attached to a freshly-created agent
+ * (e.g. `paseo.schedule-id` / `paseo.trigger-id`). Existing-agent targets
+ * respect `hasInFlightRun` exactly like schedules do.
+ *
+ * This is the synchronous (create + run) convenience used by the in-process
+ * schedule tick loop, which has no caller timeout. Timeout-bounded HTTP fire
+ * paths use {@link createAutomationSpawn} so they can ack on create and run
+ * the turn detached.
+ */
+export async function spawnFromAutomation(params: {
+  target: ScheduleTarget;
+  wrappedPrompt: string;
+  labels: Record<string, string>;
+  deps: AutomationSpawnDeps;
+}): Promise<ScheduleExecutionResult> {
+  const handle = await createAutomationSpawn(params);
+  return handle.runTurn();
 }

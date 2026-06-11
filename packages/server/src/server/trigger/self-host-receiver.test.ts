@@ -85,7 +85,7 @@ describe("self-host webhook receiver", () => {
     if (fixture) await fixture.close();
   });
 
-  test("valid signature → 200 and fire invoked with parsed payload", async () => {
+  test("valid signature → 202 and fire invoked with parsed payload", async () => {
     fixture = await buildFixture();
     const body = JSON.stringify({ action: "deploy" });
     const res = await fetch(`${fixture.url}/hooks/${WEBHOOK_ID}`, {
@@ -93,7 +93,7 @@ describe("self-host webhook receiver", () => {
       headers: { "Content-Type": "application/json", "X-Paseo-Signature": sign(body, NOW_S) },
       body,
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(fixture.fire).toHaveBeenCalledTimes(1);
     expect(fixture.fire.mock.calls[0][1]).toEqual({ action: "deploy" });
   });
