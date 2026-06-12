@@ -15,6 +15,16 @@
         "gradleCommand": ":app:assembleDebug"
       }
     },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_SELF_HOST_ENABLED": "false"
+      },
+      "ios": {
+        "simulator": false
+      }
+    },
     "production": {
       "channel": "production",
       "env": {
