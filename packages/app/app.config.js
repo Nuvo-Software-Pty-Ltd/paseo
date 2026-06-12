@@ -19,8 +19,8 @@ function resolveSecretFile(params) {
 
 const variants = {
   production: {
-    name: "Paseo",
-    packageId: "sh.paseo",
+    name: "Orchestra",
+    packageId: "net.getorchestra",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_PROD",
       fallbackRelativePath: "./.secrets/google-services.prod.json",
@@ -31,8 +31,8 @@ const variants = {
     }),
   },
   development: {
-    name: "Paseo Debug",
-    packageId: "sh.paseo.debug",
+    name: "Orchestra Debug",
+    packageId: "net.getorchestra.debug",
     googleServicesFile: resolveSecretFile({
       envKey: "GOOGLE_SERVICES_FILE_DEBUG",
       fallbackRelativePath: "./.secrets/google-services.debug.json",
@@ -49,7 +49,7 @@ const variant = variants[appVariant] ?? variants.production;
 export default {
   expo: {
     name: variant.name,
-    slug: "voice-mobile",
+    slug: "orchestra",
     version: pkg.version,
     orientation: "portrait",
     icon: "./assets/images/icon.png",
@@ -60,7 +60,7 @@ export default {
       policy: "appVersion",
     },
     updates: {
-      url: "https://u.expo.dev/0e7f65ce-0367-46c8-a238-2b65963d235a",
+      url: "https://u.expo.dev/028b5eef-d6ef-41c8-b628-8edb2c971a4b",
     },
     ios: {
       supportsTablet: true,
@@ -148,9 +148,9 @@ export default {
     extra: {
       router: {},
       eas: {
-        projectId: "0e7f65ce-0367-46c8-a238-2b65963d235a",
+        projectId: "028b5eef-d6ef-41c8-b628-8edb2c971a4b",
       },
     },
-    owner: "getpaseo",
+    owner: "nuvosoftware",
   },
 };
