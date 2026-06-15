@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { maskPaneProps } from "@/lib/posthog";
 import { Fonts } from "@/constants/theme";
 import { useSessionStore, type ExplorerFile } from "@/stores/session-store";
 import { useWebScrollViewScrollbar } from "@/components/use-web-scrollbar";
@@ -386,7 +387,7 @@ export function FilePane({
   const imagePreviewUri = useAttachmentPreviewUrl(query.data?.imageAttachment ?? null);
 
   return (
-    <View style={styles.container} testID="workspace-file-pane">
+    <View style={styles.container} testID="workspace-file-pane" {...maskPaneProps()}>
       {query.data?.error ? (
         <View style={styles.centerState}>
           <Text style={styles.errorText}>{query.data.error}</Text>

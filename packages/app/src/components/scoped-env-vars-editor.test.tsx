@@ -71,6 +71,10 @@ vi.mock("react-native", () => {
   };
 });
 
+// The env-vars editor only uses maskPaneProps() (session-replay masking); stub the PostHog
+// barrel so this unit test doesn't pull in the native SDK + platform constants.
+vi.mock("@/lib/posthog", () => ({ maskPaneProps: () => ({}) }));
+
 vi.mock("@/components/ui/button", () => ({
   Button: (props: Record<string, unknown>) =>
     React.createElement(
