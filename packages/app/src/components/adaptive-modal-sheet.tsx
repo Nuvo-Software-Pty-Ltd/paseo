@@ -10,6 +10,7 @@ import {
   BottomSheetBackdrop,
   BottomSheetScrollView,
   BottomSheetTextInput,
+  useBottomSheetInternal,
   type BottomSheetBackgroundProps,
 } from "@gorhom/bottom-sheet";
 import { X } from "lucide-react-native";
@@ -326,14 +327,19 @@ export function AdaptiveModalSheet({
 }
 
 /**
- * TextInput that automatically uses BottomSheetTextInput on mobile
- * for proper keyboard dodging in AdaptiveModalSheet.
+ * TextInput that uses BottomSheetTextInput on mobile for proper keyboard dodging
+ * when rendered inside an AdaptiveModalSheet/BottomSheet, and falls back to a plain
+ * TextInput otherwise. BottomSheetTextInput calls useBottomSheetInternal(), which
+ * throws ("'useBottomSheetInternal' cannot be used out of the BottomSheet!") when
+ * there is no <BottomSheet> ancestor — so we detect the context first (the `true`
+ * overload returns null instead of throwing) before using it.
  */
 export const AdaptiveTextInput = forwardRef<TextInput, TextInputProps>(
   function AdaptiveTextInput(props, ref) {
     const isMobile = useIsCompactFormFactor();
+    const insideBottomSheet = useBottomSheetInternal(true) !== null;
 
-    if (isMobile && isNative) {
+    if (isMobile && isNative && insideBottomSheet) {
       return <BottomSheetTextInput ref={ref as unknown as Ref<never>} {...props} />;
     }
 
