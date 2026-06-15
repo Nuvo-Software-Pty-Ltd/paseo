@@ -1,0 +1,96 @@
+# Build the iOS app on EAS (Expo's cloud build service) — no Mac required.
+#
+# Mirrors android-apk-release.yml. iOS adds ONE thing Android does not: Apple
+# code-signing. In --non-interactive CI the signing credentials (an Apple
+# Distribution cert + provisioning profile) must ALREADY exist on EAS. Set them
+# up ONCE, with an ACTIVE Apple Developer account, from packages/app:
+#     eas device:create     # register your iPhone UDID (needed for internal/ad-hoc installs)
+#     eas credentials        # or simply run `eas build -p ios` once, interactively, to generate them
+# After that one-time setup this workflow runs green non-interactively.
+#
+# Requires repo (or org) secret EXPO_TOKEN — expo.dev > Account settings >
+# Access tokens — with access to the app's EAS project (extra.eas.projectId in
+# packages/app/app.config.js, currently the "getpaseo" project 0e7f65ce…).
+
+name: iOS Build (EAS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "EAS build profile"
+        required: true
+        default: "preview"
+        type: choice
+        options:
+          - preview # internal/ad-hoc standalone build — installs on registered devices, no Metro
+          - development # dev client — needs `expo start --dev-client`
+          - production # store distribution (TestFlight/App Store via `eas submit`)
+
+concurrency:
+  group: ios-build-${{ github.ref }}-${{ inputs.profile }}
+  cancel-in-progress: false
+
+jobs:
+  build-ios:
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@boudra"
+
+      - name: Install JS dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Expo and EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Build iOS on EAS
+        id: eas_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/app
+          build_json="$(npx eas build --platform ios --profile '${{ inputs.profile }}' --non-interactive --wait --json)"
+          echo "$build_json" > "$RUNNER_TEMP/eas-build.json"
+          build_id="$(jq -r 'if type == "array" then .[0].id // empty else .id // empty end' "$RUNNER_TEMP/eas-build.json")"
+          if [ -z "$build_id" ]; then
+            echo "::error::Failed to determine EAS build ID (credentials not set up yet?)."
+            cat "$RUNNER_TEMP/eas-build.json"
+            exit 1
+          fi
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+
+      - name: Surface install link
+        if: steps.eas_build.outputs.build_id != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/app
+          view="$(npx eas build:view '${{ steps.eas_build.outputs.build_id }}' --json)"
+          artifact="$(jq -r '.artifacts.buildUrl // .artifacts.applicationArchiveUrl // empty' <<<"$view")"
+          {
+            echo "## iOS build complete ✅"
+            echo ""
+            echo "- **Build ID:** \`${{ steps.eas_build.outputs.build_id }}\`"
+            echo "- **Artifact:** ${artifact:-see EAS dashboard}"
+            echo ""
+            echo "Open the build's EAS page **on your iPhone** to install (internal/ad-hoc distribution), then tap **Connect to Orchestra** to exercise native cloud sign-in against the dev backend."
+          } >> "$GITHUB_STEP_SUMMARY"
