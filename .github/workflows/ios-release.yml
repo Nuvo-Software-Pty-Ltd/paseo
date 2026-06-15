@@ -1,16 +1,19 @@
 # Build the iOS app on EAS (Expo's cloud build service) — no Mac required.
 #
 # Mirrors android-apk-release.yml. iOS adds ONE thing Android does not: Apple
-# code-signing. In --non-interactive CI the signing credentials (an Apple
-# Distribution cert + provisioning profile) must ALREADY exist on EAS. Set them
-# up ONCE, with an ACTIVE Apple Developer account, from packages/app:
-#     eas device:create     # register your iPhone UDID (needed for internal/ad-hoc installs)
-#     eas credentials        # or simply run `eas build -p ios` once, interactively, to generate them
-# After that one-time setup this workflow runs green non-interactively.
+# code-signing. In --non-interactive CI the credentials must ALREADY exist on
+# EAS. With an ACTIVE Apple Developer account, the simplest one-time setup is an
+# App Store Connect API key (App Store Connect > Users and Access > Integrations
+# > App Store Connect API), uploaded to EAS once via `eas credentials` — that
+# lets EAS generate the distribution cert/profile AND submit to TestFlight
+# non-interactively. (For the ad-hoc `preview` profile instead, run
+# `eas device:create` to register devices.)
 #
-# Requires repo (or org) secret EXPO_TOKEN — expo.dev > Account settings >
-# Access tokens — with access to the app's EAS project (extra.eas.projectId in
-# packages/app/app.config.js, currently the "getpaseo" project 0e7f65ce…).
+# Profiles: preview = ad-hoc device install; development = dev client;
+# production = store build; testflight = store build + auto-submit to TestFlight.
+#
+# Requires repo/org secret EXPO_TOKEN — expo.dev > Account settings > Access
+# tokens — with access to the EAS project (nuvosoftware/orchestra).
 
 name: iOS Build (EAS)
 
@@ -25,7 +28,8 @@ on:
         options:
           - preview # internal/ad-hoc standalone build — installs on registered devices, no Metro
           - development # dev client — needs `expo start --dev-client`
-          - production # store distribution (TestFlight/App Store via `eas submit`)
+          - production # store distribution (build only; submit separately)
+          - testflight # store build + auto-submit to TestFlight (App Store Connect)
 
 concurrency:
   group: ios-build-${{ github.ref }}-${{ inputs.profile }}
@@ -68,7 +72,9 @@ jobs:
         run: |
           set -euo pipefail
           cd packages/app
-          build_json="$(npx eas build --platform ios --profile '${{ inputs.profile }}' --non-interactive --wait --json)"
+          submit_flag=""
+          if [ '${{ inputs.profile }}' = "testflight" ]; then submit_flag="--auto-submit"; fi
+          build_json="$(npx eas build --platform ios --profile '${{ inputs.profile }}' $submit_flag --non-interactive --wait --json)"
           echo "$build_json" > "$RUNNER_TEMP/eas-build.json"
           build_id="$(jq -r 'if type == "array" then .[0].id // empty else .id // empty end' "$RUNNER_TEMP/eas-build.json")"
           if [ -z "$build_id" ]; then
@@ -92,5 +98,9 @@ jobs:
             echo "- **Build ID:** \`${{ steps.eas_build.outputs.build_id }}\`"
             echo "- **Artifact:** ${artifact:-see EAS dashboard}"
             echo ""
-            echo "Open the build's EAS page **on your iPhone** to install (internal/ad-hoc distribution), then tap **Connect to Orchestra** to exercise native cloud sign-in against the dev backend."
+            if [ '${{ inputs.profile }}' = "testflight" ]; then
+              echo "Submitted to **TestFlight** — Apple processes it (~5–30 min), then it shows in App Store Connect → TestFlight for your testers. (First submit needs the App Store Connect app record + an EAS-stored ASC API key.)"
+            else
+              echo "Open the build's EAS page **on your iPhone** to install (internal/ad-hoc distribution), then tap **Connect to Orchestra** to exercise native cloud sign-in against the dev backend."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
