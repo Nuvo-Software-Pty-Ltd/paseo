@@ -20,6 +20,7 @@ import {
 } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { maskPaneProps } from "@/lib/posthog";
 import { useMutation } from "@tanstack/react-query";
 import Animated, {
   FadeIn,
@@ -755,7 +756,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
 
     return (
       <ToolCallSheetProvider>
-        <View style={stylesheet.container}>
+        <View style={stylesheet.container} {...maskPaneProps()}>
           <MessageOuterSpacingProvider disableOuterSpacing>
             {streamRenderStrategy.render({
               agentId,

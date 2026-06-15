@@ -11,6 +11,7 @@ import Animated, { runOnJS, useAnimatedReaction } from "react-native-reanimated"
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { encodeTerminalKeyInput } from "@server/shared/terminal-key-input";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { maskPaneProps } from "@/lib/posthog";
 import { useKeyboardShiftStyle } from "@/hooks/use-keyboard-shift-style";
 import { useAppVisible } from "@/hooks/use-app-visible";
 import { useStableEvent } from "@/hooks/use-stable-event";
@@ -656,7 +657,7 @@ export function TerminalPane({
   }
 
   return (
-    <Animated.View style={containerStyle}>
+    <Animated.View style={containerStyle} {...maskPaneProps()}>
       <View style={styles.outputContainer}>
         {isWorkspaceFocused ? (
           <View style={styles.terminalGestureContainer}>

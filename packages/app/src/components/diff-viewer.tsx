@@ -3,6 +3,7 @@ import { View, Text, ScrollView as RNScrollView } from "react-native";
 import { ScrollView as GHScrollView } from "react-native-gesture-handler";
 import { StyleSheet } from "react-native-unistyles";
 import { Fonts } from "@/constants/theme";
+import { maskPaneProps } from "@/lib/posthog";
 import type { DiffLine } from "@/utils/tool-call-parsers";
 import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
 import { getCodeInsets } from "./code-insets";
@@ -124,6 +125,7 @@ export function DiffViewer({
       contentContainerStyle={styles.verticalContent}
       nestedScrollEnabled
       showsVerticalScrollIndicator
+      {...maskPaneProps()}
     >
       <ScrollView
         horizontal

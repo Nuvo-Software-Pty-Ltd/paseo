@@ -45,6 +45,7 @@ import {
 import { SidebarCalloutProvider } from "@/contexts/sidebar-callout-context";
 import { ToastProvider } from "@/contexts/toast-context";
 import { VoiceProvider } from "@/contexts/voice-context";
+import { AnalyticsIdentitySync, AnalyticsProvider, RootErrorBoundary } from "@/lib/posthog";
 import { startDaemonIfGateAllows, startHostRuntimeBootstrap } from "@/app/host-runtime-bootstrap";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { listenToDesktopEvent } from "@/desktop/electron/events";
@@ -894,11 +895,16 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={flexStyle}>
       <View style={layoutStyles.surfaceFill}>
-        <RootProviders>
-          <RuntimeProviders>
-            <AppShell />
-          </RuntimeProviders>
-        </RootProviders>
+        <RootErrorBoundary>
+          <AnalyticsProvider>
+            <RootProviders>
+              <AnalyticsIdentitySync />
+              <RuntimeProviders>
+                <AppShell />
+              </RuntimeProviders>
+            </RootProviders>
+          </AnalyticsProvider>
+        </RootErrorBoundary>
       </View>
     </GestureHandlerRootView>
   );

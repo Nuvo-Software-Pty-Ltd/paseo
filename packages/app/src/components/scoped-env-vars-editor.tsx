@@ -3,6 +3,7 @@ import { Pressable, Text, TextInput, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Trash2 } from "lucide-react-native";
 
+import { maskPaneProps } from "@/lib/posthog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { confirmDialog } from "@/utils/confirm-dialog";
@@ -185,7 +186,7 @@ export function ScopedEnvVarsEditor({
   const showInherited = scope === "project" && (inheritedVars?.length ?? 0) > 0;
 
   return (
-    <View testID={testID}>
+    <View testID={testID} {...maskPaneProps()}>
       {scope === "project" ? (
         <Text style={styles.precedenceNote}>{ENV_VARS_PRECEDENCE_NOTE}</Text>
       ) : null}
