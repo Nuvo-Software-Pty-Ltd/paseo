@@ -108,3 +108,56 @@ export function resolveProjectSource(env: NodeJS.ProcessEnv = process.env): Proj
   }
   return "local_and_github";
 }
+
+// BYO-runtimes L0 — userspace toolchain env defaults. Like
+// `resolveProjectSource`, this is a DEPLOYMENT-CONFIG value the core honors,
+// NOT a cloud branch: open-core discipline forbids gating on
+// `isPaseoCloudMode()`. The cloud RunTask injects
+// `PASEO_TOOLCHAIN_PREFIX=/workspace/.toolchain` (the only writable+executable
+// surface in the hardened container is `/workspace`); a self-host operator may
+// set it to any writable dir to opt in, or leave it unset (the default) to
+// disable the behavior entirely. When unset this returns `{}` so on-host /
+// desktop env is byte-unchanged.
+//
+// The returned map is layered as a LOW-precedence overlay (below user scoped
+// env-vars and below the platform/credential overlays — see
+// scoped-env-resolver.ts). It points HOME/TMPDIR/caches at the prefix and
+// PREPENDS the toolchain bin dirs onto the inherited PATH, so a runtime a user
+// installs under the prefix (Node tarball, uv+CPython, micromamba, `npm -g`)
+// is found by the agent, terminals, and `worktree.setup`. `TMPDIR` is moved
+// off the `noexec` `/tmp` onto the prefix so installers that extract+exec
+// temp binaries work. PATH is read at call time so the prepend composes on the
+// real container PATH (idempotent: process.env.PATH never contains the prefix).
+export function buildToolchainEnvDefaults(
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const prefix = env.PASEO_TOOLCHAIN_PREFIX?.trim();
+  if (!prefix) {
+    return {};
+  }
+  const pathPrepend = [
+    `${prefix}/bin`,
+    `${prefix}/npm-global/bin`,
+    `${prefix}/node/bin`,
+    `${prefix}/uv/bin`,
+  ].join(":");
+  const basePath = env.PATH ?? "";
+  return {
+    // HOME points at a writable dir under the prefix. For terminals this is
+    // the effective HOME; for the Claude agent the per-spawn credential
+    // overlay (cloud-credentials.ts materializeClaudeHome) is applied AFTER
+    // the scoped overlay and overrides this, keeping agent HOME isolated.
+    HOME: `${prefix}/home`,
+    TMPDIR: `${prefix}/tmp`,
+    NPM_CONFIG_PREFIX: `${prefix}/npm-global`,
+    NPM_CONFIG_CACHE: `${prefix}/npm-cache`,
+    XDG_CACHE_HOME: `${prefix}/cache`,
+    XDG_DATA_HOME: `${prefix}/data`,
+    MISE_DATA_DIR: `${prefix}/mise`,
+    MISE_CACHE_DIR: `${prefix}/cache/mise`,
+    UV_INSTALL_DIR: `${prefix}/uv/bin`,
+    UV_PYTHON_INSTALL_DIR: `${prefix}/uv/python`,
+    UV_CACHE_DIR: `${prefix}/cache/uv`,
+    PATH: basePath ? `${pathPrepend}:${basePath}` : pathPrepend,
+  };
+}

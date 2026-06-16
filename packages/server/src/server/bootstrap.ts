@@ -176,6 +176,7 @@ import {
 } from "./auth.js";
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
+import { maybeExposeGithubTokenToEnv } from "./cloud-clone.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
 import {
@@ -511,6 +512,13 @@ export async function createPaseoDaemon(
       }),
     );
   }
+
+  // BYO-runtimes L0 — opt-in (ORCHESTRA_EXPOSE_GITHUB_TOKEN=1, default off)
+  // exposure of the account GitHub token to workspace subprocesses (agent /
+  // terminals / worktree.setup) so toolchain managers like mise/asdf avoid
+  // GitHub's 60/hr unauthenticated rate limit. Self-guards on cloud mode +
+  // flag + account id; never throws.
+  await maybeExposeGithubTokenToEnv({ logger });
 
   // Script proxy — intercepts requests for registered *.localhost hostnames
   // and forwards them to the corresponding local script port. Placed after

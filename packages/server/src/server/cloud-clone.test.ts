@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pino from "pino";
 import {
   buildGithubTokenSecretId,
   fetchWorkspaceRepoUrl,
+  maybeExposeGithubTokenToEnv,
   parseGitHubRepoUrl,
   resolveStage,
 } from "./cloud-clone.js";
@@ -164,5 +165,98 @@ describe("fetchWorkspaceRepoUrl", () => {
         fetchImpl,
       }),
     ).resolves.toEqual({ accountId: "a", repoUrl: null });
+  });
+});
+
+describe("maybeExposeGithubTokenToEnv (BYO-runtimes L0, opt-in)", () => {
+  const TOUCHED = [
+    "PASEO_CLOUD_MODE",
+    "ORCHESTRA_EXPOSE_GITHUB_TOKEN",
+    "PASEO_ACCOUNT_ID",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+  ] as const;
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    saved = {};
+    for (const k of TOUCHED) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+  afterEach(() => {
+    for (const k of TOUCHED) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  function fakeSm() {
+    const send = vi.fn(async () => ({ SecretString: "tok_secret" }));
+    return { client: { send } as never, send };
+  }
+
+  it("is a no-op outside cloud mode", async () => {
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN = "1";
+    process.env.PASEO_ACCOUNT_ID = "acct_1";
+    const { client, send } = fakeSm();
+    await maybeExposeGithubTokenToEnv({ logger, smClient: client });
+    expect(send).not.toHaveBeenCalled();
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it("is a no-op when the opt-in flag is unset (default off)", async () => {
+    process.env.PASEO_CLOUD_MODE = "1";
+    process.env.PASEO_ACCOUNT_ID = "acct_1";
+    const { client, send } = fakeSm();
+    await maybeExposeGithubTokenToEnv({ logger, smClient: client });
+    expect(send).not.toHaveBeenCalled();
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it("is a no-op when no account id is present", async () => {
+    process.env.PASEO_CLOUD_MODE = "1";
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN = "1";
+    const { client, send } = fakeSm();
+    await maybeExposeGithubTokenToEnv({ logger, smClient: client });
+    expect(send).not.toHaveBeenCalled();
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it("never overwrites an already-present token (operator/user PAT wins)", async () => {
+    process.env.PASEO_CLOUD_MODE = "1";
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN = "1";
+    process.env.PASEO_ACCOUNT_ID = "acct_1";
+    process.env.GITHUB_TOKEN = "operator_pat";
+    const { client, send } = fakeSm();
+    await maybeExposeGithubTokenToEnv({ logger, smClient: client });
+    expect(send).not.toHaveBeenCalled();
+    expect(process.env.GITHUB_TOKEN).toBe("operator_pat");
+  });
+
+  it("surfaces GITHUB_TOKEN and GH_TOKEN when cloud + flag + account id are all set", async () => {
+    process.env.PASEO_CLOUD_MODE = "1";
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN = "1";
+    process.env.PASEO_ACCOUNT_ID = "acct_1";
+    const { client, send } = fakeSm();
+    await maybeExposeGithubTokenToEnv({ logger, smClient: client });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(process.env.GITHUB_TOKEN).toBe("tok_secret");
+    expect(process.env.GH_TOKEN).toBe("tok_secret");
+  });
+
+  it("does not throw and leaves env unset when the fetch fails", async () => {
+    process.env.PASEO_CLOUD_MODE = "1";
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN = "1";
+    process.env.PASEO_ACCOUNT_ID = "acct_1";
+    const send = vi.fn(async () => {
+      throw new Error("secrets manager boom");
+    });
+    await expect(
+      maybeExposeGithubTokenToEnv({ logger, smClient: { send } as never }),
+    ).resolves.toBeUndefined();
+    expect(process.env.GITHUB_TOKEN).toBeUndefined();
+    expect(process.env.GH_TOKEN).toBeUndefined();
   });
 });

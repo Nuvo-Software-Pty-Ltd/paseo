@@ -153,6 +153,82 @@ describe("createScopedEnvResolver", () => {
   });
 });
 
+describe("createScopedEnvResolver — BYO-runtimes L0 toolchain overlay", () => {
+  const TOOLCHAIN = {
+    HOME: "/workspace/.toolchain/home",
+    TMPDIR: "/workspace/.toolchain/tmp",
+    PATH: "/workspace/.toolchain/bin:/usr/bin",
+  };
+
+  test("toolchain defaults are included in the resolved set", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("workspace", "ws_local", { WS_VAR: "w" });
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      toolchainDefaults: () => TOOLCHAIN,
+    });
+    expect(await resolve("/x")).toEqual({ ...TOOLCHAIN, WS_VAR: "w" });
+  });
+
+  test("a user WORKSPACE var overrides a toolchain default; untouched defaults remain", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("workspace", "ws_local", { TMPDIR: "/workspace/custom-tmp" });
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      toolchainDefaults: () => TOOLCHAIN,
+    });
+    const env = await resolve("/x");
+    expect(env.TMPDIR).toBe("/workspace/custom-tmp"); // user wins over the default
+    expect(env.PATH).toBe(TOOLCHAIN.PATH); // an untouched default is still present
+    expect(env.HOME).toBe(TOOLCHAIN.HOME);
+  });
+
+  test("a user PROJECT var overrides a toolchain default", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("project", "proj_1", { HOME: "/workspace/proj-home" });
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => project({ projectId: "proj_1", workspaceId: "ws_local" }),
+      ambientContainerId: () => "ws_local",
+      toolchainDefaults: () => TOOLCHAIN,
+    });
+    expect((await resolve("/repos/one")).HOME).toBe("/workspace/proj-home");
+  });
+
+  test("toolchain defaults use no reserved keys, so the overlay survives the strip", async () => {
+    const store = new FakeEnvVarStore();
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      toolchainDefaults: () => TOOLCHAIN,
+    });
+    const env = await resolve("/x");
+    for (const key of Object.keys(TOOLCHAIN)) {
+      expect(isReservedEnvVarKey(key)).toBe(false);
+      expect(env[key]).toBe(TOOLCHAIN[key as keyof typeof TOOLCHAIN]);
+    }
+  });
+
+  test("default toolchainDefaults is {} when PASEO_TOOLCHAIN_PREFIX is unset", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("workspace", "ws_local", { WS_VAR: "w" });
+    // No toolchainDefaults dep injected → falls back to
+    // buildToolchainEnvDefaults(), which returns {} because
+    // PASEO_TOOLCHAIN_PREFIX is unset in the test process.
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+    });
+    expect(await resolve("/x")).toEqual({ WS_VAR: "w" });
+  });
+});
+
 describe("reserved-key denylist (fix #1)", () => {
   test("MCP_TIMEOUT / MCP_TOOL_TIMEOUT are reserved (not covered by prefixes)", () => {
     expect(isReservedEnvVarKey("MCP_TIMEOUT")).toBe(true);

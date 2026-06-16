@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import crypto from "node:crypto";
 import type { Logger } from "pino";
+
+import { isPaseoCloudMode } from "./paseo-env.js";
 
 // F9 design-out: this module is the SINGLE writer for the cloud
 // workspace-clone side-effect. Sanctioned callers:
@@ -95,6 +97,50 @@ export async function fetchGithubTokenForAccount(params: FetchGithubTokenParams)
   } catch (err) {
     logger.error({ err, accountId, secretId }, "Failed to fetch GitHub token from Secrets Manager");
     throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
+// BYO-runtimes L0 — optionally surface the account GitHub token to
+// user-reachable env (the agent, terminals, and `worktree.setup` all inherit
+// `process.env`), so toolchain managers that hit the GitHub API (mise, asdf)
+// aren't throttled by GitHub's 60/hr unauthenticated limit during install.
+//
+// OFF by default. Enabled only when `ORCHESTRA_EXPOSE_GITHUB_TOKEN="1"`. This
+// is the FIRST place the account token leaves the clone URL and becomes
+// readable by arbitrary user code in the workspace — a deliberate, opt-in
+// security escalation (the token can push to the user's repos). No-op outside
+// cloud mode, when the flag is unset, when no account id is known, or when a
+// token is already present (an operator-supplied PAT wins). Never throws: a
+// fetch failure must not block the daemon boot.
+export async function maybeExposeGithubTokenToEnv(deps: {
+  logger: Logger;
+  smClient?: SecretsManagerClient;
+}): Promise<void> {
+  if (!isPaseoCloudMode()) return;
+  if (process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN?.trim() !== "1") return;
+  const accountId = process.env.PASEO_ACCOUNT_ID?.trim();
+  if (!accountId) return;
+  // Respect an operator/user-provided token — never overwrite.
+  if (process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim()) return;
+  try {
+    const token = await fetchGithubTokenForAccount({
+      stage: resolveStage(),
+      accountId,
+      smClient: deps.smClient ?? new SecretsManagerClient({}),
+      logger: deps.logger,
+    });
+    process.env.GITHUB_TOKEN = token;
+    process.env.GH_TOKEN = token;
+    deps.logger.info(
+      "ORCHESTRA_EXPOSE_GITHUB_TOKEN=1 — surfaced account GitHub token as " +
+        "GITHUB_TOKEN/GH_TOKEN to workspace subprocesses",
+    );
+  } catch (err) {
+    deps.logger.warn(
+      { err },
+      "ORCHESTRA_EXPOSE_GITHUB_TOKEN=1 set but failed to fetch the account " +
+        "GitHub token; continuing without it",
+    );
   }
 }
 
