@@ -28,7 +28,7 @@ import {
 import { runGitCommand } from "./run-git-command.js";
 import { spawnProcess } from "./spawn.js";
 import { resolvePaseoHome } from "../server/paseo-home.js";
-import { createExternalProcessEnv } from "../server/paseo-env.js";
+import { buildToolchainEnvDefaults, createExternalProcessEnv } from "../server/paseo-env.js";
 import { parseGitRevParsePath, resolveGitRevParsePath } from "./git-rev-parse-path.js";
 
 const execFileAsync = promisify(execFile);
@@ -664,6 +664,13 @@ export async function resolveWorktreeRuntimeEnv(options: {
   }
 
   return {
+    // BYO-runtimes L0: fold in the userspace-toolchain env defaults (HOME/
+    // TMPDIR/caches/PATH-prepend, driven by PASEO_TOOLCHAIN_PREFIX) so a
+    // `worktree.setup` step sees the same toolchain PATH the agent/terminal
+    // later compute — i.e. a tool installed in step 1 is on PATH for step 2,
+    // and at the location the agent will resolve. Spread FIRST so the required
+    // PASEO_* keys below always win. Empty when the prefix is unset (on-host).
+    ...buildToolchainEnvDefaults(),
     // Source checkout path is the original git repo root (shared across worktrees), not the
     // worktree itself. This allows setup scripts to copy local files (e.g. .env) from the
     // source checkout.

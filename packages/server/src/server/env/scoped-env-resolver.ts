@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 
-import { isPaseoCloudMode } from "../paseo-env.js";
+import { buildToolchainEnvDefaults, isPaseoCloudMode } from "../paseo-env.js";
 import { DEFAULT_CONTAINER_WORKSPACE_ID } from "../workspace-registry.js";
 import type { PersistedProjectRecord } from "../workspace-registry.js";
 import type { EnvVarStore, ScopedEnvVarRecord } from "./env-var-store.js";
@@ -20,7 +20,11 @@ import type { EnvVarStore, ScopedEnvVarRecord } from "./env-var-store.js";
 //
 // Open-core: no `if (cloud)` branch in the resolver. The cloud/on-host
 // difference is entirely in WHICH store backs `envStore` (file vs Dynamo,
-// swapped at construction) and which ambient container id is returned.
+// swapped at construction), which ambient container id is returned, and
+// whether `PASEO_TOOLCHAIN_PREFIX` is set (the BYO-runtimes L0 toolchain
+// overlay — a deployment-config value, NOT a cloud branch; see
+// `buildToolchainEnvDefaults` in paseo-env.ts). All three are config/store
+// choices, never an `isPaseoCloudMode()` fork in the resolution logic.
 
 // ---- Reserved-key denylist (DECISION P-1, defense-in-depth) ------------
 //
@@ -141,6 +145,12 @@ export interface ScopedEnvResolverDeps {
   // silently never resolve.
   resolveProjectForCwd: (cwd: string) => Promise<PersistedProjectRecord | null>;
   ambientContainerId?: () => string | undefined;
+  // BYO-runtimes L0 — the userspace-toolchain env overlay (HOME/TMPDIR/
+  // caches/PATH-prepend), layered BELOW user scoped vars so a user var still
+  // overrides a default. Defaults to `buildToolchainEnvDefaults()` (driven by
+  // `PASEO_TOOLCHAIN_PREFIX`); injectable for tests. Returns `{}` when the
+  // prefix is unset (on-host/desktop), so the resolved set is unchanged there.
+  toolchainDefaults?: () => Record<string, string>;
   logger?: Logger;
 }
 
@@ -148,6 +158,7 @@ export type ScopedEnvResolver = (cwd: string) => Promise<Record<string, string>>
 
 export function createScopedEnvResolver(deps: ScopedEnvResolverDeps): ScopedEnvResolver {
   const ambient = deps.ambientContainerId ?? (() => resolveAmbientContainerId());
+  const toolchainDefaults = deps.toolchainDefaults ?? (() => buildToolchainEnvDefaults());
   const logger = deps.logger?.child({ component: "scoped-env-resolver" });
 
   return async function resolveScopedEnv(cwd: string): Promise<Record<string, string>> {
@@ -172,8 +183,12 @@ export function createScopedEnvResolver(deps: ScopedEnvResolverDeps): ScopedEnvR
         : Promise.resolve<Record<string, string>>({}),
     ]);
 
-    // DECISION P-1: project overrides workspace.
-    const merged = { ...wsVars, ...projVars };
+    // DECISION P-1: project overrides workspace. BYO-runtimes L0: the
+    // toolchain defaults sit BELOW both user scopes, so a user-set
+    // PATH/TMPDIR/HOME overrides the default, while the default fills in when
+    // the user hasn't set one. Reserved keys are still stripped from the
+    // final set (the defaults use no reserved keys).
+    const merged = { ...toolchainDefaults(), ...wsVars, ...projVars };
     return stripReservedKeys(merged);
   };
 }

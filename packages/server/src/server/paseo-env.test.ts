@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   buildSelfNodeCommand,
+  buildToolchainEnvDefaults,
   createExternalCommandProcessEnv,
   createExternalProcessEnv,
   createPaseoInternalEnv,
@@ -29,6 +30,41 @@ describe("resolveProjectSource (D-3.5a T-6)", () => {
   test("does NOT consult cloud mode — github_only is config-driven, not isPaseoCloudMode()", () => {
     // Cloud-mode set but no project-source config → still the safe default.
     expect(resolveProjectSource({ PASEO_CLOUD_MODE: "1" })).toBe("local_and_github");
+  });
+});
+
+describe("buildToolchainEnvDefaults (BYO-runtimes L0)", () => {
+  test("returns {} when PASEO_TOOLCHAIN_PREFIX is unset (on-host/desktop unchanged)", () => {
+    expect(buildToolchainEnvDefaults({})).toEqual({});
+  });
+
+  test("treats a whitespace-only prefix as unset (config-driven, not isPaseoCloudMode)", () => {
+    expect(buildToolchainEnvDefaults({ PASEO_TOOLCHAIN_PREFIX: "   " })).toEqual({});
+    // Cloud-mode alone does NOT enable it — only the prefix does.
+    expect(buildToolchainEnvDefaults({ PASEO_CLOUD_MODE: "1" })).toEqual({});
+  });
+
+  test("builds the toolchain overlay rooted at the prefix", () => {
+    const env = buildToolchainEnvDefaults({
+      PASEO_TOOLCHAIN_PREFIX: "/workspace/.toolchain",
+      PATH: "/usr/bin",
+    });
+    expect(env.HOME).toBe("/workspace/.toolchain/home");
+    expect(env.TMPDIR).toBe("/workspace/.toolchain/tmp");
+    expect(env.NPM_CONFIG_PREFIX).toBe("/workspace/.toolchain/npm-global");
+    expect(env.XDG_CACHE_HOME).toBe("/workspace/.toolchain/cache");
+    expect(env.UV_INSTALL_DIR).toBe("/workspace/.toolchain/uv/bin");
+  });
+
+  test("PREPENDS the toolchain bin dirs onto the inherited PATH", () => {
+    const env = buildToolchainEnvDefaults({ PASEO_TOOLCHAIN_PREFIX: "/tc", PATH: "/usr/bin" });
+    expect(env.PATH).toBe("/tc/bin:/tc/npm-global/bin:/tc/node/bin:/tc/uv/bin:/usr/bin");
+  });
+
+  test("PATH has no trailing colon when the base PATH is empty", () => {
+    expect(buildToolchainEnvDefaults({ PASEO_TOOLCHAIN_PREFIX: "/tc" }).PATH).toBe(
+      "/tc/bin:/tc/npm-global/bin:/tc/node/bin:/tc/uv/bin",
+    );
   });
 });
 
