@@ -121,13 +121,23 @@ export function resolveProjectSource(env: NodeJS.ProcessEnv = process.env): Proj
 //
 // The returned map is layered as a LOW-precedence overlay (below user scoped
 // env-vars and below the platform/credential overlays — see
-// scoped-env-resolver.ts). It points HOME/TMPDIR/caches at the prefix and
-// PREPENDS the toolchain bin dirs onto the inherited PATH, so a runtime a user
-// installs under the prefix (Node tarball, uv+CPython, micromamba, `npm -g`)
-// is found by the agent, terminals, and `worktree.setup`. `TMPDIR` is moved
-// off the `noexec` `/tmp` onto the prefix so installers that extract+exec
-// temp binaries work. PATH is read at call time so the prepend composes on the
-// real container PATH (idempotent: process.env.PATH never contains the prefix).
+// scoped-env-resolver.ts). It redirects TMPDIR + the per-tool cache/config/
+// data dirs (npm, XDG, mise, uv, micromamba) at the prefix and PREPENDS the
+// toolchain bin dirs onto the inherited PATH, so a runtime a user installs
+// under the prefix (Node tarball, uv+CPython, micromamba, `npm -g`) is found
+// by the agent, terminals, and `worktree.setup`. `TMPDIR` is moved off the
+// `noexec` `/tmp` onto the prefix so installers that extract+exec temp
+// binaries work. PATH is read at call time so the prepend composes on the real
+// container PATH (idempotent: process.env.PATH never contains the prefix).
+//
+// Deliberately does NOT set HOME: the Claude agent's per-spawn credential HOME
+// (cloud-credentials.ts materializeClaudeHome) must stay isolated, and a live
+// capture (LEARNINGS 2026-06-16) proved a HOME set here OVERRIDES it rather
+// than the reverse. Tools that would otherwise write to `~` are redirected via
+// the XDG/NPM/UV/MISE/MAMBA vars instead, so terminals don't need a writable
+// HOME. NOTE: login shells re-run /etc/profile, which overwrites PATH and
+// drops this prepend; the daemon image bakes /etc/profile.d/orchestra-
+// toolchain.sh to re-add it (keep its dir list in sync with `pathPrepend`).
 export function buildToolchainEnvDefaults(
   env: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -143,14 +153,12 @@ export function buildToolchainEnvDefaults(
   ].join(":");
   const basePath = env.PATH ?? "";
   return {
-    // HOME points at a writable dir under the prefix. For terminals this is
-    // the effective HOME; for the Claude agent the per-spawn credential
-    // overlay (cloud-credentials.ts materializeClaudeHome) is applied AFTER
-    // the scoped overlay and overrides this, keeping agent HOME isolated.
-    HOME: `${prefix}/home`,
+    // NB: intentionally NO HOME — the agent's per-spawn credential HOME stays
+    // isolated; tools are redirected via the vars below (see doc comment).
     TMPDIR: `${prefix}/tmp`,
     NPM_CONFIG_PREFIX: `${prefix}/npm-global`,
     NPM_CONFIG_CACHE: `${prefix}/npm-cache`,
+    XDG_CONFIG_HOME: `${prefix}/config`,
     XDG_CACHE_HOME: `${prefix}/cache`,
     XDG_DATA_HOME: `${prefix}/data`,
     MISE_DATA_DIR: `${prefix}/mise`,
@@ -158,6 +166,7 @@ export function buildToolchainEnvDefaults(
     UV_INSTALL_DIR: `${prefix}/uv/bin`,
     UV_PYTHON_INSTALL_DIR: `${prefix}/uv/python`,
     UV_CACHE_DIR: `${prefix}/cache/uv`,
+    MAMBA_ROOT_PREFIX: `${prefix}/micromamba`,
     PATH: basePath ? `${pathPrepend}:${basePath}` : pathPrepend,
   };
 }

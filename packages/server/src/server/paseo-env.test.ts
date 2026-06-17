@@ -44,16 +44,20 @@ describe("buildToolchainEnvDefaults (BYO-runtimes L0)", () => {
     expect(buildToolchainEnvDefaults({ PASEO_CLOUD_MODE: "1" })).toEqual({});
   });
 
-  test("builds the toolchain overlay rooted at the prefix", () => {
+  test("builds the toolchain overlay rooted at the prefix (no HOME — agent isolation)", () => {
     const env = buildToolchainEnvDefaults({
       PASEO_TOOLCHAIN_PREFIX: "/workspace/.toolchain",
       PATH: "/usr/bin",
     });
-    expect(env.HOME).toBe("/workspace/.toolchain/home");
+    // Deliberately NO HOME — setting it here would override the agent's
+    // per-spawn credential HOME (proven by the 2026-06-16 capture).
+    expect(env.HOME).toBeUndefined();
     expect(env.TMPDIR).toBe("/workspace/.toolchain/tmp");
     expect(env.NPM_CONFIG_PREFIX).toBe("/workspace/.toolchain/npm-global");
+    expect(env.XDG_CONFIG_HOME).toBe("/workspace/.toolchain/config");
     expect(env.XDG_CACHE_HOME).toBe("/workspace/.toolchain/cache");
     expect(env.UV_INSTALL_DIR).toBe("/workspace/.toolchain/uv/bin");
+    expect(env.MAMBA_ROOT_PREFIX).toBe("/workspace/.toolchain/micromamba");
   });
 
   test("PREPENDS the toolchain bin dirs onto the inherited PATH", () => {
