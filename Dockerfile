@@ -76,9 +76,18 @@ WORKDIR /app
 
 # Tini gives us a proper PID 1 so SIGTERM from ECS reaches the daemon and the
 # graceful-shutdown path runs (close code 1000, etc.).
+# curl/xz-utils/bzip2/unzip support BYO-runtimes L0: a userspace toolchain
+# install (Node tarball, uv+CPython, micromamba) needs download + extract tools
+# that node:22-bookworm-slim does not ship. See orchestra-design-docs §5.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini ca-certificates git \
+    && apt-get install -y --no-install-recommends \
+        tini ca-certificates git curl xz-utils bzip2 unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# BYO-runtimes L0: re-prepend the userspace toolchain dirs onto PATH for login
+# shells (Debian /etc/profile overwrites PATH, dropping the daemon overlay's
+# prepend). No-op unless PASEO_TOOLCHAIN_PREFIX is set (cloud RunTask).
+COPY scripts/orchestra-toolchain.profile.sh /etc/profile.d/orchestra-toolchain.sh
 
 # Claude Code CLI — the daemon's agent runtime spawns it per-turn. Pinned to a
 # known-good version; bump deliberately when the SDK upgrades.
