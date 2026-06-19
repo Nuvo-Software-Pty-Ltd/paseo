@@ -12,6 +12,7 @@ import { useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { Buffer } from "buffer";
 import {
   ArrowLeft,
@@ -1127,9 +1128,13 @@ export default function SettingsScreen({ view }: SettingsScreenProps) {
           titleAccessory={detailHeader?.titleAccessory}
           onBack={detailBackHandler}
         />
-        <ScrollView style={scrollViewStyle} contentContainerStyle={insetBottomStyle}>
+        <KeyboardAwareScrollView
+          style={scrollViewStyle}
+          contentContainerStyle={insetBottomStyle}
+          bottomOffset={theme.spacing[4]}
+        >
           <View style={styles.content}>{content}</View>
-        </ScrollView>
+        </KeyboardAwareScrollView>
         {addHostModals}
       </View>
     );
