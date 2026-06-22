@@ -151,6 +151,12 @@ export interface ScopedEnvResolverDeps {
   // `PASEO_TOOLCHAIN_PREFIX`); injectable for tests. Returns `{}` when the
   // prefix is unset (on-host/desktop), so the resolved set is unchanged there.
   toolchainDefaults?: () => Record<string, string>;
+  // BYO-runtimes L0 — async overlay yielding a FRESH GITHUB_TOKEN/GH_TOKEN per
+  // spawn (from the cloud GithubTokenProvider) so `gh`/toolchain managers in
+  // every agent + terminal see a refreshed token, not a boot-frozen one. Layered
+  // BELOW user scoped vars (a user-set token still wins). Defaults to `{}` (no
+  // overlay) on-host/self-host. MUST never throw out of the resolver.
+  githubTokenDefaults?: () => Promise<Record<string, string>>;
   logger?: Logger;
 }
 
@@ -159,6 +165,7 @@ export type ScopedEnvResolver = (cwd: string) => Promise<Record<string, string>>
 export function createScopedEnvResolver(deps: ScopedEnvResolverDeps): ScopedEnvResolver {
   const ambient = deps.ambientContainerId ?? (() => resolveAmbientContainerId());
   const toolchainDefaults = deps.toolchainDefaults ?? (() => buildToolchainEnvDefaults());
+  const githubTokenDefaults = deps.githubTokenDefaults ?? (async () => ({}));
   const logger = deps.logger?.child({ component: "scoped-env-resolver" });
 
   return async function resolveScopedEnv(cwd: string): Promise<Record<string, string>> {
@@ -188,7 +195,17 @@ export function createScopedEnvResolver(deps: ScopedEnvResolverDeps): ScopedEnvR
     // PATH/TMPDIR/HOME overrides the default, while the default fills in when
     // the user hasn't set one. Reserved keys are still stripped from the
     // final set (the defaults use no reserved keys).
-    const merged = { ...toolchainDefaults(), ...wsVars, ...projVars };
+    let ghDefaults: Record<string, string> = {};
+    try {
+      ghDefaults = await githubTokenDefaults();
+    } catch (err) {
+      logger?.warn({ err }, "Failed to resolve github token overlay; continuing without it");
+    }
+
+    // ghDefaults sits BELOW user scoped vars (a user-set GITHUB_TOKEN wins) and,
+    // like toolchainDefaults, is a platform default — neither key is reserved,
+    // so both survive stripReservedKeys.
+    const merged = { ...toolchainDefaults(), ...ghDefaults, ...wsVars, ...projVars };
     return stripReservedKeys(merged);
   };
 }

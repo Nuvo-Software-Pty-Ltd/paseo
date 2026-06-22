@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pino from "pino";
 import {
+  buildCleanCloneUrl,
   buildGithubTokenSecretId,
   fetchWorkspaceRepoUrl,
   maybeExposeGithubTokenToEnv,
@@ -32,6 +33,20 @@ describe("parseGitHubRepoUrl", () => {
   it("rejects malformed paths", () => {
     expect(parseGitHubRepoUrl("https://github.com/owner")).toBeNull();
     expect(parseGitHubRepoUrl("not a url")).toBeNull();
+  });
+});
+
+describe("buildCleanCloneUrl", () => {
+  it("produces a token-free https github URL the credential helper authenticates", () => {
+    expect(buildCleanCloneUrl({ owner: "acme", repo: "widget" })).toBe(
+      "https://github.com/acme/widget.git",
+    );
+  });
+
+  it("never embeds an x-access-token credential in the remote", () => {
+    const url = buildCleanCloneUrl({ owner: "o", repo: "r" });
+    expect(url).not.toContain("x-access-token");
+    expect(url).not.toContain("@");
   });
 });
 

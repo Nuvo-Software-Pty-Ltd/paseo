@@ -47,6 +47,58 @@ function project(overrides: Partial<PersistedProjectRecord>): PersistedProjectRe
   };
 }
 
+describe("createScopedEnvResolver — github token overlay (env channel)", () => {
+  test("injects GITHUB_TOKEN/GH_TOKEN from githubTokenDefaults", async () => {
+    const store = new FakeEnvVarStore();
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      githubTokenDefaults: async () => ({ GITHUB_TOKEN: "gho_fresh", GH_TOKEN: "gho_fresh" }),
+    });
+    const env = await resolve("/anywhere");
+    expect(env.GITHUB_TOKEN).toBe("gho_fresh");
+    expect(env.GH_TOKEN).toBe("gho_fresh");
+  });
+
+  test("a user-scoped GITHUB_TOKEN overrides the overlay default (operator PAT wins)", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("workspace", "ws_local", { GITHUB_TOKEN: "ghp_user_pat" });
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      githubTokenDefaults: async () => ({ GITHUB_TOKEN: "gho_overlay", GH_TOKEN: "gho_overlay" }),
+    });
+    expect((await resolve("/anywhere")).GITHUB_TOKEN).toBe("ghp_user_pat");
+  });
+
+  test("no overlay when githubTokenDefaults is absent (on-host / self-host)", async () => {
+    const resolve = createScopedEnvResolver({
+      envStore: new FakeEnvVarStore(),
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+    });
+    expect((await resolve("/anywhere")).GITHUB_TOKEN).toBeUndefined();
+  });
+
+  test("never blocks a spawn when githubTokenDefaults rejects", async () => {
+    const store = new FakeEnvVarStore();
+    store.seed("workspace", "ws_local", { WS_VAR: "w" });
+    const resolve = createScopedEnvResolver({
+      envStore: store,
+      resolveProjectForCwd: async () => null,
+      ambientContainerId: () => "ws_local",
+      githubTokenDefaults: async () => {
+        throw new Error("provider down");
+      },
+    });
+    const env = await resolve("/anywhere");
+    expect(env.WS_VAR).toBe("w"); // resolution still completes
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+  });
+});
+
 describe("createScopedEnvResolver", () => {
   test("merges workspace + project vars; both visible", async () => {
     const store = new FakeEnvVarStore();

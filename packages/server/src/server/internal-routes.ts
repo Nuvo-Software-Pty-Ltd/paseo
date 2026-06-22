@@ -6,6 +6,8 @@ import { z } from "zod";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Logger } from "pino";
 import { cloneWorkspaceRepo, resolveStage } from "./cloud-clone.js";
+import { gitCredentialResponse, CREDENTIAL_ROUTE_PATH } from "./cloud-git-credential.js";
+import { getGithubTokenProvider } from "./cloud-github-token.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { ScheduleStore } from "./schedule/store.js";
 import type { TriggerService } from "./trigger/service.js";
@@ -94,12 +96,31 @@ export interface InternalRoutesOptions {
    */
   authInternalUrl?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * Per-boot random nonce that authorizes the loopback git-credential route.
+   * When set, GET /api/internal/git-credential is registered (cloud mode only).
+   * NOT the internal HMAC key — it authorizes ONLY GitHub-token retrieval,
+   * which is already a user-intended exposure (ORCHESTRA_EXPOSE_GITHUB_TOKEN).
+   */
+  credentialNonce?: string;
+  /**
+   * Returns a fresh GitHub token for the credential route. Defaults to the
+   * module GithubTokenProvider singleton; injected in tests.
+   */
+  githubTokenGetter?: () => Promise<{ token: string | null; needsReauth: boolean }>;
 }
 
 function verifyHmac(body: string, hmacHeader: string | undefined, key: string): boolean {
   if (!hmacHeader) return false;
   const expected = crypto.createHmac("sha256", key).update(body).digest("hex");
   return crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(hmacHeader, "hex"));
+}
+
+function nonceEqual(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 export function createInternalRoutes(options: InternalRoutesOptions): Router {
@@ -507,6 +528,46 @@ export function createInternalRoutes(options: InternalRoutesOptions): Router {
   if (options.authInternalUrl && options.workspaceRoot && options.expectedWorkspaceId) {
     router.get("/api/files/download/internal/:tokenId", (req, res) => {
       void handleDownloadInternal(req, res);
+    });
+  }
+
+  // GET /api/internal/git-credential — nonce-gated (NOT HMAC). Returns a FRESH
+  // GitHub token in git-credential format so raw `git push/fetch` over clean
+  // (token-free) remotes authenticates with a refreshed token. Reachable on
+  // loopback because internal routes mount BEFORE the workspace-auth middleware
+  // (bootstrap.ts). The per-boot nonce authorizes only token retrieval; the
+  // internal HMAC key is never exposed to the helper script / user code.
+  const handleGitCredential = async (
+    req: import("express").Request,
+    res: import("express").Response,
+  ): Promise<void> => {
+    const expected = options.credentialNonce;
+    const provided = req.headers["x-paseo-cred-nonce"];
+    if (!expected || typeof provided !== "string" || !nonceEqual(provided, expected)) {
+      res.status(401).end();
+      return;
+    }
+    let token: string | null = null;
+    try {
+      const getter =
+        options.githubTokenGetter ??
+        (async () => {
+          const provider = getGithubTokenProvider(logger);
+          return provider ? provider.getToken() : { token: null, needsReauth: false };
+        });
+      const result = await getter();
+      // On needsReauth, return EMPTY creds so git fails visibly (re-auth needed)
+      // rather than succeeding with a dead token.
+      if (!result.needsReauth) token = result.token;
+    } catch (err) {
+      logger.warn({ err }, "git-credential: token fetch failed");
+    }
+    res.status(200).type("text/plain").send(gitCredentialResponse(token));
+  };
+
+  if (options.credentialNonce) {
+    router.get(CREDENTIAL_ROUTE_PATH, (req, res) => {
+      void handleGitCredential(req, res);
     });
   }
 
