@@ -71,8 +71,11 @@ describe("materializeGitCredentialHelper", () => {
     const helper = readFileSync(res!.helperPath, "utf8");
     expect(helper).toContain("X-Paseo-Cred-Nonce: abc123");
     expect(helper).toContain("9090");
-    // Owner-executable (0700) — git must be able to exec it.
-    expect(statSync(res!.helperPath).mode & 0o100).toBe(0o100);
+    // Owner-executable (0700) — git must exec it. POSIX-only: Windows has no
+    // Unix permission bits (the cloud daemon this helper serves is Linux-only).
+    if (process.platform !== "win32") {
+      expect(statSync(res!.helperPath).mode & 0o100).toBe(0o100);
+    }
 
     const cfg = readFileSync(res!.gitConfigPath, "utf8");
     expect(cfg).toContain(res!.helperPath);
