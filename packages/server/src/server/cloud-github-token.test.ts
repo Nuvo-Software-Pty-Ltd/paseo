@@ -13,10 +13,7 @@ const HMAC = "test-internal-hmac-key";
 const ACCOUNT = "acct_42";
 const NOW = Date.parse("2026-06-22T00:00:00.000Z");
 
-function makeProvider(opts: {
-  fetchImpl: typeof fetch;
-  clock?: () => number;
-}) {
+function makeProvider(opts: { fetchImpl: typeof fetch; clock?: () => number }) {
   return new GithubTokenProvider({
     authServiceBaseUrl: BASE,
     hmacKey: HMAC,
@@ -37,7 +34,11 @@ function jsonResponse(body: unknown, status = 200): Response {
 describe("GithubTokenProvider", () => {
   it("caches a fresh token — two getToken() calls hit auth only once", async () => {
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ token: "gho_x", expiresAt: new Date(NOW + 3600_000).toISOString(), needsReauth: false }),
+      jsonResponse({
+        token: "gho_x",
+        expiresAt: new Date(NOW + 3600_000).toISOString(),
+        needsReauth: false,
+      }),
     ) as unknown as typeof fetch;
     const p = makeProvider({ fetchImpl });
 
@@ -52,7 +53,11 @@ describe("GithubTokenProvider", () => {
   it("re-fetches once the cached token nears expiry", async () => {
     let clock = NOW;
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ token: "gho_x", expiresAt: new Date(clock + 120_000).toISOString(), needsReauth: false }),
+      jsonResponse({
+        token: "gho_x",
+        expiresAt: new Date(clock + 120_000).toISOString(),
+        needsReauth: false,
+      }),
     ) as unknown as typeof fetch;
     const p = makeProvider({ fetchImpl, clock: () => clock });
 
@@ -95,7 +100,11 @@ describe("GithubTokenProvider", () => {
     let fail = false;
     const fetchImpl = vi.fn(async () => {
       if (fail) throw new Error("network");
-      return jsonResponse({ token: "gho_cached", expiresAt: new Date(NOW + 1000).toISOString(), needsReauth: false });
+      return jsonResponse({
+        token: "gho_cached",
+        expiresAt: new Date(NOW + 1000).toISOString(),
+        needsReauth: false,
+      });
     }) as unknown as typeof fetch;
     let clock = NOW;
     const p = makeProvider({ fetchImpl, clock: () => clock });
@@ -110,7 +119,11 @@ describe("GithubTokenProvider", () => {
 
   it("propagates needsReauth and keeps re-fetching while latched (no cache short-circuit)", async () => {
     const fetchImpl = vi.fn(async () =>
-      jsonResponse({ token: "gho_stale", expiresAt: new Date(NOW + 3600_000).toISOString(), needsReauth: true }),
+      jsonResponse({
+        token: "gho_stale",
+        expiresAt: new Date(NOW + 3600_000).toISOString(),
+        needsReauth: true,
+      }),
     ) as unknown as typeof fetch;
     const p = makeProvider({ fetchImpl });
 

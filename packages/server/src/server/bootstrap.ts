@@ -522,33 +522,10 @@ export async function createPaseoDaemon(
   // flag + account id; never throws.
   await maybeExposeGithubTokenToEnv({ logger });
 
-  // Git channel of the GitHub token-refresh lifecycle. When token exposure is
-  // enabled in cloud mode, materialize a git credential helper so raw git uses
-  // a FRESH token per operation (clean clones + the nonce-gated loopback
-  // /api/internal/git-credential route) instead of a boot-frozen one. The nonce
-  // authorizes only token retrieval — never the internal HMAC key. Never blocks
-  // boot: on any failure the flag stays unset and cloneWorkspaceRepo falls back
-  // to embedding the token in the clone URL (today's behavior).
-  let gitCredentialNonce: string | undefined;
-  if (
-    isPaseoCloudMode() &&
-    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN?.trim() === "1" &&
-    listenTarget.type === "tcp"
-  ) {
-    const nonce = randomBytes(32).toString("hex");
-    const materialized = await materializeGitCredentialHelper({
-      dir: "/workspace/.paseo",
-      nonce,
-      port: listenTarget.port,
-      logger,
-    });
-    if (materialized) {
-      process.env.GIT_CONFIG_GLOBAL = materialized.gitConfigPath;
-      process.env.ORCHESTRA_GIT_CREDENTIAL_HELPER = "1";
-      gitCredentialNonce = nonce;
-      logger.info("Git credential helper enabled — clean clones + per-op token refresh");
-    }
-  }
+  // Git channel of the GitHub token-refresh lifecycle (extracted to keep
+  // createPaseoDaemon under the oxlint complexity ceiling). Returns the loopback
+  // credential-route nonce when the helper was materialized, else undefined.
+  const gitCredentialNonce = await maybeMaterializeGitCredentialHelper(listenTarget, logger);
 
   // Script proxy — intercepts requests for registered *.localhost hostnames
   // and forwards them to the corresponding local script port. Placed after
@@ -1444,6 +1421,39 @@ function buildTriggerService(
     logger.info("Self-host webhook receiver mounted at /hooks/:webhookId");
   }
   return triggerService;
+}
+
+// Git channel of the GitHub token-refresh lifecycle. When token exposure is
+// enabled in cloud mode, materialize a git credential helper so raw git uses a
+// FRESH token per operation (clean clones + the nonce-gated loopback
+// /api/internal/git-credential route) instead of a boot-frozen one. The nonce
+// authorizes only token retrieval — never the internal HMAC key. Never blocks
+// boot: returns undefined on any miss/failure, leaving the flag unset so
+// cloneWorkspaceRepo falls back to embedding the token in the clone URL (today's
+// behavior).
+async function maybeMaterializeGitCredentialHelper(
+  listenTarget: ListenTarget,
+  logger: Logger,
+): Promise<string | undefined> {
+  if (
+    !isPaseoCloudMode() ||
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN?.trim() !== "1" ||
+    listenTarget.type !== "tcp"
+  ) {
+    return undefined;
+  }
+  const nonce = randomBytes(32).toString("hex");
+  const materialized = await materializeGitCredentialHelper({
+    dir: "/workspace/.paseo",
+    nonce,
+    port: listenTarget.port,
+    logger,
+  });
+  if (!materialized) return undefined;
+  process.env.GIT_CONFIG_GLOBAL = materialized.gitConfigPath;
+  process.env.ORCHESTRA_GIT_CREDENTIAL_HELPER = "1";
+  logger.info("Git credential helper enabled — clean clones + per-op token refresh");
+  return nonce;
 }
 
 function mountLateInternalRoutes(

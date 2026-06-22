@@ -61,9 +61,13 @@ export async function materializeGitCredentialHelper(opts: {
   const gitConfigPath = path.join(opts.dir, GITCONFIG_FILENAME);
   try {
     await mkdir(opts.dir, { recursive: true });
-    await writeFile(helperPath, buildCredentialHelperScript({ nonce: opts.nonce, port: opts.port }), {
-      mode: 0o700,
-    });
+    await writeFile(
+      helperPath,
+      buildCredentialHelperScript({ nonce: opts.nonce, port: opts.port }),
+      {
+        mode: 0o700,
+      },
+    );
     await chmod(helperPath, 0o700);
     await writeFile(gitConfigPath, buildDaemonGitConfig({ helperPath }), { mode: 0o600 });
     return { helperPath, gitConfigPath };
