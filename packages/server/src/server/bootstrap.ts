@@ -2,7 +2,7 @@ import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
 import { open } from "fs/promises";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { hostname as getHostname } from "node:os";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -177,6 +177,8 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { maybeExposeGithubTokenToEnv } from "./cloud-clone.js";
+import { buildGithubTokenEnvDefaults } from "./cloud-github-token.js";
+import { materializeGitCredentialHelper } from "./cloud-git-credential.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
 import {
@@ -520,6 +522,34 @@ export async function createPaseoDaemon(
   // flag + account id; never throws.
   await maybeExposeGithubTokenToEnv({ logger });
 
+  // Git channel of the GitHub token-refresh lifecycle. When token exposure is
+  // enabled in cloud mode, materialize a git credential helper so raw git uses
+  // a FRESH token per operation (clean clones + the nonce-gated loopback
+  // /api/internal/git-credential route) instead of a boot-frozen one. The nonce
+  // authorizes only token retrieval — never the internal HMAC key. Never blocks
+  // boot: on any failure the flag stays unset and cloneWorkspaceRepo falls back
+  // to embedding the token in the clone URL (today's behavior).
+  let gitCredentialNonce: string | undefined;
+  if (
+    isPaseoCloudMode() &&
+    process.env.ORCHESTRA_EXPOSE_GITHUB_TOKEN?.trim() === "1" &&
+    listenTarget.type === "tcp"
+  ) {
+    const nonce = randomBytes(32).toString("hex");
+    const materialized = await materializeGitCredentialHelper({
+      dir: "/workspace/.paseo",
+      nonce,
+      port: listenTarget.port,
+      logger,
+    });
+    if (materialized) {
+      process.env.GIT_CONFIG_GLOBAL = materialized.gitConfigPath;
+      process.env.ORCHESTRA_GIT_CREDENTIAL_HELPER = "1";
+      gitCredentialNonce = nonce;
+      logger.info("Git credential helper enabled — clean clones + per-op token refresh");
+    }
+  }
+
   // Script proxy — intercepts requests for registered *.localhost hostnames
   // and forwards them to the corresponding local script port. Placed after
   // host/CORS/auth checks but before the rest of the routes.
@@ -681,6 +711,11 @@ export async function createPaseoDaemon(
       getCheckout: (cwd) => workspaceGitService.getCheckout(cwd),
     }),
     ambientContainerId: () => resolveAmbientContainerId(),
+    // Env channel of the GitHub token-refresh lifecycle — a FRESH
+    // GITHUB_TOKEN/GH_TOKEN per spawn (self-gated to cloud + exposure flag;
+    // {} otherwise; never throws). The git channel is handled separately by the
+    // credential helper + clean clones.
+    githubTokenDefaults: buildGithubTokenEnvDefaults(logger),
     logger,
   });
   // T-4 (D-3) — durable permission queue. On-host gets
@@ -785,6 +820,7 @@ export async function createPaseoDaemon(
     internalHmacKeyForLateMount,
     scheduleService,
     triggerService,
+    gitCredentialNonce,
   );
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
   const persistedRecords = await agentStorage.list();
@@ -1416,6 +1452,7 @@ function mountLateInternalRoutes(
   internalHmacKeyForLateMount: string | null,
   scheduleService: ScheduleService,
   triggerService: TriggerService,
+  gitCredentialNonce?: string,
 ): void {
   if (!internalHmacKeyForLateMount) return;
   const workspaceIdForLateRoutes = process.env.PASEO_WORKSPACE_ID?.trim();
@@ -1434,6 +1471,10 @@ function mountLateInternalRoutes(
       ...(process.env.ORCHESTRA_AUTH_INTERNAL_URL
         ? { authInternalUrl: process.env.ORCHESTRA_AUTH_INTERNAL_URL }
         : {}),
+      // Git credential helper loopback route — registered only when the helper
+      // was materialized at boot (nonce present). The route's default token
+      // getter is the module GithubTokenProvider singleton.
+      ...(gitCredentialNonce ? { credentialNonce: gitCredentialNonce } : {}),
     }),
   );
   logger.info(

@@ -53,6 +53,16 @@ export function parseGitHubRepoUrl(repoUrl: string): ParsedGitHubRepo | null {
   }
 }
 
+// Clean (token-free) clone URL. In cloud mode with the git credential helper
+// active (ORCHESTRA_GIT_CREDENTIAL_HELPER=1, set at boot once the helper is
+// materialized), clones use this and the helper supplies a FRESH token per git
+// operation — so the remote persisted in .git/config never carries a boot-frozen,
+// expirable token. Helper-absent paths (self-host / materialization failure)
+// fall back to the embedded-token URL inside cloneWorkspaceRepo.
+export function buildCleanCloneUrl(parsed: ParsedGitHubRepo): string {
+  return `https://github.com/${parsed.owner}/${parsed.repo}.git`;
+}
+
 export function runGitClone(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn("git", ["clone", "--depth=1", url, dest], {
@@ -182,9 +192,17 @@ export async function cloneWorkspaceRepo(
     throw new Error(`Invalid GitHub repository URL: ${repoUrl}`);
   }
 
-  const ghToken = await fetchGithubTokenForAccount({ stage, accountId, smClient, logger });
-
-  const cloneUrl = `https://x-access-token:${ghToken}@github.com/${ghParsed.owner}/${ghParsed.repo}.git`;
+  // With the credential helper active, clone a CLEAN remote — the helper supplies
+  // credentials (a fresh token per op), so .git/config stays token-free and a
+  // later `git push` re-fetches a refreshed token instead of a dead frozen one.
+  // Otherwise embed the token inline (legacy / self-host / helper unavailable).
+  let cloneUrl: string;
+  if (process.env.ORCHESTRA_GIT_CREDENTIAL_HELPER === "1") {
+    cloneUrl = buildCleanCloneUrl(ghParsed);
+  } else {
+    const ghToken = await fetchGithubTokenForAccount({ stage, accountId, smClient, logger });
+    cloneUrl = `https://x-access-token:${ghToken}@github.com/${ghParsed.owner}/${ghParsed.repo}.git`;
+  }
   const subdir = params.destSubdir ?? ".git-canonical";
   const clonePath = `/workspace/${workspaceId}/${subdir}`;
   const destPath = `${clonePath}/`;
