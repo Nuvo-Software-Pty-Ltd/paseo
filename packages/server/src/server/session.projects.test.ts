@@ -180,6 +180,31 @@ describe("Session project RPCs (D-3.5a)", () => {
     expect(listPayload.projects).toHaveLength(1);
   });
 
+  // workspace-retention — add_project must also persist a checkout (workspace)
+  // record. Without it the project has no workspace row, so it is dropped from
+  // both lists and lost on the next cloud recycle (the workspace registry is
+  // rebuilt from durable projects at boot). A non-git local dir → "directory".
+  test("add_project (local_dir) writes a workspace (checkout) record", async () => {
+    const dir = path.join(tmpDir, "added-but-never-opened");
+    await session.handleMessage({
+      type: "add_project_request",
+      workspaceId: DEFAULT_CONTAINER_WORKSPACE_ID,
+      source: { kind: "local_dir", path: dir },
+      requestId: "a1",
+    });
+    const addPayload = requirePayload<{ error: string | null; project: { projectId: string } }>(
+      "add_project_response",
+    );
+    expect(addPayload.error).toBeNull();
+
+    const workspaces = await workspaceRegistry.list();
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0].cwd).toBe(path.resolve(dir));
+    expect(workspaces[0].projectId).toBe(addPayload.project.projectId);
+    expect(workspaces[0].kind).toBe("directory");
+    expect(workspaces[0].archivedAt).toBeNull();
+  });
+
   test("list_projects returns [] for an empty workspace (T-5)", async () => {
     await session.handleMessage({
       type: "list_projects_request",

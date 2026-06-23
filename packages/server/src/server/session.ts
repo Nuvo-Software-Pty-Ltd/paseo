@@ -5955,7 +5955,13 @@ export class Session {
       if (existing) {
         return existing;
       }
-      const placementPromise = this.buildProjectPlacementForCwd(cwd);
+      // workspace-retention (belt-and-suspenders) — fall back to a cwd-keyed
+      // placement when no workspace record matches, so an agent is NOT silently
+      // dropped from the conversation list while its workspace record is
+      // momentarily absent (e.g. mid-reconstruction at a cold cloud respawn).
+      // The `scope === "active"` branch above intentionally does NOT use this
+      // fallback: that scope is "live conversations with a current placement".
+      const placementPromise = this.buildProjectPlacementForCwd(cwd, { fallback: true });
       placementByCwd.set(cwd, placementPromise);
       return placementPromise;
     };
@@ -7177,6 +7183,16 @@ export class Session {
         repoUrl: membership.repoUrl,
       });
       await this.projectRegistry.upsert(record);
+      // workspace-retention — also persist a checkout record so an added-but-
+      // never-opened project is visible in both lists and survives a recycle
+      // (the workspace registry is reconstructed from durable projects at boot).
+      await this.persistCheckoutRecordForProject({
+        project: record,
+        cwd: membership.projectRootPath,
+        workspaceKind: membership.workspaceKind,
+        displayName: membership.workspaceDisplayName,
+        timestamp,
+      });
       return record;
     }
 
@@ -7220,7 +7236,45 @@ export class Session {
       repoUrl: canonicalRepoUrl,
     });
     await this.projectRegistry.upsert(record);
+    // workspace-retention — persist a checkout record for the freshly-cloned
+    // repo so it is visible immediately and reconstructs across recycles.
+    await this.persistCheckoutRecordForProject({
+      project: record,
+      cwd: cloneResult.clonePath,
+      workspaceKind: "local_checkout",
+      displayName: deriveProjectGroupingName(projectKey),
+      timestamp,
+    });
     return record;
+  }
+
+  // workspace-retention — upsert the demoted Checkout (workspace) record for a
+  // project created via add_project. Without it the project has no workspace
+  // row, so it is dropped from the workspace/project list (buildDescriptorMap
+  // folds projects through their workspace records) and from the conversation
+  // list. Idempotent: keyed by the normalized checkout cwd, so re-adding the
+  // same project (or a later boot reconstruction) overwrites in place. A
+  // pre-existing record's createdAt is preserved.
+  private async persistCheckoutRecordForProject(input: {
+    project: PersistedProjectRecord;
+    cwd: string;
+    workspaceKind: PersistedWorkspaceRecord["kind"];
+    displayName: string;
+    timestamp: string;
+  }): Promise<void> {
+    const workspaceId = normalizePersistedWorkspaceId(input.cwd);
+    const existing = await this.workspaceRegistry.get(workspaceId);
+    await this.workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId,
+        projectId: input.project.projectId,
+        cwd: workspaceId,
+        kind: input.workspaceKind,
+        displayName: input.displayName,
+        createdAt: existing?.createdAt ?? input.timestamp,
+        updatedAt: input.timestamp,
+      }),
+    );
   }
 
   // D-3.5a — resolve the workspace's GitHub account id for token-scoped clones.
