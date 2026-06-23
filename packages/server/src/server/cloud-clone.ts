@@ -4,6 +4,10 @@ import crypto from "node:crypto";
 import type { Logger } from "pino";
 
 import { isPaseoCloudMode } from "./paseo-env.js";
+import {
+  getWorkspaceSnapshotStore,
+  isWorkspaceSnapshotEnabled,
+} from "./workspace-snapshot-store.js";
 
 // F9 design-out: this module is the SINGLE writer for the cloud
 // workspace-clone side-effect. Sanctioned callers:
@@ -213,6 +217,28 @@ export async function cloneWorkspaceRepo(
   );
 
   await runGitClone(cloneUrl, destPath);
+
+  // Cloud mode: rehydrate the workspace git delta captured before the last
+  // recycle (uncommitted edits, unpushed commits, untracked files, stashes) on
+  // top of this fresh clone — /workspace is tmpfs, so a recycle wipes it. This
+  // runs synchronously inside the (blocking) open/clone request, so the tree is
+  // whole before any real use; no /api/health gating needed. Best-effort: a
+  // missing/corrupt/diverged snapshot degrades to the plain clone (restore()
+  // never throws, and verifies the bundle's prerequisites before applying).
+  // Scoped to the primary project clone — 2nd/Nth repos aren't yet snapshot-keyed
+  // per subdir (v1 limitation), so they re-clone clean.
+  if (isWorkspaceSnapshotEnabled() && params.destSubdir === undefined) {
+    const restored = await getWorkspaceSnapshotStore(logger).restore({
+      workspaceId,
+      repoDir: clonePath,
+    });
+    logger.info(
+      { workspaceId, restored },
+      restored
+        ? "Restored workspace git delta after clone"
+        : "No workspace snapshot applied (plain clone)",
+    );
+  }
 
   const workspacePath = `/workspace/${workspaceId}`;
   logger.info({ workspaceId, workspacePath, clonePath }, "Clone completed successfully");
