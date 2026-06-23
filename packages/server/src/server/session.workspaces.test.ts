@@ -139,6 +139,13 @@ function asTestSession(session: Session | TestSession): TestSession {
 }
 
 const AgentIdEntrySchema = z.object({ agent: z.object({ id: z.string() }) });
+const FallbackPlacementEntrySchema = z.object({
+  agent: z.object({ id: z.string() }),
+  project: z.object({
+    projectKey: z.string(),
+    checkout: z.object({ cwd: z.string() }),
+  }),
+});
 
 function makeAgent(input: {
   id: string;
@@ -1803,6 +1810,39 @@ test("legacy unscoped fetch_agents keeps global workspace behavior", async () =>
     "legacy-active",
     "legacy-archived-workspace",
   ]);
+});
+
+// workspace-retention (belt-and-suspenders) — at a cold cloud respawn the
+// workspace registry may be momentarily empty while it is reconstructed, but the
+// agents (and their conversations) are durable. An unscoped fetch_agents must
+// NOT silently drop an agent whose workspace record is absent; the fallback path
+// synthesizes a cwd-keyed placement so the conversation still appears.
+test("unscoped fetch_agents returns agents even when no workspace record exists (fallback)", async () => {
+  const session = createSessionForWorkspaceTests();
+  const orphanCwd = path.resolve("/workspace/ws_3ea432ff/Nuvo-Software-Pty-Ltd__agora");
+
+  // Workspace registry is EMPTY (mid-reconstruction) — no record matches.
+  session.projectRegistry.list = async () => [];
+  session.projectRegistry.get = async () => null;
+  session.workspaceRegistry.list = async () => [];
+  session.listAgentPayloads = async () => [
+    makeAgent({
+      id: "orphan-agent",
+      cwd: orphanCwd,
+      status: "idle",
+      updatedAt: "2026-06-22T12:00:00.000Z",
+    }),
+  ];
+
+  const result = await session.listFetchAgentsEntries({
+    type: "fetch_agents_request",
+    requestId: "req-orphan",
+  });
+
+  // Pre-fix this dropped the agent (placement was null); the fallback keeps it.
+  expect(agentIdsFromEntries(result.entries)).toEqual(["orphan-agent"]);
+  const entry = FallbackPlacementEntrySchema.parse(result.entries[0]);
+  expect(entry.project.checkout.cwd).toBe(orphanCwd);
 });
 
 test("fetch_agent_history_request pages archived historical rows separately", async () => {

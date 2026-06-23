@@ -21,6 +21,20 @@ import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js"
 const NON_GIT_PROJECT = path.resolve("/tmp/non-git-project");
 const ARCHIVED_PROJECT = path.resolve("/tmp/archived-project");
 
+// Top-level (callback-depth 1) lookup helpers — keep array-method callbacks out
+// of the deeply-nested cloud-migration describe/test bodies (oxlint
+// max-nested-callbacks = 3).
+function findWorkspaceByCwd<T extends { cwd: string }>(
+  workspaces: T[],
+  cwd: string,
+): T | undefined {
+  return workspaces.find((workspace) => workspace.cwd === cwd);
+}
+
+function hasProjectId<T extends { projectId: string }>(projects: T[], projectId: string): boolean {
+  return projects.some((project) => project.projectId === projectId);
+}
+
 function agentRecord(overrides: { id: string; cwd: string; archivedAt?: string | null }) {
   return {
     id: overrides.id,
@@ -312,6 +326,193 @@ describe("bootstrapWorkspaceRegistries", () => {
         // Even with a live remote, the persisted repoUrl is credential-free.
         expect(migrated?.repoUrl).toBe("https://github.com/acme/app");
         expect(migrated?.repoUrl).not.toContain("ghs_TOKEN");
+      });
+
+      // workspace-retention — the production bug: at a cold respawn the workspace
+      // registry (tmpfs / in-memory) is empty and the clone is absent, but the
+      // project store is durable. An ADDITIONAL repo lives at the deterministic
+      // subdir `/workspace/<ws>/<owner>__<repo>`. Recover its identity from the
+      // path, reuse the durable project id, materialize a workspace record at the
+      // correct cwd, and ensure an agent at that cwd resolves a placement.
+      const ADDITIONAL_REPO = "remote:github.com/Nuvo-Software-Pty-Ltd/agora";
+      const ADDITIONAL_CWD = `/workspace/${CONTAINER}/Nuvo-Software-Pty-Ltd__agora`;
+
+      test("cold boot reconstructs a workspace for a durable additional repo (agora) and keeps an agent's placement", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        // Durable, non-archived, remote-keyed git project for the 2nd repo —
+        // exactly what add_project persisted before the recycle wiped the clone.
+        await projectRegistry.initialize();
+        await projectRegistry.upsert({
+          projectId: ADDITIONAL_REPO,
+          rootPath: ADDITIONAL_CWD,
+          kind: "git",
+          displayName: "Nuvo-Software-Pty-Ltd/agora",
+          createdAt: "2026-05-01T00:00:00.000Z",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+          archivedAt: null,
+          workspaceId: CONTAINER,
+          repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/agora",
+        });
+        await agentStorage.initialize();
+        // An agent whose cwd is the (now absent) additional clone.
+        await agentStorage.upsert(agentRecord({ id: "agent-agora", cwd: ADDITIONAL_CWD }));
+
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService, // noop → degraded (clone absent)
+          logger,
+          containerWorkspaceId: CONTAINER,
+          // No primary seed in this scenario — recovery is from the subdir slug.
+          migrationRepoUrlSeed: null,
+        });
+
+        // (a) remote-keyed git project — NOT a path-keyed non_git duplicate.
+        const projects = await projectRegistry.list();
+        expect(projects).toHaveLength(1);
+        expect(projects[0]?.projectId).toBe(ADDITIONAL_REPO);
+        expect(projects[0]?.kind).toBe("git");
+        expect(hasProjectId(projects, ADDITIONAL_CWD)).toBe(false);
+
+        // (b) a workspace (checkout) record at the correct cwd, keyed remote.
+        const workspaces = await cloudWorkspaceRegistry.list();
+        const agoraWorkspace = findWorkspaceByCwd(workspaces, ADDITIONAL_CWD);
+        expect(agoraWorkspace).toBeDefined();
+        expect(agoraWorkspace?.projectId).toBe(ADDITIONAL_REPO);
+        expect(agoraWorkspace?.kind).toBe("local_checkout");
+
+        // (c) an agent at that cwd resolves a placement (the workspace exists),
+        // i.e. it would NOT be dropped from the conversation list. The presence
+        // of the cwd-matched workspace record above is exactly what the
+        // placement lookup keys on.
+        expect(agoraWorkspace?.workspaceId).toBe(ADDITIONAL_CWD);
+      });
+
+      test("cold boot reconstructs a workspace for a durable project with NO agent record", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        await projectRegistry.initialize();
+        await projectRegistry.upsert({
+          projectId: ADDITIONAL_REPO,
+          rootPath: ADDITIONAL_CWD,
+          kind: "git",
+          displayName: "Nuvo-Software-Pty-Ltd/agora",
+          createdAt: "2026-05-01T00:00:00.000Z",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+          archivedAt: null,
+          workspaceId: CONTAINER,
+          repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/agora",
+        });
+        // No agent records at all.
+        await agentStorage.initialize();
+
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService,
+          logger,
+          containerWorkspaceId: CONTAINER,
+          migrationRepoUrlSeed: null,
+        });
+
+        const workspaces = await cloudWorkspaceRegistry.list();
+        expect(workspaces).toHaveLength(1);
+        expect(workspaces[0]?.cwd).toBe(ADDITIONAL_CWD);
+        expect(workspaces[0]?.projectId).toBe(ADDITIONAL_REPO);
+        // The durable project is untouched (still exactly one).
+        expect(await projectRegistry.list()).toHaveLength(1);
+      });
+
+      test("cold boot does NOT resurrect an archived project", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        await projectRegistry.initialize();
+        await projectRegistry.upsert({
+          projectId: ADDITIONAL_REPO,
+          rootPath: ADDITIONAL_CWD,
+          kind: "git",
+          displayName: "Nuvo-Software-Pty-Ltd/agora",
+          createdAt: "2026-05-01T00:00:00.000Z",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+          archivedAt: "2026-06-21T00:00:00.000Z",
+          workspaceId: CONTAINER,
+          repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/agora",
+        });
+        await agentStorage.initialize();
+
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService,
+          logger,
+          containerWorkspaceId: CONTAINER,
+          migrationRepoUrlSeed: null,
+        });
+
+        // No workspace materialized for an archived project.
+        expect(await cloudWorkspaceRegistry.list()).toHaveLength(0);
+      });
+
+      test("warm boot for an additional repo is idempotent (no path-keyed dupe)", async () => {
+        const cloudWorkspaceRegistry = new InMemoryWorkspaceRegistry();
+        const cloudContainerRegistry = new InMemoryWorkspaceContainerRegistry();
+        await projectRegistry.initialize();
+        await projectRegistry.upsert({
+          projectId: ADDITIONAL_REPO,
+          rootPath: ADDITIONAL_CWD,
+          kind: "git",
+          displayName: "Nuvo-Software-Pty-Ltd/agora",
+          createdAt: "2026-05-01T00:00:00.000Z",
+          updatedAt: "2026-06-20T00:00:00.000Z",
+          archivedAt: null,
+          workspaceId: CONTAINER,
+          repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/agora",
+        });
+        // Clone IS present → live git facts for the additional repo.
+        const gitService = createNoopWorkspaceGitService({
+          getCheckout: async (cwd: string) => ({
+            cwd,
+            isGit: true,
+            currentBranch: "main",
+            remoteUrl: "https://x-access-token:ghs_T@github.com/Nuvo-Software-Pty-Ltd/agora.git",
+            worktreeRoot: cwd,
+            isPaseoOwnedWorktree: false,
+            mainRepoRoot: cwd,
+          }),
+        });
+        await agentStorage.initialize();
+        await agentStorage.upsert(agentRecord({ id: "agent-agora", cwd: ADDITIONAL_CWD }));
+
+        await bootstrapWorkspaceRegistries({
+          paseoHome,
+          agentStorage,
+          projectRegistry,
+          workspaceRegistry: cloudWorkspaceRegistry,
+          workspaceContainerRegistry: cloudContainerRegistry,
+          workspaceGitService: gitService,
+          logger,
+          containerWorkspaceId: CONTAINER,
+          migrationRepoUrlSeed: null,
+        });
+
+        // Exactly the same single remote-keyed project + one workspace, no dupe.
+        const projects = await projectRegistry.list();
+        expect(projects).toHaveLength(1);
+        expect(projects[0]?.projectId).toBe(ADDITIONAL_REPO);
+        const workspaces = await cloudWorkspaceRegistry.list();
+        expect(workspaces).toHaveLength(1);
+        expect(workspaces[0]?.cwd).toBe(ADDITIONAL_CWD);
+        expect(workspaces[0]?.projectId).toBe(ADDITIONAL_REPO);
       });
     },
   );

@@ -11,6 +11,7 @@ import {
   deriveProjectGroupingName,
   normalizeWorkspaceId,
 } from "./workspace-registry-model.js";
+import { parseGitHubRepoUrl } from "./cloud-clone.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import {
   createPersistedProjectRecord,
@@ -22,6 +23,7 @@ import {
   type WorkspaceContainerRegistry,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
+import type { PersistedWorkspaceKind } from "./workspace-registry-model.js";
 
 function minIsoDate(left: string | null, right: string | null): string | null {
   if (!left) {
@@ -61,6 +63,105 @@ function cloudCanonicalClonePath(containerWorkspaceId: string): string {
 function isWithinCloudContainer(cwd: string, containerWorkspaceId: string): boolean {
   const base = `/workspace/${containerWorkspaceId}`;
   return cwd === base || cwd.startsWith(`${base}/`);
+}
+
+// Map a project's persisted `kind` ("git" / "non_git") to the demoted checkout
+// (workspace) `kind`. A reconstructed cloud checkout is always a top-level
+// `local_checkout` (the clone root) or a plain `directory` — never a worktree,
+// which only exists once a clone is present and `git worktree add` has run.
+function workspaceKindForProjectKind(projectKind: "git" | "non_git"): PersistedWorkspaceKind {
+  return projectKind === "git" ? "local_checkout" : "directory";
+}
+
+// D-3.5a (workspace-retention) — reverse a deterministic cloud clone directory
+// back to its canonical GitHub remote, WITHOUT a clone on disk. Cloud clone
+// paths are minted by `cloud-clone.ts` and are reversible:
+//   • primary repo  → `/workspace/<ws>/.git-canonical`  (identity carried by
+//     the `<ws>#metadata.repoUrl` seed, already canonical/credential-free).
+//   • additional    → `/workspace/<ws>/<owner>__<repo>` (slug from
+//     `deriveProjectCloneSlug`: `<sanitizedOwner>__<sanitizedRepo>`).
+//
+// Reverse-slug is LOSSY: `deriveProjectCloneSlug` replaces any char outside
+// `[A-Za-z0-9._-]` with `-`, so an owner/repo that originally contained such a
+// char (or a literal `__`) cannot be recovered exactly. We split on the FIRST
+// `__` (GitHub org/user names never contain `_`, so the first `__` is always
+// the owner/repo boundary), then validate via `parseGitHubRepoUrl`. On any
+// ambiguity we return null so the caller falls back to today's behavior rather
+// than minting a wrong identity. Returns a canonical `https://github.com/...`.
+function reverseCloudClonePathToRepoUrl(options: {
+  cwd: string;
+  containerWorkspaceId: string;
+  seedRepoUrl: string | null;
+}): string | null {
+  const base = `/workspace/${options.containerWorkspaceId}`;
+  if (options.cwd === cloudCanonicalClonePath(options.containerWorkspaceId)) {
+    // Primary clone — identity is the (already canonical) metadata seed.
+    return options.seedRepoUrl;
+  }
+  if (!options.cwd.startsWith(`${base}/`)) {
+    return null;
+  }
+  const remainder = options.cwd.slice(base.length + 1);
+  // Only a direct child subdir is a clone root (`<owner>__<repo>`); a nested
+  // path (a checkout below the clone, or a paseo worktree) is not reversible
+  // here — its identity comes from the durable project store instead.
+  if (remainder.includes("/")) {
+    return null;
+  }
+  const separator = remainder.indexOf("__");
+  if (separator <= 0 || separator + 2 >= remainder.length) {
+    return null;
+  }
+  const owner = remainder.slice(0, separator);
+  const repo = remainder.slice(separator + 2);
+  if (!owner || !repo || repo.includes("__")) {
+    return null;
+  }
+  const candidate = `https://github.com/${owner}/${repo}`;
+  // Validate the round-trip shape; parseGitHubRepoUrl rejects anything that is
+  // not a well-formed github.com `<owner>/<repo>` URL.
+  return parseGitHubRepoUrl(candidate) ? candidate : null;
+}
+
+// Recover a stable, remote-keyed identity for a degraded cloud checkout. Prefer
+// reusing the EXACT durable project (authoritative `projectId`/`repoUrl`) whose
+// canonical repoUrl matches the one reversed from the clone path, so cold and
+// warm boots converge on a single identity (no path-keyed `non_git` dupes).
+function recoverCloudCheckoutIdentity(options: {
+  cwd: string;
+  seed: MigrationSeedContext;
+  durableProjectsByRepoUrl: Map<string, PersistedProjectRecord>;
+}): CheckoutProjectIdentity | null {
+  const recoveredRepoUrl = reverseCloudClonePathToRepoUrl({
+    cwd: options.cwd,
+    containerWorkspaceId: options.seed.containerWorkspaceId,
+    seedRepoUrl: options.seed.seedRepoUrl,
+  });
+  if (!recoveredRepoUrl) {
+    return null;
+  }
+  const durable = options.durableProjectsByRepoUrl.get(recoveredRepoUrl);
+  if (durable) {
+    return {
+      projectKey: durable.projectId,
+      projectName: durable.displayName,
+      projectRootPath: durable.rootPath,
+      projectKind: "git",
+      repoUrl: durable.repoUrl ?? recoveredRepoUrl,
+    };
+  }
+  const projectKey = deriveProjectGroupingKey({
+    cwd: options.cwd,
+    remoteUrl: recoveredRepoUrl,
+    mainRepoRoot: null,
+  });
+  return {
+    projectKey,
+    projectName: deriveProjectGroupingName(projectKey),
+    projectRootPath: options.cwd,
+    projectKind: "git",
+    repoUrl: recoveredRepoUrl,
+  };
 }
 
 // D-3.5a (DECISION D-2 + finding #3) — ensure the container record exists.
@@ -147,31 +248,193 @@ interface CheckoutProjectIdentity {
   repoUrl: string | null;
 }
 
-// D-3.5a (finding #2) — cold-boot clobber guard. At a cold cloud respawn the
-// clone at `/workspace/<ws>` is absent, so `getCheckout` reports isGit:false →
-// the derived projectKey degrades to the cwd and repoUrl to null. If we have a
-// metadata seed for this container's canonical clone, re-parent these degraded
-// checkouts onto the seeded migrated project instead of minting spurious
-// cwd-keyed project rows.
+// Index non-archived durable projects by their canonical repoUrl so a recovered
+// clone path can reuse the EXACT existing project identity (id + repoUrl). First
+// writer wins on a duplicate repoUrl (the historical dup rows the retention fix
+// stops creating); a recovered checkout then re-parents onto that single id.
+function indexDurableProjectsByRepoUrl(
+  durableProjects: PersistedProjectRecord[],
+): Map<string, PersistedProjectRecord> {
+  const byRepoUrl = new Map<string, PersistedProjectRecord>();
+  for (const project of durableProjects) {
+    if (project.archivedAt || !project.repoUrl) {
+      continue;
+    }
+    if (!byRepoUrl.has(project.repoUrl)) {
+      byRepoUrl.set(project.repoUrl, project);
+    }
+  }
+  return byRepoUrl;
+}
+
+// The flattened shape passed to `createPersistedWorkspaceRecord` for each
+// reconstructed checkout. Shared so the durable-project reconstruction can
+// append to the same list the agent-derivation loop builds.
+interface WorkspaceReconstructionInput {
+  workspaceId: string;
+  projectKey: string;
+  workspaceCwd: string;
+  workspaceKind: PersistedWorkspaceKind;
+  workspaceDisplayName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// workspace-retention — append a checkout (workspace) record for every durable
+// NON-ARCHIVED project that no agent record already anchored, plus the seed
+// project's canonical clone (first migration, no durable row yet). This is the
+// core fix: the workspace registry is ephemeral (tmpfs / in-memory) and wiped on
+// every cloud recycle, but the project store is durable. Without a workspace
+// record a project is invisible to BOTH the project list and the conversation
+// list. Generalizes the single-project seed guard to ALL durable non-archived
+// projects. Archived projects are intentionally NOT resurrected. Mutates
+// `materializedWorkspaceCwds` and `workspaceUpsertInputs` in place; idempotent
+// (a cwd already materialized by the agent loop is skipped). On-host this is a
+// no-op in practice: the already-materialized short-circuit returns before any
+// of this runs, so it only fires on a fresh derive (durable store normally empty
+// too).
+function appendDurableProjectWorkspaces(options: {
+  durableProjects: PersistedProjectRecord[];
+  seedProjectKey: string | null;
+  seedRepoUrl: string | null;
+  containerWorkspaceId: string;
+  now: string;
+  materializedWorkspaceCwds: Map<string, string>;
+  workspaceUpsertInputs: WorkspaceReconstructionInput[];
+}): void {
+  for (const project of options.durableProjects) {
+    if (project.archivedAt) {
+      continue;
+    }
+    const checkoutCwd = normalizeWorkspaceId(project.rootPath);
+    if (options.materializedWorkspaceCwds.has(checkoutCwd)) {
+      continue;
+    }
+    options.materializedWorkspaceCwds.set(checkoutCwd, project.projectId);
+    options.workspaceUpsertInputs.push({
+      workspaceId: checkoutCwd,
+      projectKey: project.projectId,
+      workspaceCwd: checkoutCwd,
+      workspaceKind: workspaceKindForProjectKind(project.kind),
+      workspaceDisplayName: project.displayName,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+    });
+  }
+
+  if (!options.seedProjectKey || !options.seedRepoUrl) {
+    return;
+  }
+  const seedCwd = normalizeWorkspaceId(cloudCanonicalClonePath(options.containerWorkspaceId));
+  if (options.materializedWorkspaceCwds.has(seedCwd)) {
+    return;
+  }
+  options.materializedWorkspaceCwds.set(seedCwd, options.seedProjectKey);
+  options.workspaceUpsertInputs.push({
+    workspaceId: seedCwd,
+    projectKey: options.seedProjectKey,
+    workspaceCwd: seedCwd,
+    workspaceKind: "local_checkout",
+    workspaceDisplayName: deriveProjectGroupingName(options.seedProjectKey),
+    createdAt: options.now,
+    updatedAt: options.now,
+  });
+}
+
+// Build the checkout (workspace) reconstruction input for one workspace's worth
+// of agent records: fold the records' time range, resolve a stable project
+// identity (recovering remote identity from the cloud clone path when the
+// checkout is degraded), accumulate the project, and pick the checkout kind.
+// When identity was recovered to a `git` project but the live checkout is
+// degraded (clone absent → membership says `directory`), the checkout is the
+// clone root, so it is a `local_checkout` — matching the warm-boot derivation.
+function buildWorkspaceInputFromAgentRecords(options: {
+  workspaceId: string;
+  entry: {
+    membership: ReturnType<typeof classifyDirectoryForProjectMembership>;
+    records: StoredAgentRecord[];
+  };
+  seedContext: MigrationSeedContext;
+  durableProjectsByRepoUrl: Map<string, PersistedProjectRecord>;
+  projectAccumulators: Map<string, ProjectAccumulator>;
+  now: string;
+}): WorkspaceReconstructionInput {
+  const { membership, records: workspaceRecords } = options.entry;
+  const workspaceCwd = membership.checkout.cwd;
+  let workspaceCreatedAt: string | null = null;
+  let workspaceUpdatedAt: string | null = null;
+  for (const record of workspaceRecords) {
+    workspaceCreatedAt = minIsoDate(workspaceCreatedAt, resolveAgentCreatedAt(record));
+    workspaceUpdatedAt = maxIsoDate(workspaceUpdatedAt, resolveAgentUpdatedAt(record));
+  }
+
+  const createdAt = workspaceCreatedAt ?? options.now;
+  const updatedAt = workspaceUpdatedAt ?? createdAt;
+
+  const identity = resolveCheckoutProjectIdentity(
+    membership,
+    workspaceCwd,
+    options.seedContext,
+    options.durableProjectsByRepoUrl,
+  );
+  accumulateProject(options.projectAccumulators, identity, createdAt, updatedAt);
+
+  const workspaceKind: PersistedWorkspaceKind =
+    identity.projectKind === "git" && membership.workspaceKind === "directory"
+      ? "local_checkout"
+      : membership.workspaceKind;
+
+  return {
+    workspaceId: options.workspaceId,
+    projectKey: identity.projectKey,
+    workspaceCwd,
+    workspaceKind,
+    workspaceDisplayName: membership.workspaceDisplayName,
+    createdAt,
+    updatedAt,
+  };
+}
+
+// D-3.5a (finding #2) + workspace-retention — cold-boot clobber guard. At a
+// cold cloud respawn the clone at `/workspace/<ws>` is absent, so `getCheckout`
+// reports isGit:false → the derived projectKey degrades to the cwd and repoUrl
+// to null. When the checkout is degraded AND we're in a cloud container, the
+// repo identity is still recoverable from the DETERMINISTIC clone path (primary
+// → metadata seed; `<owner>__<repo>` subdir → GitHub URL), preferring the exact
+// durable project. This keeps cold and warm boots converging on a single
+// remote-keyed `git` identity instead of minting spurious cwd-keyed `non_git`
+// rows that accrue as duplicates across recycles.
 function resolveCheckoutProjectIdentity(
   membership: ReturnType<typeof classifyDirectoryForProjectMembership>,
   workspaceCwd: string,
   seed: MigrationSeedContext,
+  durableProjectsByRepoUrl: Map<string, PersistedProjectRecord>,
 ): CheckoutProjectIdentity {
   const isDegradedCheckout = membership.projectKey === membership.cwd && !membership.repoUrl;
-  const shouldReparent =
-    Boolean(seed.seedProjectKey && seed.seedRepoUrl) &&
-    seed.isCloudContainer &&
-    isDegradedCheckout &&
-    isWithinCloudContainer(workspaceCwd, seed.containerWorkspaceId);
-  if (shouldReparent && seed.seedProjectKey && seed.seedRepoUrl) {
-    return {
-      projectKey: seed.seedProjectKey,
-      projectName: deriveProjectGroupingName(seed.seedProjectKey),
-      projectRootPath: cloudCanonicalClonePath(seed.containerWorkspaceId),
-      projectKind: "git",
-      repoUrl: seed.seedRepoUrl,
-    };
+  const inCloudContainer =
+    seed.isCloudContainer && isWithinCloudContainer(workspaceCwd, seed.containerWorkspaceId);
+
+  if (isDegradedCheckout && inCloudContainer) {
+    const recovered = recoverCloudCheckoutIdentity({
+      cwd: membership.cwd,
+      seed,
+      durableProjectsByRepoUrl,
+    });
+    if (recovered) {
+      return recovered;
+    }
+    // Reverse-slug could not recover identity (lossy slug, unexpected layout).
+    // Fall back to the legacy primary-clone seed reparent when applicable, else
+    // keep today's degraded behavior for this entry (no crash, no wrong row).
+    if (seed.seedProjectKey && seed.seedRepoUrl) {
+      return {
+        projectKey: seed.seedProjectKey,
+        projectName: deriveProjectGroupingName(seed.seedProjectKey),
+        projectRootPath: cloudCanonicalClonePath(seed.containerWorkspaceId),
+        projectKind: "git",
+        repoUrl: seed.seedRepoUrl,
+      };
+    }
   }
   return {
     projectKey: membership.projectKey,
@@ -324,6 +587,13 @@ export async function bootstrapWorkspaceRegistries(options: {
       })
     : null;
 
+  // Snapshot the durable project store once. In cloud mode this is the
+  // authoritative, recycle-surviving source of project identity (remote-keyed
+  // `projectId`/`repoUrl`); the workspace registry is the ephemeral derived
+  // cache that must be reconstructed from it.
+  const durableProjects = await options.projectRegistry.list();
+  const durableProjectsByRepoUrl = indexDurableProjectsByRepoUrl(durableProjects);
+
   const records = await options.agentStorage.list();
   const activeRecords = records.filter((record) => !record.archivedAt);
   const recordsByWorkspaceId = new Map<
@@ -357,39 +627,23 @@ export async function bootstrapWorkspaceRegistries(options: {
     containerWorkspaceId,
   };
   const projectAccumulators = new Map<string, ProjectAccumulator>();
-  const workspaceUpsertInputs: {
-    workspaceId: string;
-    membership: ReturnType<typeof classifyDirectoryForProjectMembership>;
-    projectKey: string;
-    workspaceCwd: string;
-    createdAt: string;
-    updatedAt: string;
-  }[] = [];
+  const workspaceUpsertInputs: WorkspaceReconstructionInput[] = [];
+  // cwd → projectKey of every checkout we materialize from agent records, so
+  // the durable-project reconstruction below never double-writes a workspace
+  // that an agent already anchored (idempotency).
+  const materializedWorkspaceCwds = new Map<string, string>();
 
   for (const [workspaceId, entry] of recordsByWorkspaceId.entries()) {
-    const { membership, records: workspaceRecords } = entry;
-    const workspaceCwd = membership.checkout.cwd;
-    let workspaceCreatedAt: string | null = null;
-    let workspaceUpdatedAt: string | null = null;
-    for (const record of workspaceRecords) {
-      workspaceCreatedAt = minIsoDate(workspaceCreatedAt, resolveAgentCreatedAt(record));
-      workspaceUpdatedAt = maxIsoDate(workspaceUpdatedAt, resolveAgentUpdatedAt(record));
-    }
-
-    const createdAt = workspaceCreatedAt ?? now;
-    const updatedAt = workspaceUpdatedAt ?? createdAt;
-
-    const identity = resolveCheckoutProjectIdentity(membership, workspaceCwd, seedContext);
-    accumulateProject(projectAccumulators, identity, createdAt, updatedAt);
-
-    workspaceUpsertInputs.push({
+    const input = buildWorkspaceInputFromAgentRecords({
       workspaceId,
-      membership,
-      projectKey: identity.projectKey,
-      workspaceCwd,
-      createdAt,
-      updatedAt,
+      entry,
+      seedContext,
+      durableProjectsByRepoUrl,
+      projectAccumulators,
+      now,
     });
+    workspaceUpsertInputs.push(input);
+    materializedWorkspaceCwds.set(normalizeWorkspaceId(input.workspaceCwd), input.projectKey);
   }
 
   // Ensure a seeded migrated project exists even when NO agent record
@@ -406,17 +660,37 @@ export async function bootstrapWorkspaceRegistries(options: {
     });
   }
 
+  // workspace-retention — reconstruct checkout records from the durable project
+  // store (the core fix). See `appendDurableProjectWorkspaces`.
+  appendDurableProjectWorkspaces({
+    durableProjects,
+    seedProjectKey,
+    seedRepoUrl,
+    containerWorkspaceId,
+    now,
+    materializedWorkspaceCwds,
+    workspaceUpsertInputs,
+  });
+
   // Upsert checkout (workspace) records — unchanged shape (DECISION D-1).
   await Promise.all(
     workspaceUpsertInputs.map(
-      ({ workspaceId, membership, projectKey, workspaceCwd, createdAt, updatedAt }) =>
+      ({
+        workspaceId,
+        projectKey,
+        workspaceCwd,
+        workspaceKind,
+        workspaceDisplayName,
+        createdAt,
+        updatedAt,
+      }) =>
         options.workspaceRegistry.upsert(
           createPersistedWorkspaceRecord({
             workspaceId,
             projectId: projectKey,
             cwd: workspaceCwd,
-            kind: membership.workspaceKind,
-            displayName: membership.workspaceDisplayName,
+            kind: workspaceKind,
+            displayName: workspaceDisplayName,
             createdAt,
             updatedAt,
           }),
@@ -441,7 +715,8 @@ export async function bootstrapWorkspaceRegistries(options: {
       containerWorkspaceId,
       migratedFromSeed: Boolean(seedProjectKey),
       materializedProjects: projectAccumulators.size,
-      materializedWorkspaces: recordsByWorkspaceId.size,
+      materializedWorkspaces: workspaceUpsertInputs.length,
+      reconstructedFromDurableProjects: durableProjects.filter((p) => !p.archivedAt).length,
     },
     "Workspace registries bootstrapped from existing agent storage",
   );
