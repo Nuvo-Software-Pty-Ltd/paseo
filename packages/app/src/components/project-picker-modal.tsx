@@ -855,9 +855,29 @@ export function ProjectPickerModal() {
 
   if (!serverId) return null;
 
+  // Single Modal for the whole flow. The GitHub repo picker renders INSIDE this
+  // Modal (embedded) rather than as a second stacked Modal — iOS silently fails
+  // to present a Modal over an already-presented one, which left the picker
+  // invisible (web stacks fine). See github-repo-picker.tsx.
+  const showGithubPicker = Boolean(client && githubWorkspaceId);
+
   return (
-    <>
-      <Modal visible={open} transparent animationType="fade" onRequestClose={handleClose}>
+    <Modal
+      visible={open}
+      transparent
+      animationType="fade"
+      onRequestClose={showGithubPicker ? handleCloseGithubPicker : handleClose}
+    >
+      {showGithubPicker && client && githubWorkspaceId ? (
+        <GithubRepoPicker
+          embedded
+          visible
+          onClose={handleCloseGithubPicker}
+          workspaceId={githubWorkspaceId}
+          client={client}
+          onProjectAdded={handleGithubProjectAdded}
+        />
+      ) : (
         <View style={styles.overlay}>
           <Pressable style={styles.backdrop} onPress={handleClose} />
 
@@ -909,17 +929,8 @@ export function ProjectPickerModal() {
             />
           </View>
         </View>
-      </Modal>
-      {client && githubWorkspaceId ? (
-        <GithubRepoPicker
-          visible={githubWorkspaceId !== null}
-          onClose={handleCloseGithubPicker}
-          workspaceId={githubWorkspaceId}
-          client={client}
-          onProjectAdded={handleGithubProjectAdded}
-        />
-      ) : null}
-    </>
+      )}
+    </Modal>
   );
 }
 
