@@ -101,6 +101,7 @@ import { DynamoAgentStore } from "./agent/dynamo-agent-store.js";
 import {
   attachAgentStoragePersistence,
   attachClaudeTranscriptCapture,
+  attachWorkspaceSnapshotCapture,
 } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
@@ -728,6 +729,11 @@ export async function createPaseoDaemon(
   // so conversations survive a daemon restart. attachClaudeTranscriptCapture
   // no-ops in local mode, so this is byte-for-byte unchanged off-cloud.
   const detachClaudeTranscriptCapture = attachClaudeTranscriptCapture(logger, agentManager);
+  // Cloud mode: snapshot the workspace git working-tree delta to S3 (turn-settle
+  // + periodic + shutdown flush) so uncommitted work survives a recycle —
+  // /workspace is tmpfs. Gated on isWorkspaceSnapshotEnabled() (cloud + deploy
+  // flag), so this no-ops off-cloud.
+  const detachWorkspaceSnapshotCapture = attachWorkspaceSnapshotCapture(logger, agentManager);
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   const cloudMigration = resolveCloudMigrationContext();
@@ -1245,6 +1251,11 @@ export async function createPaseoDaemon(
     await agentManager.flush().catch(() => undefined);
     detachAgentStoragePersistence();
     detachClaudeTranscriptCapture();
+    // Final best-effort workspace snapshot (agents are now closed, so the tree
+    // is quiescent) before stop continues teardown. Awaited so a graceful
+    // shutdown flushes the latest delta; a SIGKILL past stopTimeout still only
+    // loses since-the-last-periodic-snapshot.
+    await detachWorkspaceSnapshotCapture();
     await agentStorage.flush().catch(() => undefined);
     await shutdownProviders(logger, {
       runtimeSettings: config.agentProviderSettings,

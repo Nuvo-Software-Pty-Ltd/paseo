@@ -7,6 +7,11 @@ import type {
 import type { AgentStore, StoredAgentRecord } from "./agent/agent-storage.js";
 import { buildProviderRegistry } from "./agent/provider-registry.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
+import type { Logger } from "pino";
+import {
+  getWorkspaceSnapshotStore,
+  isWorkspaceSnapshotEnabled,
+} from "./workspace-snapshot-store.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -110,6 +115,68 @@ export function attachClaudeTranscriptCapture(
   });
 
   return unsubscribe;
+}
+
+/**
+ * Cloud-mode only: snapshot the workspace's git working tree (delta) to S3 so
+ * uncommitted work survives a daemon restart (/workspace is tmpfs). Three
+ * triggers mirror the transcript capture above: turn-settle (every settled
+ * agent_state, deduped by the store's per-workspace in-flight guard +
+ * skip-if-unchanged), a periodic backstop (catches edits made outside an agent
+ * turn — e.g. a terminal), and a final flush when the returned detach runs (the
+ * shutdown path awaits it). The store gates on isWorkspaceSnapshotEnabled(), so
+ * this whole hook no-ops unless cloud mode + the deploy flag are set — local
+ * mode is byte-for-byte unchanged.
+ *
+ * Returns an async detach: clears the timer, unsubscribes, and performs one last
+ * best-effort snapshot of the most-recently-active repo.
+ */
+export function attachWorkspaceSnapshotCapture(
+  logger: Logger,
+  agentManager: AgentManagerStateSource,
+  options: { periodicIntervalMs?: number } = {},
+): () => Promise<void> {
+  const workspaceId = process.env.PASEO_WORKSPACE_ID?.trim();
+  if (!isWorkspaceSnapshotEnabled() || !workspaceId) {
+    return async () => {};
+  }
+  const log = logger.child({ module: "workspace-snapshot-capture" });
+  const store = getWorkspaceSnapshotStore(logger);
+  // Most-recently-active working tree — the periodic + shutdown flush target.
+  let lastRepoDir: string | null = null;
+
+  const capture = (repoDir: string): void => {
+    lastRepoDir = repoDir;
+    // Fire-and-forget: the store serializes per-workspace and skips no-ops, so a
+    // burst of agent_state events collapses to at most one upload.
+    void store.snapshot({ workspaceId, repoDir }).catch((error) => {
+      log.error({ err: error }, "Workspace snapshot failed");
+    });
+  };
+
+  const unsubscribe = agentManager.subscribe((event) => {
+    if (event.type !== "agent_state") return;
+    if (event.agent.lifecycle === "closed") return;
+    if (event.agent.cwd) capture(event.agent.cwd);
+  });
+
+  const timer = setInterval(() => {
+    if (lastRepoDir) capture(lastRepoDir);
+  }, options.periodicIntervalMs ?? 120_000);
+  // Don't keep the event loop alive just for the backstop timer.
+  timer.unref();
+
+  return async () => {
+    clearInterval(timer);
+    unsubscribe();
+    if (lastRepoDir) {
+      try {
+        await store.snapshot({ workspaceId, repoDir: lastRepoDir });
+      } catch (error) {
+        log.warn({ err: error }, "Final workspace snapshot flush failed");
+      }
+    }
+  };
 }
 
 export function buildConfigOverrides(record: StoredAgentRecord): Partial<AgentSessionConfig> {
