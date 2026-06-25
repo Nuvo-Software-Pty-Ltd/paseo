@@ -3,8 +3,9 @@
 # Paseo daemon — cloud-mode container image for Orchestra SaaS.
 #
 # Multi-stage build:
-#   1. `builder` installs all workspace deps + builds the four daemon-relevant
-#      packages (highlight -> relay -> server -> cli, in dep order).
+#   1. `builder` installs all workspace deps + builds the daemon-relevant
+#      packages (highlight, relay, protocol, client -> server -> cli, in dep
+#      order — server imports the protocol/client packages upstream extracted).
 #   2. `runtime` copies only the daemon's compiled output + node_modules
 #      and runs as the non-root `node` user.
 #
@@ -36,6 +37,8 @@ COPY packages/cli/package.json ./packages/cli/
 COPY packages/server/package.json ./packages/server/
 COPY packages/relay/package.json ./packages/relay/
 COPY packages/highlight/package.json ./packages/highlight/
+COPY packages/protocol/package.json ./packages/protocol/
+COPY packages/client/package.json ./packages/client/
 COPY packages/app/package.json ./packages/app/
 COPY packages/desktop/package.json ./packages/desktop/
 COPY packages/website/package.json ./packages/website/
@@ -47,21 +50,25 @@ COPY packages/expo-two-way-audio/package.json ./packages/expo-two-way-audio/
 # Neither is needed for a daemon container.
 RUN npm ci --include=dev --ignore-scripts --no-audit --no-fund
 
-# Now copy source for the four daemon-relevant packages.
+# Now copy source for the daemon-relevant packages. server imports the
+# protocol + client packages upstream extracted from server/src/{shared,client},
+# so their source must be present and built before server.
 COPY tsconfig.json tsconfig.base.json ./
 COPY packages/highlight ./packages/highlight
 COPY packages/relay ./packages/relay
+COPY packages/protocol ./packages/protocol
+COPY packages/client ./packages/client
 COPY packages/server ./packages/server
 COPY packages/cli ./packages/cli
 
-# Build in dep order. Skip the rest of the workspace.
+# Build in dep order. `build:server-deps` builds highlight + relay + protocol +
+# client (everything @getpaseo/server imports); skip the rest of the workspace.
 # CLI is built with explicit `--skipLibCheck --declaration false` because in the
 # Docker build environment, tsc trips on an internal namespace reference inside
 # `@anthropic-ai/claude-agent-sdk`'s d.ts that doesn't reproduce on host. The
 # daemon container doesn't need cli's d.ts files, so skipping declaration emit
 # is harmless and the simplest workaround.
-RUN npm run build -w @getpaseo/highlight \
-    && npm run build -w @getpaseo/relay \
+RUN npm run build:server-deps \
     && npm run build -w @getpaseo/server \
     && cd packages/cli \
     && node -e "require('node:fs').rmSync('dist',{ recursive: true, force: true })" \
