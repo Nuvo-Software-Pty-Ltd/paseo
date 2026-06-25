@@ -5,14 +5,14 @@ import type { AgentStore } from "../agent/agent-storage.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
 import { getCurrentWorkspaceAuth, runWithWorkspaceAuth } from "../cloud-auth.js";
 import { createAutomationSpawn } from "../automation/spawn.js";
-import type { ScheduleRun } from "../schedule/types.js";
+import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 import type { WebhookTriggerStore } from "./store.js";
 import type { TriggerProvisioner } from "./provisioner.js";
 import type {
   CreateWebhookTriggerInput,
   UpdateWebhookTriggerInput,
   WebhookTrigger,
-} from "./types.js";
+} from "@getpaseo/protocol/trigger/types";
 
 // Cap inline run history so a high-frequency webhook can't grow the
 // record unboundedly (OQ4). Older runs roll off the inline window.

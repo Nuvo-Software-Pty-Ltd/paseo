@@ -1,69 +1,13 @@
-import type { DaemonClient } from "@server/client/daemon-client";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildWorkspaceTabSnapshot,
   deriveWorkspaceAgentVisibility,
   type WorkspaceAgentVisibility,
 } from "@/workspace-tabs/agent-visibility";
-import { selectSubagentsForParent } from "@/subagents";
+import { selectSubagentsForParent } from "@/subagents/select";
 import { buildWorkspaceTabPersistenceKey, useWorkspaceLayoutStore } from "./workspace-layout-store";
 import { useSessionStore, type Agent } from "./session-store";
-
-vi.mock("lucide-react-native", () => ({
-  Archive: () => null,
-  Check: () => null,
-  ChevronDown: () => null,
-  ChevronRight: () => null,
-}));
-
-vi.mock("react-native-unistyles", () => ({
-  StyleSheet: {
-    create: (factory: unknown) =>
-      typeof factory === "function"
-        ? factory({
-            spacing: { 0: 0, 1: 4, 2: 8, 3: 12, 4: 16 },
-            borderWidth: { 1: 1 },
-            borderRadius: { sm: 4, md: 6, lg: 8, "2xl": 16, full: 999 },
-            fontSize: { xs: 11, sm: 13, base: 15 },
-            fontWeight: { normal: "400", medium: "500" },
-            iconSize: { sm: 14, md: 18 },
-            colors: {
-              foreground: "#fff",
-              foregroundMuted: "#aaa",
-              surface0: "#000",
-              surface1: "#111",
-              surface2: "#222",
-              surface3: "#333",
-              border: "#444",
-              borderAccent: "#555",
-              accent: "#0a84ff",
-              palette: {
-                amber: { 500: "#ffbf00", 700: "#aa8000" },
-                blue: { 500: "#0a84ff" },
-                red: { 500: "#ff453a" },
-                green: { 500: "#30d158" },
-              },
-            },
-          })
-        : factory,
-  },
-  useUnistyles: () => ({ theme: { colors: {} } }),
-  withUnistyles: <T>(component: T) => component,
-}));
-
-vi.mock("@/components/provider-icons", () => ({
-  getProviderIcon: () => null,
-}));
-
-vi.mock("@/components/ui/tooltip", () => ({
-  Tooltip: ({ children }: { children: unknown }) => children,
-  TooltipTrigger: ({ children }: { children: unknown }) => children,
-  TooltipContent: () => null,
-}));
-
-vi.mock("@/screens/workspace/workspace-tab-presentation", () => ({
-  WorkspaceTabIcon: () => null,
-}));
 
 vi.mock("@react-native-async-storage/async-storage", () => {
   const storage = new Map<string, string>();
@@ -112,6 +56,7 @@ const AGENT_DEFAULTS: Agent = {
   lastError: null,
   title: "Agent",
   cwd: WORKSPACE_DIRECTORY,
+  workspaceId: WORKSPACE_ID,
   model: null,
   features: undefined,
   thinkingOptionId: undefined,
@@ -147,7 +92,7 @@ function deriveVisibilityFromSession(): WorkspaceAgentVisibility {
   const sessionAgents = useSessionStore.getState().sessions[SERVER_ID]?.agents ?? new Map();
   return deriveWorkspaceAgentVisibility({
     sessionAgents,
-    workspaceDirectory: WORKSPACE_DIRECTORY,
+    workspaceId: WORKSPACE_ID,
   });
 }
 
@@ -221,5 +166,53 @@ describe("workspace subagents integration", () => {
         new Set(),
       ).map((row) => row.id),
     ).toEqual(["child-agent"]);
+  });
+
+  it("moves a detached child out of the parent section and back into normal workspace tabs", () => {
+    const workspaceKey = buildWorkspaceTabPersistenceKey({
+      serverId: SERVER_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(workspaceKey).toBeTruthy();
+
+    const parent = makeAgent({
+      id: "parent-agent",
+      title: "Parent agent",
+    });
+    const child = makeAgent({
+      id: "child-agent",
+      parentAgentId: "parent-agent",
+      title: "Child agent",
+    });
+
+    initializeAgents([parent, child]);
+    reconcileWorkspaceTabs(workspaceKey!, deriveVisibilityFromSession());
+
+    expect(getWorkspaceTabIds(workspaceKey!)).toEqual(["agent_parent-agent"]);
+    expect(
+      selectSubagentsForParent(
+        useSessionStore.getState(),
+        {
+          serverId: SERVER_ID,
+          parentAgentId: "parent-agent",
+        },
+        new Set(),
+      ).map((row) => row.id),
+    ).toEqual(["child-agent"]);
+
+    appendAgent({ ...child, parentAgentId: null, labels: {} });
+    reconcileWorkspaceTabs(workspaceKey!, deriveVisibilityFromSession());
+
+    expect(getWorkspaceTabIds(workspaceKey!)).toEqual(["agent_parent-agent", "agent_child-agent"]);
+    expect(
+      selectSubagentsForParent(
+        useSessionStore.getState(),
+        {
+          serverId: SERVER_ID,
+          parentAgentId: "parent-agent",
+        },
+        new Set(),
+      ),
+    ).toEqual([]);
   });
 });

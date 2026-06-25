@@ -100,6 +100,19 @@ function isLegacyPathLikeWorkspaceValue(value: string): boolean {
   return value.includes("/") || value.includes("\\") || /^[A-Za-z]:[\\/]/.test(value);
 }
 
+function hasLegacyDecodeNoise(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint == null) continue;
+    if (codePoint < 0x20 || codePoint === 0x7f || codePoint === 0xfffd) return true;
+  }
+  return false;
+}
+
+function isCleanLegacyPathDecode(value: string): boolean {
+  return isLegacyPathLikeWorkspaceValue(value) && !hasLegacyDecodeNoise(value);
+}
+
 export type WorkspaceOpenIntent =
   | { kind: "agent"; agentId: string }
   | { kind: "terminal"; terminalId: string }
@@ -193,13 +206,14 @@ export function decodeWorkspaceIdFromPathSegment(workspaceIdSegment: string): st
     return prefixedDecoded ? normalizeWorkspaceId(prefixedDecoded) : null;
   }
 
+  // COMPAT(legacyPathWorkspaceId): IDs were path-shaped before v0.1.95. Remove when deep-link floor >= v0.2.0.
   const base64Decoded = tryDecodeBase64UrlNoPadUtf8(decoded);
-  if (base64Decoded && isLegacyPathLikeWorkspaceValue(base64Decoded)) {
+  if (base64Decoded && isCleanLegacyPathDecode(base64Decoded)) {
     return normalizeWorkspaceId(base64Decoded);
   }
 
   const relaxedBase64Decoded = decodeBase64UrlNoPadUtf8(decoded);
-  if (relaxedBase64Decoded && isLegacyPathLikeWorkspaceValue(relaxedBase64Decoded)) {
+  if (relaxedBase64Decoded && isCleanLegacyPathDecode(relaxedBase64Decoded)) {
     return normalizeWorkspaceId(relaxedBase64Decoded);
   }
 
@@ -381,24 +395,35 @@ export function buildHostOpenProjectRoute(serverId: string) {
 
 export function buildHostNewWorkspaceRoute(
   serverId: string,
-  sourceDirectory: string,
-  options?: { displayName?: string },
+  sourceDirectory?: string,
+  options?: { displayName?: string; projectId?: string },
 ) {
   const base = buildHostRootRoute(serverId);
   if (base === "/") {
     return "/" as const;
   }
   const params = new URLSearchParams();
-  params.set("dir", sourceDirectory);
+  if (sourceDirectory) {
+    params.set("dir", sourceDirectory);
+  }
   if (options?.displayName) {
     params.set("name", options.displayName);
   }
-  return `${base}/new?${params.toString()}` as const;
+  if (options?.projectId) {
+    params.set("projectId", options.projectId);
+  }
+  const query = params.toString();
+  if (!query) {
+    return `${base}/new` as const;
+  }
+  return `${base}/new?${query}` as const;
 }
 
 export const SETTINGS_SECTION_SLUGS = [
   "general",
   "provider-credential",
+  "daemon",
+  "appearance",
   "shortcuts",
   "integrations",
   "permissions",
@@ -410,6 +435,34 @@ export type SettingsSectionSlug = (typeof SETTINGS_SECTION_SLUGS)[number];
 
 export function isSettingsSectionSlug(value: string): value is SettingsSectionSlug {
   return (SETTINGS_SECTION_SLUGS as readonly string[]).includes(value);
+}
+
+export const HOST_SECTION_SLUGS = [
+  "connections",
+  "agents",
+  "workspaces",
+  "providers",
+  "usage",
+  "terminals",
+  "host",
+] as const;
+
+export type HostSectionSlug = (typeof HOST_SECTION_SLUGS)[number];
+
+const LEGACY_HOST_SECTION_SLUGS: Record<string, HostSectionSlug> = {
+  orchestration: "agents",
+  daemon: "host",
+};
+
+export function isHostSectionSlug(value: string): value is HostSectionSlug {
+  return (HOST_SECTION_SLUGS as readonly string[]).includes(value);
+}
+
+export function normalizeHostSectionSlug(value: string): HostSectionSlug | null {
+  if (isHostSectionSlug(value)) {
+    return value;
+  }
+  return LEGACY_HOST_SECTION_SLUGS[value] ?? null;
 }
 
 export function buildSettingsRoute() {
@@ -426,6 +479,14 @@ export function buildSettingsHostRoute(serverId: string) {
     throw new Error("buildSettingsHostRoute requires a non-empty serverId");
   }
   return `/settings/hosts/${encodeSegment(normalized)}` as const;
+}
+
+export function buildSettingsHostSectionRoute(serverId: string, section: HostSectionSlug) {
+  const normalized = trimNonEmpty(serverId);
+  if (!normalized) {
+    throw new Error("buildSettingsHostSectionRoute requires a non-empty serverId");
+  }
+  return `/settings/hosts/${encodeSegment(normalized)}/${section}` as const;
 }
 
 export function buildProjectsSettingsRoute() {

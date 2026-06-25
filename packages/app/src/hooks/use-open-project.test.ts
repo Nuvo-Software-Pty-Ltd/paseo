@@ -1,147 +1,134 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.hoisted(() => {
-  (globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false;
-});
-
-vi.mock("@react-native-async-storage/async-storage", () => {
-  const storage = new Map<string, string>();
-  return {
-    default: {
-      getItem: vi.fn(async (key: string) => storage.get(key) ?? null),
-      setItem: vi.fn(async (key: string, value: string) => {
-        storage.set(key, value);
-      }),
-      removeItem: vi.fn(async (key: string) => {
-        storage.delete(key);
-      }),
-    },
-  };
-});
-
-const { replaceRoute } = vi.hoisted(() => ({
-  replaceRoute: vi.fn(),
-}));
-
-vi.mock("@/hooks/use-workspace-navigation", () => ({
-  navigateToWorkspace: replaceRoute,
-}));
-
-import { openProjectDirectly } from "@/hooks/use-open-project";
-import { useSessionStore } from "@/stores/session-store";
-import {
-  buildWorkspaceTabPersistenceKey,
-  collectAllTabs,
-  useWorkspaceLayoutStore,
-} from "@/stores/workspace-layout-store";
-import { generateDraftId } from "@/stores/draft-keys";
+import { describe, expect, it } from "vitest";
+import { openProjectDirectly } from "@/hooks/open-project";
+import type { EmptyProjectDescriptor as ProjectWithoutWorkspacesDescriptor } from "@/stores/session-store";
 
 const SERVER_ID = "server-1";
-const WORKSPACE_ID = "/repo/project";
+const PROJECT_PATH = "/repo/project";
 
-function createOpenDraftTab() {
-  return (workspaceKey: string) =>
-    useWorkspaceLayoutStore.getState().openTabFocused(workspaceKey, {
-      kind: "draft",
-      draftId: generateDraftId(),
-    });
+function buildProjectPayload() {
+  return {
+    projectId: "project-1",
+    projectDisplayName: "project",
+    projectRootPath: PROJECT_PATH,
+    projectKind: "git" as const,
+  };
+}
+
+interface RecordedProject {
+  serverId: string;
+  project: ProjectWithoutWorkspacesDescriptor;
+}
+
+interface RecordedHydrated {
+  serverId: string;
+  hydrated: boolean;
+}
+
+function createFakeSession() {
+  const projects: RecordedProject[] = [];
+  const hydrated: RecordedHydrated[] = [];
+  return {
+    projects,
+    hydrated,
+    addEmptyProject: (serverId: string, project: ProjectWithoutWorkspacesDescriptor) => {
+      projects.push({ serverId, project });
+    },
+    setHasHydratedWorkspaces: (serverId: string, value: boolean) => {
+      hydrated.push({ serverId, hydrated: value });
+    },
+  };
 }
 
 describe("openProjectDirectly", () => {
-  beforeEach(() => {
-    replaceRoute.mockReset();
-    useSessionStore.setState({
-      sessions: {},
-    });
-    useSessionStore.getState().initializeSession(SERVER_ID, {} as never);
-    useWorkspaceLayoutStore.setState({
-      layoutByWorkspace: {},
-      splitSizesByWorkspace: {},
-      pinnedAgentIdsByWorkspace: {},
-    });
-    vi.restoreAllMocks();
-  });
+  it("adds the project and marks workspaces hydrated without opening a workspace", async () => {
+    const session = createFakeSession();
+    const projectPayload = buildProjectPayload();
 
-  it("opens the workspace directly, marks workspaces hydrated, and seeds a draft tab", async () => {
     const result = await openProjectDirectly({
       serverId: SERVER_ID,
-      projectPath: WORKSPACE_ID,
+      projectPath: PROJECT_PATH,
       isConnected: true,
+      canAddProject: true,
       client: {
-        openProject: vi.fn(async () => ({
+        addProject: async () => ({
           requestId: "request-1",
           error: null,
-          workspace: {
-            id: "1",
-            projectId: "1",
-            projectDisplayName: "project",
-            projectRootPath: WORKSPACE_ID,
-            workspaceDirectory: WORKSPACE_ID,
-            projectKind: "git" as const,
-            workspaceKind: "checkout" as const,
-            name: "project",
-            archivingAt: null,
-            status: "done" as const,
-            activityAt: null,
-            diffStat: null,
-            scripts: [],
-          },
-        })),
+          project: projectPayload,
+        }),
       },
-      mergeWorkspaces: useSessionStore.getState().mergeWorkspaces,
-      setHasHydratedWorkspaces: useSessionStore.getState().setHasHydratedWorkspaces,
-      openDraftTab: createOpenDraftTab(),
-      navigateToWorkspace: replaceRoute,
+      addEmptyProject: session.addEmptyProject,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
-    expect(result).toBe(true);
-    expect(useSessionStore.getState().sessions[SERVER_ID]?.hasHydratedWorkspaces).toBe(true);
-    expect(
-      Array.from(useSessionStore.getState().sessions[SERVER_ID]?.workspaces.values() ?? []),
-    ).toEqual([
-      expect.objectContaining({
-        id: "1",
-        projectId: "1",
-        projectRootPath: WORKSPACE_ID,
-        workspaceDirectory: WORKSPACE_ID,
-      }),
+    expect(result).toEqual({ ok: true });
+    expect(session.projects).toEqual([
+      {
+        serverId: SERVER_ID,
+        project: {
+          projectId: "project-1",
+          projectDisplayName: "project",
+          projectCustomName: null,
+          projectKind: "git",
+          projectRootPath: PROJECT_PATH,
+        },
+      },
     ]);
-
-    const workspaceKey = buildWorkspaceTabPersistenceKey({
-      serverId: SERVER_ID,
-      workspaceId: "1",
-    });
-    expect(workspaceKey).toBeTruthy();
-    const layout = useWorkspaceLayoutStore.getState().layoutByWorkspace[workspaceKey as string];
-    expect(layout.root.kind).toBe("pane");
-    const tabs = collectAllTabs(layout.root);
-    expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.target.kind).toBe("draft");
-    expect(replaceRoute).toHaveBeenCalledWith("server-1", "1");
+    expect(session.hydrated).toEqual([{ serverId: SERVER_ID, hydrated: true }]);
   });
 
-  it("does not navigate or seed tabs when openProject fails", async () => {
+  it("fails before sending when the host does not support adding projects without workspaces", async () => {
+    const session = createFakeSession();
     const result = await openProjectDirectly({
       serverId: SERVER_ID,
-      projectPath: WORKSPACE_ID,
+      projectPath: PROJECT_PATH,
       isConnected: true,
+      canAddProject: false,
       client: {
-        openProject: vi.fn(async () => ({
-          requestId: "request-2",
-          error: "Failed to open project",
-          workspace: null,
-        })),
+        addProject: async () => ({
+          requestId: "request-unsupported",
+          error: null,
+          project: buildProjectPayload(),
+        }),
       },
-      mergeWorkspaces: useSessionStore.getState().mergeWorkspaces,
-      setHasHydratedWorkspaces: useSessionStore.getState().setHasHydratedWorkspaces,
-      openDraftTab: createOpenDraftTab(),
-      navigateToWorkspace: replaceRoute,
+      addEmptyProject: session.addEmptyProject,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
     });
 
-    expect(result).toBe(false);
-    expect(useSessionStore.getState().sessions[SERVER_ID]?.hasHydratedWorkspaces).toBe(false);
-    expect(useSessionStore.getState().sessions[SERVER_ID]?.workspaces.size).toBe(0);
-    expect(useWorkspaceLayoutStore.getState().layoutByWorkspace).toEqual({});
-    expect(replaceRoute).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      ok: false,
+      errorCode: null,
+      error: "Update the host to add projects without creating a workspace.",
+    });
+    expect(session.projects).toEqual([]);
+    expect(session.hydrated).toEqual([]);
+  });
+
+  it("does not add a project when addProject fails", async () => {
+    const session = createFakeSession();
+
+    const result = await openProjectDirectly({
+      serverId: SERVER_ID,
+      projectPath: PROJECT_PATH,
+      isConnected: true,
+      canAddProject: true,
+      client: {
+        addProject: async () => ({
+          requestId: "request-2",
+          error: "Directory not found: /repo/project",
+          errorCode: "directory_not_found" as const,
+          project: null,
+        }),
+      },
+      addEmptyProject: session.addEmptyProject,
+      setHasHydratedWorkspaces: session.setHasHydratedWorkspaces,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errorCode: "directory_not_found",
+      error: "Directory not found: /repo/project",
+    });
+    expect(session.projects).toEqual([]);
+    expect(session.hydrated).toEqual([]);
   });
 });

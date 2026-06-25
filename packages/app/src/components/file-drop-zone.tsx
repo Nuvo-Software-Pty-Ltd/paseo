@@ -3,22 +3,31 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated, { useAnimatedStyle, withTiming, useSharedValue } from "react-native-reanimated";
 import { useEffect, useMemo } from "react";
 import { Upload } from "lucide-react-native";
-import { useFileDropZone } from "@/hooks/use-file-drop-zone";
-import type { ImageAttachment } from "./message-input";
+import { useTranslation } from "react-i18next";
+import { useFileDropZone, type DroppedItem } from "@/hooks/use-file-drop-zone";
+import type { ImageAttachment } from "@/composer/types";
 import { isWeb } from "@/constants/platform";
 
 interface FileDropZoneProps {
   children: React.ReactNode;
   onFilesDropped: (files: ImageAttachment[]) => void;
+  onGenericFilesDropped?: (items: DroppedItem[]) => void;
   disabled?: boolean;
 }
 
 const IS_WEB = isWeb;
 
-export function FileDropZone({ children, onFilesDropped, disabled = false }: FileDropZoneProps) {
+export function FileDropZone({
+  children,
+  onFilesDropped,
+  onGenericFilesDropped,
+  disabled = false,
+}: FileDropZoneProps) {
+  const { t } = useTranslation();
   const { theme } = useUnistyles();
   const { isDragging, containerRef } = useFileDropZone({
     onFilesDropped,
+    onGenericFilesDropped,
     disabled,
   });
 
@@ -58,7 +67,7 @@ export function FileDropZone({ children, onFilesDropped, disabled = false }: Fil
         {/* Content */}
         <View style={styles.overlayContent}>
           <Upload size={32} color={theme.colors.primary} />
-          <Text style={styles.overlayText}>Drop images here</Text>
+          <Text style={styles.overlayText}>{t("composer.attachments.dropFilesHere")}</Text>
         </View>
       </Animated.View>
     </View>

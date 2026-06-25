@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { execFileSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -10,6 +10,7 @@ import {
   mkdirSync,
 } from "fs";
 import { join } from "path";
+import { win32 } from "node:path";
 import { tmpdir } from "os";
 import {
   __resetCheckoutShortstatCacheForTests,
@@ -17,6 +18,7 @@ import {
   __setPullRequestStatusCacheTtlForTests,
   commitAll,
   getCachedCheckoutShortstat,
+  getCheckoutSnapshotFacts,
   getCurrentBranch,
   getCheckoutDiff,
   getCheckoutShortstat,
@@ -34,10 +36,12 @@ import {
   resolveBranchCheckout,
   resolveRepositoryDefaultBranch,
   parseWorktreeList,
+  renameCurrentBranch,
   isPaseoWorktreePath,
   isDescendantPath,
   warmCheckoutShortstatInBackground,
 } from "./checkout-git.js";
+import { startGitCommandMetrics, stopGitCommandMetrics } from "./run-git-command.js";
 import {
   GitHubCommandError,
   GitHubCliMissingError,
@@ -204,6 +208,41 @@ describe("checkout git utilities", () => {
     expect(branch).toBeNull();
   });
 
+  it("returns untracked files in an uncommitted diff before the first commit", async () => {
+    const unbornRepo = join(tempDir, "unborn-repo");
+    mkdirSync(unbornRepo, { recursive: true });
+    execFileSync("git", ["init", "-b", "main"], { cwd: unbornRepo });
+    writeFileSync(join(unbornRepo, "greeting.txt"), "hello\n");
+
+    const diff = await getCheckoutDiff(unbornRepo, {
+      mode: "uncommitted",
+      includeStructured: true,
+    });
+
+    expect(diff.structured).toEqual([
+      {
+        path: "greeting.txt",
+        isNew: true,
+        isDeleted: false,
+        additions: 1,
+        deletions: 0,
+        hunks: [
+          {
+            oldStart: 0,
+            oldCount: 0,
+            newStart: 1,
+            newCount: 1,
+            lines: [
+              { type: "header", content: "@@ -0,0 +1 @@" },
+              { type: "add", content: "hello" },
+            ],
+          },
+        ],
+        status: "ok",
+      },
+    ]);
+  });
+
   it("returns the branch being rebased when HEAD is detached during a rebase", async () => {
     execFileSync("git", ["checkout", "-b", "feature/rebase-test"], { cwd: repoDir });
     writeFileSync(join(repoDir, "file.txt"), "feature\n");
@@ -228,6 +267,48 @@ describe("checkout git utilities", () => {
     expect(branch).toBe("feature/rebase-test");
   });
 
+  it("renames the checked out branch and returns concrete branch names", async () => {
+    execSync("git checkout -b feature/old-name", { cwd: repoDir });
+
+    const result = await renameCurrentBranch(repoDir, "feature/new-name");
+
+    const currentBranch = execSync("git branch --show-current", { cwd: repoDir }).toString().trim();
+    expect(currentBranch).toBe("feature/new-name");
+    expect(result).toEqual({
+      previousBranch: "feature/old-name",
+      currentBranch: "feature/new-name",
+    });
+    expect(() =>
+      execSync("git show-ref --verify refs/heads/feature/old-name", { cwd: repoDir }),
+    ).toThrow();
+    expect(
+      execSync("git show-ref --verify refs/heads/feature/new-name", { cwd: repoDir })
+        .toString()
+        .trim(),
+    ).toContain("refs/heads/feature/new-name");
+  });
+
+  it("fails when renaming the checked out branch to an existing branch", async () => {
+    execSync("git branch feature/new-name", { cwd: repoDir });
+    execSync("git checkout -b feature/old-name", { cwd: repoDir });
+
+    await expect(renameCurrentBranch(repoDir, "feature/new-name")).rejects.toThrow();
+
+    expect(execSync("git branch --show-current", { cwd: repoDir }).toString().trim()).toBe(
+      "feature/old-name",
+    );
+    expect(
+      execSync("git show-ref --verify refs/heads/feature/old-name", { cwd: repoDir })
+        .toString()
+        .trim(),
+    ).toContain("refs/heads/feature/old-name");
+    expect(
+      execSync("git show-ref --verify refs/heads/feature/new-name", { cwd: repoDir })
+        .toString()
+        .trim(),
+    ).toContain("refs/heads/feature/new-name");
+  });
+
   it("handles status/diff/commit in a normal repo", async () => {
     writeFileSync(join(repoDir, "file.txt"), "updated\n");
 
@@ -249,6 +330,48 @@ describe("checkout git utilities", () => {
       .toString()
       .trim();
     expect(message).toBe("update file");
+  });
+
+  it("reuses checkout snapshot facts across status, shortstat, and PR status reads", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    execFileSync("git", ["checkout", "-b", "feature/facts"], { cwd: repoDir });
+    commitFile(repoDir, "feature.txt", "feature\n", "feature");
+    writeFileSync(join(repoDir, "feature.txt"), "feature\nchanged\n");
+    const github = createGitHubServiceForStatus(createPullRequestStatus());
+
+    const facts = await getCheckoutSnapshotFacts(repoDir, { paseoHome });
+    const status = await getCheckoutStatus(repoDir, { paseoHome, facts });
+    const shortstat = await getCheckoutShortstat(repoDir, { paseoHome, facts }, { force: true });
+    const prStatus = await getPullRequestStatus(
+      repoDir,
+      github,
+      { force: true, reason: "snapshot-equivalence" },
+      { paseoHome, facts },
+    );
+
+    __resetCheckoutShortstatCacheForTests();
+    __resetPullRequestStatusCacheForTests();
+    startGitCommandMetrics();
+    const statusWithFacts = await getCheckoutStatus(repoDir, { paseoHome, facts });
+    const shortstatWithFacts = await getCheckoutShortstat(
+      repoDir,
+      { paseoHome, facts },
+      { force: true },
+    );
+    const prStatusWithFacts = await getPullRequestStatus(
+      repoDir,
+      github,
+      { force: true, reason: "snapshot-equivalence-with-facts" },
+      { paseoHome, facts },
+    );
+    const metrics = stopGitCommandMetrics();
+    const commands = metrics.commands.map((command) => command.args.join(" "));
+
+    expect(statusWithFacts).toEqual(status);
+    expect(shortstatWithFacts).toEqual(shortstat);
+    expect(prStatusWithFacts).toEqual(prStatus);
+    expect(commands).not.toContain("rev-parse --show-toplevel");
+    expect(commands).not.toContain("rev-parse --abbrev-ref HEAD");
   });
 
   it("hides whitespace-only changes when requested", async () => {
@@ -311,6 +434,27 @@ const x = 1;
 
     expect(addedLine?.tokens).toEqual([{ text: "new comment line", style: "comment" }]);
     expect(removedLine?.tokens).toEqual([{ text: "old comment line", style: "comment" }]);
+  });
+
+  it("preserves no-prefix structured paths that start with a or b", async () => {
+    mkdirSync(join(repoDir, "a"));
+    mkdirSync(join(repoDir, "b"));
+    commitFile(repoDir, "a/example.ts", "const value = 1;\n", "add a-prefixed path");
+    commitFile(repoDir, "b/other.ts", "const value = 1;\n", "add b-prefixed path");
+    commitFile(repoDir, "file with space.ts", "const value = 1;\n", "add path with space");
+    execFileSync("git", ["config", "diff.noprefix", "true"], { cwd: repoDir });
+
+    writeFileSync(join(repoDir, "a/example.ts"), "const value = 2;\n");
+    writeFileSync(join(repoDir, "b/other.ts"), "const value = 2;\n");
+    writeFileSync(join(repoDir, "file with space.ts"), "const value = 2;\n");
+
+    const diff = await getCheckoutDiff(repoDir, { mode: "uncommitted", includeStructured: true });
+
+    expect(diff.structured?.map((file) => [file.path, file.hunks.length])).toEqual([
+      ["a/example.ts", 1],
+      ["b/other.ts", 1],
+      ["file with space.ts", 1],
+    ]);
   });
 
   it("returns checkout root metadata for normal repos", async () => {
@@ -376,6 +520,155 @@ const x = 1;
     }
     expect(divergedStatus.aheadOfOrigin).toBe(1);
     expect(divergedStatus.behindOfOrigin).toBe(1);
+  });
+
+  it("reports a PR worktree as not ahead when its branch is pushed to the configured PR remote", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    const prRemoteDir = join(tempDir, "pr-remote.git");
+    execFileSync("git", ["init", "--bare", "-b", "main", prRemoteDir]);
+    execFileSync("git", ["checkout", "-b", "aaronzhongg/open-button-targets-active-file"], {
+      cwd: repoDir,
+    });
+    commitFile(repoDir, "feature.txt", "feature\n", "feature commit");
+    execFileSync("git", ["remote", "add", "paseo-pr-1285", prRemoteDir], { cwd: repoDir });
+    execFileSync(
+      "git",
+      ["push", "paseo-pr-1285", "HEAD:refs/heads/open-button-targets-active-file"],
+      { cwd: repoDir },
+    );
+    execFileSync(
+      "git",
+      ["config", "branch.aaronzhongg/open-button-targets-active-file.remote", "paseo-pr-1285"],
+      {
+        cwd: repoDir,
+      },
+    );
+    execFileSync(
+      "git",
+      [
+        "config",
+        "branch.aaronzhongg/open-button-targets-active-file.merge",
+        "refs/heads/open-button-targets-active-file",
+      ],
+      { cwd: repoDir },
+    );
+
+    const status = await getCheckoutStatus(repoDir);
+
+    expect(status).toMatchObject({
+      isGit: true,
+      currentBranch: "aaronzhongg/open-button-targets-active-file",
+      aheadOfOrigin: 0,
+    });
+  });
+
+  it("reports a PR worktree as behind when its configured PR remote has newer commits", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    const prRemoteDir = join(tempDir, "pr-remote.git");
+    const prCloneDir = join(tempDir, "pr-clone");
+    execFileSync("git", ["init", "--bare", "-b", "main", prRemoteDir]);
+    execFileSync("git", ["checkout", "-b", "aaronzhongg/open-button-targets-active-file"], {
+      cwd: repoDir,
+    });
+    commitFile(repoDir, "feature.txt", "feature\n", "feature commit");
+    execFileSync("git", ["remote", "add", "paseo-pr-1285", prRemoteDir], { cwd: repoDir });
+    execFileSync(
+      "git",
+      ["push", "paseo-pr-1285", "HEAD:refs/heads/open-button-targets-active-file"],
+      { cwd: repoDir },
+    );
+    execFileSync(
+      "git",
+      ["config", "branch.aaronzhongg/open-button-targets-active-file.remote", "paseo-pr-1285"],
+      { cwd: repoDir },
+    );
+    execFileSync(
+      "git",
+      [
+        "config",
+        "branch.aaronzhongg/open-button-targets-active-file.merge",
+        "refs/heads/open-button-targets-active-file",
+      ],
+      { cwd: repoDir },
+    );
+    execFileSync("git", ["clone", prRemoteDir, prCloneDir]);
+    execFileSync("git", ["checkout", "open-button-targets-active-file"], { cwd: prCloneDir });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: prCloneDir });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: prCloneDir });
+    commitFile(prCloneDir, "remote.txt", "remote\n", "remote update");
+    execFileSync("git", ["push"], { cwd: prCloneDir });
+    execFileSync("git", ["fetch", "paseo-pr-1285"], { cwd: repoDir });
+
+    const status = await getCheckoutStatus(repoDir);
+
+    expect(status).toMatchObject({
+      isGit: true,
+      currentBranch: "aaronzhongg/open-button-targets-active-file",
+      behindOfOrigin: 1,
+    });
+  });
+
+  it("does not report the full branch history as ahead when the current branch remote is gone", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
+    commitFile(repoDir, "feature.txt", "feature\n", "feature commit");
+    execFileSync("git", ["push", "-u", "origin", "feature"], { cwd: repoDir });
+    execFileSync("git", ["push", "origin", "--delete", "feature"], { cwd: repoDir });
+    execFileSync("git", ["fetch", "--prune", "origin"], { cwd: repoDir });
+
+    const status = await getCheckoutStatus(repoDir);
+    expect(status.isGit).toBe(true);
+    if (!status.isGit) {
+      return;
+    }
+    expect(status.aheadOfOrigin).toBeNull();
+  });
+
+  it("does not report full history as unpushed for fresh no-track Paseo worktrees", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    commitFile(repoDir, "second.txt", "second\n", "second commit");
+    execFileSync("git", ["push"], { cwd: repoDir });
+
+    const worktree = await createLegacyWorktreeForTest({
+      branchName: "fresh-feature",
+      cwd: repoDir,
+      baseBranch: "main",
+      worktreeSlug: "fresh-feature",
+      paseoHome,
+    });
+
+    const status = await getCheckoutStatus(worktree.worktreePath, { paseoHome });
+    expect(status).toMatchObject({
+      isGit: true,
+      isPaseoOwnedWorktree: true,
+      baseRef: "main",
+      aheadBehind: { ahead: 0, behind: 0 },
+      aheadOfOrigin: null,
+    });
+  });
+
+  it("does not report local-only no-track worktree commits as ahead of origin", async () => {
+    setupRemoteTrackingMain(repoDir, tempDir);
+    commitFile(repoDir, "second.txt", "second\n", "second commit");
+    execFileSync("git", ["push"], { cwd: repoDir });
+
+    const worktree = await createLegacyWorktreeForTest({
+      branchName: "fresh-feature",
+      cwd: repoDir,
+      baseBranch: "main",
+      worktreeSlug: "fresh-feature",
+      paseoHome,
+    });
+    commitFile(worktree.worktreePath, "feature.txt", "feature\n", "feature commit");
+
+    const status = await getCheckoutStatus(worktree.worktreePath, { paseoHome });
+    expect(status).toMatchObject({
+      isGit: true,
+      isPaseoOwnedWorktree: true,
+      baseRef: "main",
+      aheadBehind: { ahead: 1, behind: 0 },
+      aheadOfOrigin: null,
+    });
   });
 
   it("does not report incoming additions when the base branch is behind its remote", async () => {
@@ -805,6 +1098,96 @@ const x = 1;
     expect(diff.structured?.some((f) => f.path === "file.txt" && f.status === "too_large")).toBe(
       true,
     );
+  });
+
+  it("marks tracked generated one-line diffs as too_large by content size", async () => {
+    writeFileSync(join(repoDir, "generated.js"), `const data = "old";\n`);
+    execFileSync("git", ["add", "generated.js"], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "add generated"], {
+      cwd: repoDir,
+    });
+
+    writeFileSync(join(repoDir, "generated.js"), `const data = "${"x".repeat(1_100_000)}";\n`);
+
+    const diff = await getCheckoutDiff(repoDir, { mode: "uncommitted", includeStructured: true });
+    const entry = diff.structured?.find((file) => file.path === "generated.js");
+
+    expect(entry).toBeTruthy();
+    expect(entry?.status).toBe("too_large");
+    expect(entry?.additions).toBe(1);
+    expect(entry?.deletions).toBe(1);
+    expect(entry?.hunks).toEqual([]);
+    expect(diff.diff).toContain("# generated.js: diff too large omitted");
+    expect(diff.diff).not.toContain("x".repeat(10_000));
+  });
+
+  it("keeps small tracked files displayable when another tracked file has a massive diff", async () => {
+    writeFileSync(join(repoDir, "generated.js"), `const data = "old";\n`);
+    writeFileSync(join(repoDir, "small.ts"), `export const value = "old";\n`);
+    execFileSync("git", ["add", "generated.js", "small.ts"], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "add tracked files"], {
+      cwd: repoDir,
+    });
+
+    writeFileSync(join(repoDir, "generated.js"), `const data = "${"x".repeat(2_100_000)}";\n`);
+    writeFileSync(join(repoDir, "small.ts"), `export const value = "new";\n`);
+
+    startGitCommandMetrics();
+    const diff = await getCheckoutDiff(repoDir, { mode: "uncommitted", includeStructured: true });
+    const metrics = stopGitCommandMetrics();
+    const commands = metrics.commands.map((command) => command.args.join(" "));
+
+    expect(
+      diff.structured?.map((file) => ({
+        path: file.path,
+        status: file.status,
+        hunks: file.hunks.length,
+      })),
+    ).toEqual([
+      { path: "generated.js", status: "too_large", hunks: 0 },
+      { path: "small.ts", status: "ok", hunks: 1 },
+    ]);
+    expect(diff.diff).toContain("# generated.js: diff too large omitted");
+    expect(diff.diff).toContain(`-export const value = "old";`);
+    expect(diff.diff).toContain(`+export const value = "new";`);
+    expect(commands).toContain("diff --numstat HEAD");
+    expect(commands).toContain("diff HEAD -- generated.js");
+    expect(commands).toContain("diff HEAD -- small.ts");
+    expect(metrics.maxConcurrent).toBeLessThanOrEqual(8);
+  });
+
+  it("marks tracked files omitted by the total diff budget as too_large", async () => {
+    for (let i = 1; i <= 4; i += 1) {
+      writeFileSync(join(repoDir, `budget-${i}.txt`), "old\n");
+    }
+    execFileSync("git", ["add", "."], { cwd: repoDir });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "add budget files"], {
+      cwd: repoDir,
+    });
+
+    const largeLine = "x".repeat(700_000);
+    for (let i = 1; i <= 4; i += 1) {
+      writeFileSync(join(repoDir, `budget-${i}.txt`), `${largeLine}-${i}\n`);
+    }
+
+    const diff = await getCheckoutDiff(repoDir, { mode: "uncommitted", includeStructured: true });
+
+    expect(
+      diff.structured?.map((file) => ({
+        path: file.path,
+        status: file.status,
+        hunks: file.hunks.length,
+      })),
+    ).toEqual([
+      { path: "budget-1.txt", status: "ok", hunks: 1 },
+      { path: "budget-2.txt", status: "ok", hunks: 1 },
+      { path: "budget-3.txt", status: "too_large", hunks: 0 },
+      { path: "budget-4.txt", status: "too_large", hunks: 0 },
+    ]);
+    expect(diff.diff).toContain("budget-1.txt");
+    expect(diff.diff).toContain("budget-2.txt");
+    expect(diff.diff).toContain("# budget-3.txt: diff too large omitted");
+    expect(diff.diff).toContain("# budget-4.txt: diff too large omitted");
   });
 
   it("short-circuits tracked binary files", async () => {
@@ -1269,6 +1652,14 @@ const x = 1;
     await pushCurrentBranch(repoDir);
 
     execFileSync("git", ["--git-dir", remoteDir, "show-ref", "--verify", "refs/heads/feature"]);
+    const upstream = execFileSync(
+      "git",
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      { cwd: repoDir },
+    )
+      .toString()
+      .trim();
+    expect(upstream).toBe("origin/feature");
   });
 
   it("lists merged local and remote branch suggestions with provenance", async () => {
@@ -1700,6 +2091,30 @@ const x = 1;
     expect(callCount).toBe(1);
   });
 
+  it("passes forced PR status reads through to the GitHub service", async () => {
+    execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/getpaseo/paseo.git"], {
+      cwd: repoDir,
+    });
+
+    const requested: Array<{ force?: boolean; reason?: string }> = [];
+    const github = createGitHubServiceForStatus(null);
+    github.getCurrentPullRequestStatus = async (options) => {
+      requested.push({
+        ...(options.force ? { force: options.force } : {}),
+        ...(options.reason ? { reason: options.reason } : {}),
+      });
+      return createPullRequestStatus();
+    };
+
+    await getPullRequestStatus(repoDir, github, {
+      force: true,
+      reason: "merge-pr-validation",
+    });
+
+    expect(requested).toEqual([{ force: true, reason: "merge-pr-validation" }]);
+  });
+
   it("expires cached PR status after the TTL", async () => {
     execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
     execFileSync("git", ["remote", "add", "origin", "https://github.com/getpaseo/paseo.git"], {
@@ -1767,6 +2182,39 @@ const x = 1;
     } finally {
       __resetPullRequestStatusCacheForTests();
     }
+  });
+
+  it("does not use stale PR status fallback for forced GitHub errors", async () => {
+    execFileSync("git", ["checkout", "-b", "feature"], { cwd: repoDir });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/getpaseo/paseo.git"], {
+      cwd: repoDir,
+    });
+
+    const github = createGitHubServiceForStatus(null);
+    github.getCurrentPullRequestStatus = async () =>
+      createPullRequestStatus({
+        url: "https://github.com/getpaseo/paseo/pull/123",
+      });
+
+    const fresh = await getPullRequestStatus(repoDir, github);
+    expect(fresh.status?.url).toContain("/pull/123");
+
+    const error = new GitHubCommandError({
+      args: ["pr", "view"],
+      cwd: repoDir,
+      exitCode: 1,
+      stderr: "could not resolve host: github.com",
+    });
+    github.getCurrentPullRequestStatus = async () => {
+      throw error;
+    };
+
+    await expect(
+      getPullRequestStatus(repoDir, github, {
+        force: true,
+        reason: "merge-pr-validation",
+      }),
+    ).rejects.toBe(error);
   });
 
   it("clears stale PR status after a successful no-PR refresh", async () => {
@@ -2061,6 +2509,20 @@ const x = 1;
 
     it("matches Windows .paseo\\worktrees\\ paths", () => {
       expect(isPaseoWorktreePath("C:\\Users\\dev\\.paseo\\worktrees\\feature")).toBe(true);
+    });
+
+    it("matches worktrees under a custom PASEO_HOME", () => {
+      const customPaseoHome = process.platform === "win32" ? "C:\\paseo" : "/var/lib/paseo";
+      const worktreePath =
+        process.platform === "win32"
+          ? win32.join(customPaseoHome, "worktrees", "project", "feature")
+          : `${customPaseoHome}/worktrees/project/feature`;
+
+      expect(
+        isPaseoWorktreePath(worktreePath, {
+          paseoHome: customPaseoHome,
+        }),
+      ).toBe(true);
     });
 
     it("rejects paths without .paseo/worktrees segment", () => {

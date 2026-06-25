@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { DaemonClient } from "@server/client/daemon-client";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 import { DictationStreamSender } from "@/dictation/dictation-stream-sender";
 
@@ -136,5 +136,31 @@ describe("DictationStreamSender", () => {
     await sender.restartStream("reconnect");
 
     expect(client.chunks.map((c) => c.seq)).toEqual([0, 1]);
+  });
+
+  it("does not replay long buffered native dictation in one synchronous burst", async () => {
+    const client = new FakeDaemonClient();
+    client.isConnected = false;
+    const sender = new DictationStreamSender({
+      client: client as unknown as DaemonClient,
+      format: "audio/pcm;rate=16000;bits=16",
+      createDictationId: () => "d1",
+    });
+
+    for (let seq = 0; seq < 480; seq += 1) {
+      sender.enqueueSegment(`native-frame-${seq}`);
+    }
+
+    client.isConnected = true;
+    const finish = sender.finish(sender.getFinalSeq());
+
+    await tick();
+
+    expect(client.chunks.length).toBeLessThanOrEqual(128);
+    await expect(finish).resolves.toEqual({
+      dictationId: "d1",
+      text: "ok",
+    });
+    expect(client.finishes).toEqual([{ dictationId: "d1", finalSeq: 479 }]);
   });
 });

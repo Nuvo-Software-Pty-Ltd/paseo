@@ -17,7 +17,9 @@ export type WorkspaceRouteState =
       lastError: string | null;
     }
   | { kind: "loading"; hostName: string }
-  | { kind: "missing"; hostName: string }
+  | { kind: "restoring"; hostName: string }
+  | { kind: "needsHostUpgrade"; hostName: string }
+  | { kind: "missing"; hostName: string; restoreFailed: boolean }
   | { kind: "cold-resume"; hostName: string }
   | { kind: "billing-locked"; hostName: string };
 
@@ -27,6 +29,7 @@ export interface ResolveWorkspaceRouteStateInput {
   lastError: string | null;
   workspace: WorkspaceDescriptor | null;
   hasHydratedWorkspaces: boolean;
+  restoreStatus: "restoring" | "failed" | "needs-host-upgrade" | null;
   // Optional cloud-workspace state from useCloudWorkspaces. Only present for
   // cloud-host routes; absent / "active" for on-host. When set:
   //   "billing_locked" short-circuits the gate to the upgrade prompt before
@@ -74,8 +77,20 @@ export function resolveWorkspaceRouteState(
   }
 
   if (input.connectionStatus === "online") {
+    if (input.restoreStatus === "restoring") {
+      return { kind: "restoring", hostName: input.hostName };
+    }
+
+    if (input.restoreStatus === "needs-host-upgrade") {
+      return { kind: "needsHostUpgrade", hostName: input.hostName };
+    }
+
     if (input.hasHydratedWorkspaces) {
-      return { kind: "missing", hostName: input.hostName };
+      return {
+        kind: "missing",
+        hostName: input.hostName,
+        restoreFailed: input.restoreStatus === "failed",
+      };
     }
 
     return { kind: "loading", hostName: input.hostName };

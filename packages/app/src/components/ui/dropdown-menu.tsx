@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -10,11 +11,11 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ActivityIndicator,
   Modal,
   Pressable,
-  ScrollView,
   Text,
   View,
   Dimensions,
@@ -25,12 +26,14 @@ import {
   type ViewStyle,
   type StyleProp,
 } from "react-native";
-import Animated, { Keyframe, runOnJS } from "react-native-reanimated";
+import { Keyframe, runOnJS } from "react-native-reanimated";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { Check, CheckCircle } from "lucide-react-native";
-import { isWeb } from "@/constants/platform";
+import { FloatingScrollView, FloatingSurface } from "@/components/ui/floating";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
+import { isWeb } from "@/constants/platform";
+import { useDismissKeyboardOnOpen } from "@/components/ui/keyboard-dismiss";
 
 // Action status for menu items with loading/success feedback
 export type ActionStatus = "idle" | "pending" | "success";
@@ -172,42 +175,47 @@ function computePosition({
   return { x, y, actualPlacement };
 }
 
-interface SharedDropdownContentProps {
-  collapsable: false;
-  testID?: string;
-  style: StyleProp<ViewStyle>;
-}
-
 function renderDropdownSurface(input: {
-  isWebSurface: boolean;
-  sharedProps: SharedDropdownContentProps;
+  frameStyle: StyleProp<ViewStyle>;
+  testID?: string;
+  surfaceStyle: StyleProp<ViewStyle>;
   scrollable: boolean;
   scrollViewportStyle: StyleProp<ViewStyle>;
   content: ReactElement;
+  surfaceNativeID: string;
   onExited: () => void;
 }): ReactElement {
-  const { isWebSurface, sharedProps, scrollable, scrollViewportStyle, content, onExited } = input;
+  const {
+    frameStyle,
+    testID,
+    surfaceStyle,
+    scrollable,
+    scrollViewportStyle,
+    content,
+    surfaceNativeID,
+    onExited,
+  } = input;
 
   const body = scrollable ? (
-    <ScrollView
+    <FloatingScrollView
       bounces={false}
       showsVerticalScrollIndicator
       style={scrollViewportStyle}
       contentContainerStyle={DROPDOWN_SCROLL_CONTENT_STYLE}
     >
       {content}
-    </ScrollView>
+    </FloatingScrollView>
   ) : (
     content
   );
 
-  if (isWebSurface) {
-    return <View {...sharedProps}>{body}</View>;
-  }
-
   return (
-    <Animated.View
-      {...sharedProps}
+    <FloatingSurface
+      collapsable={false}
+      nativeID={surfaceNativeID}
+      testID={testID}
+      style={surfaceStyle}
+      frameStyle={frameStyle}
       entering={contentEntering}
       exiting={contentExiting.withCallback((finished) => {
         "worklet";
@@ -217,7 +225,7 @@ function renderDropdownSurface(input: {
       })}
     >
       {body}
-    </Animated.View>
+    </FloatingSurface>
   );
 }
 
@@ -238,6 +246,7 @@ export function DropdownMenu({
     defaultOpen,
     onOpenChange,
   });
+  useDismissKeyboardOnOpen(isOpen);
 
   const flushPendingSelect = useCallback(() => {
     const pendingSelect = pendingSelectRef.current;
@@ -294,7 +303,7 @@ interface TriggerState {
 }
 type TriggerStyleProp = StyleProp<ViewStyle> | ((state: TriggerState) => StyleProp<ViewStyle>);
 
-interface DropdownMenuTriggerProps extends Omit<PressableProps, "style" | "children"> {
+export interface DropdownMenuTriggerProps extends Omit<PressableProps, "style" | "children"> {
   style?: TriggerStyleProp;
   children: ReactNode | ((state: TriggerState) => ReactNode);
 }
@@ -356,15 +365,57 @@ function getTransformOrigin(placement: Placement, alignment: Alignment): string 
   return `${vertical} ${horizontal}`;
 }
 
+const CONTENT_ENTERING_DURATION_MS = 150;
+
 const contentEntering = new Keyframe({
   0: { opacity: 0, transform: [{ scale: 0.97 }] },
   100: { opacity: 1, transform: [{ scale: 1 }] },
-}).duration(150);
+}).duration(CONTENT_ENTERING_DURATION_MS);
 
 const contentExiting = new Keyframe({
   0: { opacity: 1, transform: [{ scale: 1 }] },
   100: { opacity: 0, transform: [{ scale: 0.97 }] },
 }).duration(100);
+
+function releaseFixedMenuHeight(surfaceNativeID: string): void {
+  if (!isWeb) return;
+  document.getElementById(surfaceNativeID)?.style.removeProperty("height");
+}
+
+function useReleaseFixedMenuHeight({
+  contentSize,
+  enabled,
+  surfaceNativeID,
+}: {
+  contentSize: Size | null;
+  enabled: boolean;
+  surfaceNativeID: string;
+}): void {
+  useEffect(() => {
+    if (!enabled) return undefined;
+
+    // Reanimated web entering animations leave the measured menu surface with
+    // an inline height snapshot. Once the menu is open, height must return to
+    // content-sized so rows can grow in place (for example service script URLs).
+    const release = () => {
+      releaseFixedMenuHeight(surfaceNativeID);
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => releaseFixedMenuHeight(surfaceNativeID));
+      }
+    };
+    const timers: ReturnType<typeof setTimeout>[] = [
+      setTimeout(release, CONTENT_ENTERING_DURATION_MS),
+    ];
+
+    if (contentSize) {
+      timers.push(setTimeout(release, 0));
+    }
+
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+  }, [contentSize, enabled, surfaceNativeID]);
+}
 
 export function DropdownMenuContent({
   children,
@@ -392,9 +443,11 @@ export function DropdownMenuContent({
   scrollable?: boolean;
   testID?: string;
 }>): ReactElement | null {
+  const { t } = useTranslation();
   const { open, setOpen, triggerRef, flushPendingSelect } =
     useDropdownMenuContext("DropdownMenuContent");
   const [modalVisible, setModalVisible] = useState(false);
+  const surfaceNativeID = useId();
   const webScrollbarStyle = useWebScrollbarStyle();
   const [closing, setClosing] = useState(false);
   const [triggerRect, setTriggerRect] = useState<Rect | null>(null);
@@ -434,6 +487,12 @@ export function DropdownMenuContent({
       flushPendingSelect();
     }
   }, [flushPendingSelect, modalVisible, open]);
+
+  useReleaseFixedMenuHeight({
+    contentSize,
+    enabled: modalVisible,
+    surfaceNativeID,
+  });
 
   const handleClose = useCallback(() => {
     setOpen(false);
@@ -513,7 +572,8 @@ export function DropdownMenuContent({
     [],
   );
 
-  const contentStyle = useMemo(() => {
+  const surfaceStyle = styles.content;
+  const frameStyle = useMemo(() => {
     const { width: screenWidth } = Dimensions.get("window");
     const resolvedWidthStyle: ViewStyle = fullWidth
       ? { width: screenWidth - horizontalPadding * 2 }
@@ -523,7 +583,6 @@ export function DropdownMenuContent({
           ...(typeof maxWidth === "number" ? { maxWidth } : null),
         };
     return [
-      styles.content,
       resolvedWidthStyle,
       {
         position: "absolute" as const,
@@ -543,14 +602,6 @@ export function DropdownMenuContent({
     actualPlacement,
     align,
   ]);
-  const sharedContentProps = useMemo(
-    () => ({
-      collapsable: false as const,
-      testID,
-      style: contentStyle,
-    }),
-    [testID, contentStyle],
-  );
   const scrollViewportStyle = useMemo(
     () => [webScrollbarStyle, visibleContentSize ? { height: visibleContentSize.height } : null],
     [visibleContentSize, webScrollbarStyle],
@@ -576,18 +627,20 @@ export function DropdownMenuContent({
       <View style={styles.overlay}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Menu backdrop"
+          accessibilityLabel={t("menu.backdrop")}
           style={styles.backdrop}
           onPress={handleClose}
           testID={testID ? `${testID}-backdrop` : undefined}
         />
         {!closing
           ? renderDropdownSurface({
-              isWebSurface: isWeb,
-              sharedProps: sharedContentProps,
+              frameStyle,
+              testID,
+              surfaceStyle,
               scrollable,
               scrollViewportStyle,
               content,
+              surfaceNativeID,
               onExited: () => setModalVisible(false),
             })
           : null}
@@ -848,8 +901,6 @@ const styles = StyleSheet.create((theme) => ({
   labelText: {
     fontSize: theme.fontSize.xs,
     color: theme.colors.foregroundMuted,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
   },
   separator: {
     height: 1,

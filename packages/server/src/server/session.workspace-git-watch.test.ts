@@ -1,8 +1,13 @@
 import { describe, expect, test, vi } from "vitest";
 import path from "node:path";
 import type pino from "pino";
+import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js";
+import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
 import { Session, type SessionOptions } from "./session.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
+import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
+import { createTestLogger } from "../test-utils/test-logger.js";
+import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import type {
   WorkspaceGitListener,
   WorkspaceGitRuntimeSnapshot,
@@ -24,7 +29,7 @@ interface SessionInternals {
     lastEmittedByWorkspaceId: Map<string, unknown>;
   };
   buildWorkspaceDescriptorMap: () => Promise<Map<string, unknown>>;
-  syncWorkspaceGitObserver(cwd: string, details: { isGit: boolean }): void;
+  syncWorkspaceGitObserver(cwd: string, details: { isGit: boolean; workspaceId: string }): void;
   listAgentPayloads: () => Promise<unknown[]>;
 }
 
@@ -92,7 +97,15 @@ function createWorkspaceRuntimeSnapshot(
   };
 }
 
-function createSessionForWorkspaceGitWatchTests(): {
+function createSessionForWorkspaceGitWatchTests(options?: {
+  onBranchChanged?: (
+    workspaceId: string,
+    oldBranch: string | null,
+    newBranch: string | null,
+  ) => void;
+  serviceProxy?: ServiceProxySubsystem;
+  scriptRuntimeStore?: WorkspaceScriptRuntimeStore;
+}): {
   session: Session;
   emitted: Array<{ type: string; payload: unknown }>;
   projects: Map<string, ReturnType<typeof createPersistedProjectRecord>>;
@@ -208,6 +221,7 @@ function createSessionForWorkspaceGitWatchTests(): {
         unsubscribe: () => {},
       }),
       scheduleRefreshForCwd: () => {},
+      onWorkspaceStateMayHaveChanged: () => {},
       getMetrics: () => ({
         checkoutDiffTargetCount: 0,
         checkoutDiffSubscriptionCount: 0,
@@ -220,7 +234,12 @@ function createSessionForWorkspaceGitWatchTests(): {
     mcpBaseUrl: null,
     stt: null,
     tts: null,
+    providerSnapshotManager: createProviderSnapshotManagerStub().manager,
     terminalManager: null,
+    serviceProxy: options?.serviceProxy,
+    scriptRuntimeStore: options?.scriptRuntimeStore,
+    onBranchChanged: options?.onBranchChanged,
+    getDaemonTcpPort: () => 6767,
   });
 
   asInternals<SessionInternals>(session).listAgentPayloads = async () => [];
@@ -305,7 +324,7 @@ describe("workspace git watch targets", () => {
 
     sessionAny.buildWorkspaceDescriptorMap = async () => new Map([[descriptor.id, descriptor]]);
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true });
+    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
 
     expect(workspaceGitService.registerWorkspace).toHaveBeenCalledWith(
       { cwd: REPO_CWD },
@@ -364,7 +383,7 @@ describe("workspace git watch targets", () => {
       lastEmittedByWorkspaceId: new Map(),
     };
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true });
+    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
     emitted.length = 0;
 
     subscriptions[0]?.listener(
@@ -407,6 +426,135 @@ describe("workspace git watch targets", () => {
     await session.cleanup();
   });
 
+  test("updates running service script URLs when the git branch changes", async () => {
+    const serviceProxy = createServiceProxySubsystem({ logger: createTestLogger() });
+    serviceProxy.registerWorkspaceService({
+      port: 4321,
+      workspaceId: "ws-10",
+      projectSlug: "paseo",
+      branchName: "old-branch",
+      scriptName: "app",
+    });
+    const runtimeStore = new WorkspaceScriptRuntimeStore();
+    runtimeStore.set({
+      workspaceId: "ws-10",
+      scriptName: "app",
+      type: "service",
+      lifecycle: "running",
+      terminalId: "term-app",
+      exitCode: null,
+    });
+
+    const handleBranchChange = createBranchChangeRouteHandler({
+      serviceProxy,
+      onRoutesChanged: vi.fn(),
+    });
+    const { session, projects, workspaces, subscriptions } = createSessionForWorkspaceGitWatchTests(
+      {
+        serviceProxy,
+        scriptRuntimeStore: runtimeStore,
+        onBranchChanged: handleBranchChange,
+      },
+    );
+    const sessionAny = session as unknown as SessionInternals;
+    seedGitWorkspace({
+      projects,
+      workspaces,
+      projectId: "proj-1",
+      workspaceId: "ws-10",
+      cwd: "/tmp/repo",
+      name: "old-branch",
+    });
+
+    sessionAny.syncWorkspaceGitObserver("/tmp/repo", { isGit: true, workspaceId: "ws-10" });
+
+    subscriptions[0]?.listener(
+      createWorkspaceRuntimeSnapshot("/tmp/repo", {
+        git: {
+          currentBranch: "new-branch",
+        },
+      }),
+    );
+
+    expect(serviceProxy.getWorkspaceHealthTargets("ws-10")).toEqual([
+      expect.objectContaining({
+        hostname: "app--new-branch--paseo.localhost",
+        scriptName: "app",
+      }),
+    ]);
+    expect(sessionAny.buildWorkspaceScriptPayloadSnapshot("ws-10", "/tmp/repo")).toEqual([
+      expect.objectContaining({
+        scriptName: "app",
+        hostname: "app--new-branch--paseo.localhost",
+        localProxyUrl: "http://app--new-branch--paseo.localhost:6767",
+        publicProxyUrl: null,
+        proxyUrl: "http://app--new-branch--paseo.localhost:6767",
+      }),
+    ]);
+
+    await session.cleanup();
+  });
+
+  test("archiving a workspace clears its script runtime entries by opaque workspace id", async () => {
+    const runtimeStore = new WorkspaceScriptRuntimeStore();
+    runtimeStore.set({
+      workspaceId: "ws-10",
+      scriptName: "app",
+      type: "service",
+      lifecycle: "running",
+      terminalId: "term-app",
+      exitCode: null,
+    });
+
+    const { session, projects, workspaces } = createSessionForWorkspaceGitWatchTests({
+      scriptRuntimeStore: runtimeStore,
+    });
+    seedGitWorkspace({
+      projects,
+      workspaces,
+      projectId: "proj-1",
+      workspaceId: "ws-10",
+      cwd: "/tmp/repo",
+      name: "main",
+    });
+
+    await asInternals<{ archiveWorkspaceRecord: (workspaceId: string) => Promise<void> }>(
+      session,
+    ).archiveWorkspaceRecord("ws-10");
+
+    expect(runtimeStore.listForWorkspace("ws-10")).toEqual([]);
+
+    await session.cleanup();
+  });
+
+  test("archiving a workspace releases its git watch subscription for the directory", async () => {
+    const { session, projects, workspaces, subscriptions } =
+      createSessionForWorkspaceGitWatchTests();
+    const sessionAny = asInternals<
+      SessionInternals & { archiveWorkspaceRecord: (workspaceId: string) => Promise<void> }
+    >(session);
+    seedGitWorkspace({
+      projects,
+      workspaces,
+      projectId: "proj-1",
+      workspaceId: "ws-10",
+      cwd: REPO_CWD,
+      name: "main",
+    });
+
+    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
+    expect(subscriptions).toHaveLength(1);
+
+    await sessionAny.archiveWorkspaceRecord("ws-10");
+
+    // Re-observing the directory establishes a fresh subscription only if archive
+    // tore down the prior one, which is keyed by cwd — not the opaque workspace id.
+    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
+    expect(subscriptions).toHaveLength(2);
+
+    await session.cleanup();
+  });
+
   test("embeds PR status in checkout_status_update for GitHub-inclusive snapshot pushes", async () => {
     const { session, emitted, projects, workspaces, subscriptions } =
       createSessionForWorkspaceGitWatchTests();
@@ -427,7 +575,7 @@ describe("workspace git watch targets", () => {
       lastEmittedByWorkspaceId: new Map(),
     };
 
-    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true });
+    sessionAny.syncWorkspaceGitObserver(REPO_CWD, { isGit: true, workspaceId: "ws-10" });
     emitted.length = 0;
 
     subscriptions[0]?.listener(
@@ -451,6 +599,23 @@ describe("workspace git watch targets", () => {
             ],
             checksStatus: "success",
             reviewDecision: "approved",
+            github: {
+              mergeStateStatus: "CLEAN",
+              autoMergeRequest: null,
+              viewerCanEnableAutoMerge: true,
+              viewerCanDisableAutoMerge: false,
+              viewerCanMergeAsAdmin: false,
+              viewerCanUpdateBranch: true,
+              repository: {
+                autoMergeAllowed: true,
+                mergeCommitAllowed: true,
+                squashMergeAllowed: true,
+                rebaseMergeAllowed: false,
+                viewerDefaultMergeMethod: "SQUASH",
+              },
+              isMergeQueueEnabled: false,
+              isInMergeQueue: false,
+            },
           },
           error: null,
         },
@@ -483,6 +648,23 @@ describe("workspace git watch targets", () => {
         ],
         checksStatus: "success",
         reviewDecision: "approved",
+        github: {
+          mergeStateStatus: "CLEAN",
+          autoMergeRequest: null,
+          viewerCanEnableAutoMerge: true,
+          viewerCanDisableAutoMerge: false,
+          viewerCanMergeAsAdmin: false,
+          viewerCanUpdateBranch: true,
+          repository: {
+            autoMergeAllowed: true,
+            mergeCommitAllowed: true,
+            squashMergeAllowed: true,
+            rebaseMergeAllowed: false,
+            viewerDefaultMergeMethod: "SQUASH",
+          },
+          isMergeQueueEnabled: false,
+          isInMergeQueue: false,
+        },
       },
       githubFeaturesEnabled: true,
       error: null,

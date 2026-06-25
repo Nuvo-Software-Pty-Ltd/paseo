@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type pino from "pino";
 import { z } from "zod";
-import { ChatMessageSchema, ChatRoomSchema } from "./chat-types.js";
+import { ChatMessageSchema, ChatRoomSchema } from "@getpaseo/protocol/chat/types";
 
 export const ChatStorePayloadSchema = z.object({
   rooms: z.array(ChatRoomSchema),

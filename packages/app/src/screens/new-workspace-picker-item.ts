@@ -1,5 +1,5 @@
-import type { CreatePaseoWorktreeInput } from "@server/client/daemon-client";
-import type { GitHubSearchItem } from "@server/shared/messages";
+import type { CreatePaseoWorktreeInput } from "@getpaseo/client/internal/daemon-client";
+import type { GitHubSearchItem } from "@getpaseo/protocol/messages";
 
 export type PickerItem =
   | { kind: "branch"; name: string }
@@ -20,11 +20,13 @@ export function pickerItemToCheckoutRequest(
   switch (item.kind) {
     case "branch":
       return { action: "branch-off", refName: item.name };
-    case "github-pr":
+    case "github-pr": {
+      const headRefName = item.item.headRefName?.trim();
       return {
         action: "checkout",
-        refName: item.item.headRefName ?? "",
+        ...(headRefName ? { refName: headRefName } : {}),
         githubPrNumber: item.item.number,
       };
+    }
   }
 }

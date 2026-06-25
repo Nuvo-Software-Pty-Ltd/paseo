@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import "@/test/window-local-storage";
+import { i18n as testI18n } from "@/i18n/i18next";
 import { act, fireEvent, render, renderHook, cleanup } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { useReviewDraftStore, type ReviewDraftComment } from "./store";
 import { buildReviewableDiffTargetKey, type ReviewableDiffTarget } from "@/utils/diff-layout";
 import {
@@ -17,6 +19,8 @@ import {
   useInlineReviewController,
   type InlineReviewActions,
 } from "./index";
+
+void testI18n;
 
 const { theme, pressablePropsByLabel } = vi.hoisted(() => {
   Object.assign(globalThis, { __DEV__: false });
@@ -164,7 +168,7 @@ function comment(overrides: Partial<ReviewDraftComment> = {}): ReviewDraftCommen
 
 describe("useInlineReviewController", () => {
   beforeEach(() => {
-    useReviewDraftStore.setState({ drafts: {}, activeModesByScope: {} });
+    useReviewDraftStore.setState({ drafts: {}, diffModeOverrides: {} });
   });
 
   afterEach(() => {
@@ -275,7 +279,7 @@ describe("git diff inline review helpers", () => {
         viewportWidth: 320,
         pinToViewport: true,
       }),
-    ).toEqual([{ position: "sticky", left: 0 }, { width: 320 }]);
+    ).toEqual([{ position: "sticky", left: 0 }, inlineUnistylesStyle({ width: 320 })]);
   });
 
   it("keeps the gutter add-comment target accessible and clicking opens the editor", () => {

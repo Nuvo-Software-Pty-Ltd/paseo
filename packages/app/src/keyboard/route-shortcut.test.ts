@@ -29,6 +29,7 @@ describe("routeKeyboardShortcut — dispatch passthroughs", () => {
   it.each([
     ["agent.interrupt", { id: "agent.interrupt", scope: "global" }],
     ["workspace.tab.new", { id: "workspace.tab.new", scope: "workspace" }],
+    ["workspace.new", { id: "workspace.new", scope: "sidebar" }],
     ["worktree.archive", { id: "worktree.archive", scope: "sidebar" }],
     ["worktree.new", { id: "worktree.new", scope: "sidebar" }],
     ["workspace.terminal.new", { id: "workspace.terminal.new", scope: "workspace" }],
@@ -134,6 +135,13 @@ describe("routeKeyboardShortcut — workspace.navigate.index", () => {
 });
 
 describe("routeKeyboardShortcut — workspace.navigate.relative", () => {
+  const STATUS_VISUAL_TARGETS = [
+    { serverId: "srv", workspaceId: "needs-input" },
+    { serverId: "srv", workspaceId: "running-new" },
+    { serverId: "srv", workspaceId: "running-old" },
+    { serverId: "srv", workspaceId: "done" },
+  ] as const;
+
   it("uses the retained navigation workspace selection over a stale pathname", () => {
     expect(
       routeKeyboardShortcut(
@@ -147,6 +155,57 @@ describe("routeKeyboardShortcut — workspace.navigate.relative", () => {
       kind: "navigate-workspace",
       serverId: "srv",
       workspaceId: "ws-5",
+    });
+  });
+
+  it("moves from status row 2 to row 3 using status visual target order", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "workspace.navigate.relative", payload: { delta: 1 } },
+        makeCtx({
+          pathname: "/h/srv/workspace/ui-expose-archive-worktrees-on-merge",
+          sidebarShortcutTargets: STATUS_VISUAL_TARGETS,
+          navigationActiveWorkspace: { serverId: "srv", workspaceId: "running-new" },
+        }),
+      ),
+    ).toEqual<ShortcutAction>({
+      kind: "navigate-workspace",
+      serverId: "srv",
+      workspaceId: "running-old",
+    });
+  });
+
+  it("moves backward from status row 2 to row 1 using status visual target order", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "workspace.navigate.relative", payload: { delta: -1 } },
+        makeCtx({
+          pathname: "/h/srv/workspace/ui-expose-archive-worktrees-on-merge",
+          sidebarShortcutTargets: STATUS_VISUAL_TARGETS,
+          navigationActiveWorkspace: { serverId: "srv", workspaceId: "running-new" },
+        }),
+      ),
+    ).toEqual<ShortcutAction>({
+      kind: "navigate-workspace",
+      serverId: "srv",
+      workspaceId: "needs-input",
+    });
+  });
+
+  it("moves backward from status row 3 to row 2 using status visual target order", () => {
+    expect(
+      routeKeyboardShortcut(
+        { action: "workspace.navigate.relative", payload: { delta: -1 } },
+        makeCtx({
+          pathname: "/h/srv/workspace/running-old",
+          sidebarShortcutTargets: STATUS_VISUAL_TARGETS,
+          navigationActiveWorkspace: { serverId: "srv", workspaceId: "running-old" },
+        }),
+      ),
+    ).toEqual<ShortcutAction>({
+      kind: "navigate-workspace",
+      serverId: "srv",
+      workspaceId: "running-new",
     });
   });
 
@@ -217,6 +276,7 @@ describe("routeKeyboardShortcut — message-input.action", () => {
     ["dictation-confirm", "message-input.dictation-confirm"],
     ["voice-toggle", "message-input.voice-toggle"],
     ["voice-mute-toggle", "message-input.voice-mute-toggle"],
+    ["mode-cycle", "message-input.mode-cycle"],
   ] as const)("kind=%s → dispatch %s", (kind, id) => {
     expect(
       routeKeyboardShortcut({ action: "message-input.action", payload: { kind } }, makeCtx()),
@@ -224,15 +284,6 @@ describe("routeKeyboardShortcut — message-input.action", () => {
       kind: "dispatch",
       action: { id, scope: "message-input" },
     });
-  });
-
-  it("returns none for unsupported message-input kinds (queue)", () => {
-    expect(
-      routeKeyboardShortcut(
-        { action: "message-input.action", payload: { kind: "queue" } },
-        makeCtx(),
-      ),
-    ).toEqual<ShortcutAction>({ kind: "none" });
   });
 
   it("returns none when kind is missing", () => {

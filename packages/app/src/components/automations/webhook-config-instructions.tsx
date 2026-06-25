@@ -3,7 +3,6 @@ import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import * as Clipboard from "expo-clipboard";
 import { Button } from "@/components/ui/button";
-import { Fonts } from "@/constants/theme";
 import {
   WEBHOOK_HOW_TO_SIGN,
   WEBHOOK_METHOD,
@@ -91,7 +90,7 @@ const styles = StyleSheet.create((theme) => ({
   value: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
-    fontFamily: Fonts.mono,
+    fontFamily: theme.fontFamily.mono,
   },
   note: {
     fontSize: theme.fontSize.xs,
@@ -103,7 +102,7 @@ const styles = StyleSheet.create((theme) => ({
   code: {
     fontSize: theme.fontSize.xs,
     color: theme.colors.foreground,
-    fontFamily: Fonts.mono,
+    fontFamily: theme.fontFamily.mono,
     padding: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
     backgroundColor: theme.colors.surface0,

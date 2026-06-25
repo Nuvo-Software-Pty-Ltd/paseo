@@ -34,6 +34,18 @@ describe("PersistedConfigSchema daemon auth config", () => {
   });
 });
 
+describe("PersistedConfigSchema daemon append system prompt config", () => {
+  test("accepts optional append system prompt", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: {
+        appendSystemPrompt: "Prefer terse replies.",
+      },
+    });
+
+    expect(parsed.daemon?.appendSystemPrompt).toBe("Prefer terse replies.");
+  });
+});
+
 describe("PersistedConfigSchema daemon relay config", () => {
   test("accepts optional relay TLS setting", () => {
     const parsed = PersistedConfigSchema.parse({
@@ -48,6 +60,30 @@ describe("PersistedConfigSchema daemon relay config", () => {
     });
 
     expect(parsed.daemon?.relay?.useTls).toBe(true);
+  });
+});
+
+describe("PersistedConfigSchema worktrees config", () => {
+  test("accepts optional worktree root", () => {
+    const parsed = PersistedConfigSchema.parse({
+      worktrees: {
+        root: "/mnt/fast/paseo-worktrees",
+      },
+    });
+
+    expect(parsed.worktrees?.root).toBe("/mnt/fast/paseo-worktrees");
+  });
+});
+
+describe("PersistedConfigSchema daemon append system prompt", () => {
+  test("accepts optional append system prompt", () => {
+    const parsed = PersistedConfigSchema.parse({
+      daemon: {
+        appendSystemPrompt: "Prefer terse replies.",
+      },
+    });
+
+    expect(parsed.daemon?.appendSystemPrompt).toBe("Prefer terse replies.");
   });
 });
 
@@ -108,6 +144,26 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  test("accepts metadata generation provider fallbacks", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        metadataGeneration: {
+          providers: [
+            { provider: "claude", model: "haiku" },
+            { provider: "codex", model: "gpt-5.4-mini", thinkingOptionId: "low" },
+          ],
+        },
+      },
+    });
+
+    expect(parsed.agents?.metadataGeneration).toEqual({
+      providers: [
+        { provider: "claude", model: "haiku" },
+        { provider: "codex", model: "gpt-5.4-mini", thinkingOptionId: "low" },
+      ],
+    });
   });
 });
 
@@ -482,6 +538,59 @@ describe("PersistedConfigSchema voice mode config", () => {
     });
 
     expect(parsed.features?.voiceMode?.turnDetection?.provider).toBe("local");
+  });
+
+  test("accepts trimmed STT language fields", () => {
+    const parsed = PersistedConfigSchema.parse({
+      features: {
+        dictation: {
+          stt: {
+            language: " fr ",
+          },
+        },
+        voiceMode: {
+          stt: {
+            language: " de ",
+          },
+        },
+      },
+    });
+
+    expect(parsed.features?.dictation?.stt?.language).toBe("fr");
+    expect(parsed.features?.voiceMode?.stt?.language).toBe("de");
+  });
+});
+
+describe("loadPersistedConfig", () => {
+  test("accepts the documented config schema marker", () => {
+    const home = createTempHome();
+    const configPath = path.join(home, "config.json");
+    try {
+      writeFileSync(
+        configPath,
+        `${JSON.stringify(
+          {
+            $schema: "https://paseo.sh/schemas/paseo.config.v1.json",
+            version: 1,
+            daemon: {
+              listen: "127.0.0.1:6767",
+              hostnames: ["localhost", ".localhost"],
+              mcp: { enabled: true },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const config = loadPersistedConfig(home);
+
+      expect(config.daemon?.listen).toBe("127.0.0.1:6767");
+      expect(config.daemon?.hostnames).toEqual(["localhost", ".localhost"]);
+      expect(config.daemon?.mcp?.enabled).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

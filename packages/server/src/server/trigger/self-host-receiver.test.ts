@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createSelfHostWebhookReceiver } from "./self-host-receiver.js";
 import type { TriggerService } from "./service.js";
 import type { TriggerSecretStore } from "./secret-store.js";
-import type { WebhookTrigger } from "./types.js";
+import type { WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 
 const logger = pino({ level: "silent" });
 const SECRET = "self-host-secret";

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import { DaemonClient } from "./test-utils/daemon-client.js";
-import type { AgentStreamEventPayload } from "../shared/messages.js";
+import type { AgentStreamEventPayload } from "@getpaseo/protocol/messages";
 import type { AgentSnapshotPayload } from "./messages.js";
 import type { PushNotificationSender, PushPayload } from "./push/notifications.js";
 import { PRESENCE_THRESHOLD_MS } from "./agent-attention-policy.js";
@@ -92,6 +92,31 @@ describe("client activity tracking", () => {
         clearTimeout(timer);
         cleanup();
         resolve(msg.payload.event);
+      });
+    });
+  }
+
+  function waitForAssistantTimeline(
+    client: DaemonClient,
+    agentId: string,
+    timeout = 60000,
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`Timeout waiting for assistant timeline (${timeout}ms)`));
+      }, timeout);
+
+      const cleanup = client.on("agent_stream", (msg) => {
+        if (msg.type !== "agent_stream") return;
+        if (msg.payload.agentId !== agentId) return;
+        if (msg.payload.event.type !== "timeline") return;
+        const item = msg.payload.event.item;
+        if (item.type !== "assistant_message") return;
+
+        clearTimeout(timer);
+        cleanup();
+        resolve(item.text);
       });
     });
   }
@@ -355,6 +380,31 @@ describe("client activity tracking", () => {
   // ===========================================================================
 
   describe("web and mobile clients", () => {
+    test("mobile stream delivery does not depend on heartbeat focus", async () => {
+      client1 = await createClient(); // web
+      client2 = await createClient(); // mobile
+
+      const agent = await createAgent({
+        client: client1,
+        title: "Mobile Stale Focus Stream Test",
+      });
+
+      client2.sendHeartbeat({
+        deviceType: "mobile",
+        focusedAgentId: null,
+        lastActivityAt: new Date(Date.now() - PRESENCE_THRESHOLD_MS - 60_000).toISOString(),
+        appVisible: false,
+        appVisibilityChangedAt: new Date(Date.now() - 120_000).toISOString(),
+      });
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const mobileStream = waitForAssistantTimeline(client2, agent.id);
+      await client1.sendMessage(agent.id, "Say 'hello' and nothing else");
+
+      await expect(mobileStream).resolves.toMatch(/hello/i);
+    }, 120000);
+
     test("no notification to either when user actively on agent (web)", async () => {
       client1 = await createClient(); // web
       client2 = await createClient(); // mobile

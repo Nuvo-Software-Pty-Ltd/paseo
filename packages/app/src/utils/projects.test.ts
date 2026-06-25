@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProjectPlacementPayload } from "@server/shared/messages";
+import type { ProjectPlacementPayload } from "@getpaseo/protocol/messages";
 import type { WorkspaceDescriptor } from "@/stores/session-store";
 import { buildProjects } from "./projects";
 
@@ -44,6 +44,7 @@ function workspace(input: {
     name: input.id,
     status: "done",
     archivingAt: null,
+    statusEnteredAt: null,
     diffStat: null,
     scripts: [],
     gitRuntime: {

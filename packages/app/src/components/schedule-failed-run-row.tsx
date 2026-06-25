@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import type { ScheduleRun } from "@server/server/schedule/types";
+import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 import type { Theme } from "@/styles/theme";
 import {
   buildScheduleRunRowModel,

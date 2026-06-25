@@ -3,8 +3,8 @@
 // a plain module lets it be unit-tested in the node-env vitest project without
 // pulling in react-native / unistyles.
 
-import type { AutomationTarget } from "@server/client/daemon-client";
-import type { ScheduleTarget } from "@server/server/schedule/types";
+import type { AutomationTarget } from "@getpaseo/client/internal/daemon-client";
+import type { ScheduleTarget } from "@getpaseo/protocol/schedule/types";
 import type { ComboboxOption } from "@/components/ui/combobox";
 
 // Editor state for the spawn target. We keep both the new-agent fields and the

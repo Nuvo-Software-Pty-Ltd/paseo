@@ -7,12 +7,12 @@ import { pageMeta } from "~/meta";
 import "~/styles.css";
 
 export const Route = createFileRoute("/agents")({
-  head: () => ({
-    meta: pageMeta(
-      "Supported agents – Every coding agent Paseo runs | Paseo",
-      "Run Claude Code, Codex, OpenCode, Cursor CLI, Gemini CLI, Hermes Agent, Qwen Code, Kimi Code, and 28 more coding agents from your phone. Self-hosted, your code stays on your machine.",
+  head: () =>
+    pageMeta(
+      "Supported agents – Every coding agent Paseo runs",
+      "Run Claude Code, Codex, Copilot, OpenCode, Cursor CLI, Gemini CLI, and dozens more coding agents from your phone. Self-hosted, your code stays on your machine.",
+      "/agents",
     ),
-  }),
   component: AgentsPage,
 });
 

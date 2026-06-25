@@ -25,7 +25,7 @@ import { connectAndProbe, DaemonConnectionTestError } from "@/utils/test-daemon-
 import { getOrCreateClientId } from "@/utils/client-id";
 import { resolveAppVersion } from "@/utils/app-version";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
-import { extractHostPortFromWebSocketUrl } from "@server/shared/daemon-endpoints";
+import { extractHostPortFromWebSocketUrl } from "@getpaseo/protocol/daemon-endpoints";
 
 import {
   filterChoosableWorkspaces,

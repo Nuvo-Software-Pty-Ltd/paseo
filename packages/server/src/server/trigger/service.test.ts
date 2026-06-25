@@ -9,7 +9,7 @@ import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js"
 import { TriggerService } from "./service.js";
 import { FileBackedWebhookTriggerStore } from "./store.js";
 import type { TriggerProvisioner } from "./provisioner.js";
-import type { CreateWebhookTriggerInput } from "./types.js";
+import type { CreateWebhookTriggerInput } from "@getpaseo/protocol/trigger/types";
 
 function fakeProvisioner(): TriggerProvisioner {
   let n = 0;

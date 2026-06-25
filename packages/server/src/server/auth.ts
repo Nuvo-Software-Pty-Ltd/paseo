@@ -1,4 +1,5 @@
 import { compare, compareSync, hashSync } from "bcryptjs";
+import { timingSafeEqual } from "node:crypto";
 import type { RequestHandler } from "express";
 
 export const DAEMON_PASSWORD_BCRYPT_COST = 12;
@@ -158,8 +159,47 @@ export function createRequireBearerMiddleware(
   };
 }
 
-export function shouldBypassBearerAuth(method: string, path: string): boolean {
+// Routes that authenticate via their own capability and therefore must not be
+// gated a second time behind the DAEMON PASSWORD. These are bypassed only by
+// the daemon-password gate (createRequireBearerMiddleware) — NOT by the
+// workspace-token gate. A capability/download token replaces the password, but
+// it does NOT replace the per-tenant workspace_id binding: in cloud mode these
+// routes still must reject a validly-signed but cross-tenant JWT (T-10). See
+// shouldBypassWorkspaceAuth below, which deliberately omits these.
+const BEARER_AUTH_BYPASS_PATHS = new Set([
+  // Guarded by a single-use download token (crypto-random UUID, 60s TTL,
+  // consumed on first use) that is only ever issued over the
+  // already-authenticated WebSocket. The token IS the capability for this
+  // route. Requiring the daemon password on top of it breaks browser and
+  // Electron downloads: those trigger the download via an anchor navigation,
+  // which cannot attach an `Authorization` header. The download endpoint still
+  // rejects requests without a valid token (400/403), so dropping the bearer
+  // here does not make the route unauthenticated.
+  "/api/files/download",
+  // The daemon injects its own agents' Paseo MCP connections at this endpoint
+  // (and connects its own per-client MCP client here). Those connections cannot
+  // carry the daemon password — it is only known in plaintext when set via env,
+  // never when set via the app — so the route authenticates them with a
+  // per-daemon-run capability token instead (see isAgentMcpRequestAuthorized).
+  // The token is injected only into local agent configs/sessions and never sent
+  // to remote clients, and the route still rejects callers presenting neither
+  // the token nor a valid daemon password, so dropping the global bearer here
+  // does not make the endpoint unauthenticated.
+  "/mcp/agents",
+]);
+
+// Bypass predicate shared by BOTH the daemon-password gate and the
+// workspace-token (cross-tenant) gate: OPTIONS preflight, the self-host
+// webhook receiver, the HMAC-authed internal routes, and the liveness probe.
+// These authenticate by something OTHER than a workspace JWT (HMAC / nothing),
+// so the workspace gate is the wrong boundary for them. Everything here was
+// bypassed by the pre-merge workspace middleware too.
+function shouldBypassAllBearerAuth(method: string, path: string): boolean {
   if (method === "OPTIONS") {
+    return true;
+  }
+  // Unauthenticated liveness probe.
+  if (path === "/api/health") {
     return true;
   }
   // D-3.5d — the self-host webhook receiver authenticates each request by
@@ -193,7 +233,72 @@ export function shouldBypassBearerAuth(method: string, path: string): boolean {
   if (path.startsWith("/api/internal/") || path.startsWith("/api/files/download/internal/")) {
     return true;
   }
-  return path === "/api/health";
+  return false;
+}
+
+// Daemon-PASSWORD gate bypass: the shared set PLUS the capability-token /
+// download-token routes that replace the password but NOT the workspace
+// binding.
+export function shouldBypassBearerAuth(method: string, path: string): boolean {
+  if (shouldBypassAllBearerAuth(method, path)) {
+    return true;
+  }
+  return BEARER_AUTH_BYPASS_PATHS.has(path);
+}
+
+// WORKSPACE-TOKEN (cross-tenant) gate bypass: ONLY the shared set. The
+// capability-token routes in BEARER_AUTH_BYPASS_PATHS (`/mcp/agents`,
+// `/api/files/download`) are deliberately NOT bypassed here — they must still
+// reject a cross-tenant workspace JWT in cloud mode (T-10). Restoring this
+// distinction (the merge collapsed both gates onto shouldBypassBearerAuth)
+// reinstates the pre-merge workspace_id binding on the agent MCP control plane.
+export function shouldBypassWorkspaceAuth(method: string, path: string): boolean {
+  return shouldBypassAllBearerAuth(method, path);
+}
+
+/**
+ * Constant-time check that the request's `Authorization: Bearer …` token equals
+ * the per-daemon-run agent MCP capability token. Length-guarded first because
+ * `timingSafeEqual` throws on differing buffer lengths. Returns false when no
+ * capability token is configured or no bearer is present.
+ */
+export function bearerMatchesCapabilityToken(
+  authorizationHeader: string | undefined,
+  capabilityToken: string | null,
+): boolean {
+  if (capabilityToken === null) {
+    return false;
+  }
+  const token = extractHttpBearerToken(authorizationHeader);
+  if (token === null) {
+    return false;
+  }
+  const provided = Buffer.from(token);
+  const expected = Buffer.from(capabilityToken);
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
+/**
+ * Authorizes a request to the Agent MCP endpoint (/mcp/agents), which is exempt
+ * from the global daemon-password middleware. Accepts either the per-daemon-run
+ * capability token the daemon injects into its own agents' configs and MCP
+ * client, or a valid daemon-password bearer (so existing password-authenticated
+ * callers keep working). When no daemon password is configured the endpoint is
+ * open, matching the global middleware's behavior.
+ */
+export async function isAgentMcpRequestAuthorized(input: {
+  password: string | undefined;
+  capabilityToken: string | null;
+  authorizationHeader: string | undefined;
+}): Promise<boolean> {
+  if (!input.password) {
+    return true;
+  }
+  if (bearerMatchesCapabilityToken(input.authorizationHeader, input.capabilityToken)) {
+    return true;
+  }
+  const token = extractHttpBearerToken(input.authorizationHeader);
+  return isBearerTokenValidAsync({ password: input.password, token });
 }
 
 declare module "express-serve-static-core" {
@@ -202,12 +307,44 @@ declare module "express-serve-static-core" {
   }
 }
 
+export interface RequireWorkspaceMiddlewareOptions {
+  onReject?: (context: BearerAuthRejectContext) => void;
+  /**
+   * Capability-credential escape hatch for the agent MCP control plane
+   * (`/mcp/agents`). In cloud mode this gate is the ONLY HTTP auth boundary,
+   * and `/mcp/agents` must reject a validly-signed but cross-tenant workspace
+   * JWT (T-10) — so it cannot be globally bypassed. But the daemon's own
+   * agents connect to that route over loopback carrying a per-daemon-run
+   * capability token (a UUID, NOT a workspace JWT). This predicate lets such
+   * trusted self-connections through to the route handler (which performs its
+   * own `isAgentMcpRequestAuthorized` check); a cross-tenant attacker has no
+   * capability token, so the JWT path below still denies them. Returns true to
+   * admit the request without a workspace JWT.
+   */
+  isCapabilityAuthorized?: (req: Parameters<RequestHandler>[0]) => boolean;
+}
+
 export function createRequireWorkspaceMiddleware(
   authCallback: WorkspaceAuthCallback,
-  onReject?: (context: BearerAuthRejectContext) => void,
+  onRejectOrOptions?:
+    | ((context: BearerAuthRejectContext) => void)
+    | RequireWorkspaceMiddlewareOptions,
 ): RequestHandler {
+  const options: RequireWorkspaceMiddlewareOptions =
+    typeof onRejectOrOptions === "function"
+      ? { onReject: onRejectOrOptions }
+      : (onRejectOrOptions ?? {});
+  const { onReject, isCapabilityAuthorized } = options;
   return (req, res, next) => {
-    if (shouldBypassBearerAuth(req.method, req.path)) {
+    if (shouldBypassWorkspaceAuth(req.method, req.path)) {
+      next();
+      return;
+    }
+
+    // Trusted capability-token self-connection (see
+    // RequireWorkspaceMiddlewareOptions.isCapabilityAuthorized). The route
+    // handler still authorizes; we only decline to require a workspace JWT.
+    if (isCapabilityAuthorized?.(req)) {
       next();
       return;
     }

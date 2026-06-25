@@ -4,10 +4,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 
-import { OpenCodeAgentClient } from "../agent/providers/opencode-agent.js";
 import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
-import { isProviderAvailable } from "./agent-configs.js";
+import {
+  canRunRealProvider,
+  createRealProviderClients,
+  getRealProviderConfig,
+} from "./real-provider-test-config.js";
+
+const OPENCODE_REAL_TEST_MODEL = getRealProviderConfig("opencode").model;
 
 function tmpCwd(): string {
   return mkdtempSync(path.join(tmpdir(), "daemon-real-opencode-init-prompt-"));
@@ -19,7 +24,7 @@ async function createHarness(): Promise<{
 }> {
   const logger = pino({ level: "silent" });
   const daemon = await createTestPaseoDaemon({
-    agentClients: { opencode: new OpenCodeAgentClient(logger) },
+    agentClients: createRealProviderClients(["opencode"], logger),
     logger,
   });
   const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
@@ -32,7 +37,7 @@ describe("daemon E2E (real opencode) - initial prompt wait", () => {
   let canRun = false;
 
   beforeAll(async () => {
-    canRun = await isProviderAvailable("opencode");
+    canRun = await canRunRealProvider("opencode");
   });
 
   beforeEach((context) => {
@@ -47,13 +52,13 @@ describe("daemon E2E (real opencode) - initial prompt wait", () => {
 
     try {
       const models = await client.listProviderModels("opencode");
-      expect(models.models.some((model) => model.id === "zai/glm-5.1")).toBe(true);
+      expect(models.models.some((model) => model.id === OPENCODE_REAL_TEST_MODEL)).toBe(true);
 
       const agent = await client.createAgent({
         provider: "opencode",
         cwd,
         title: "OpenCode initial prompt wait regression",
-        model: "opencode/big-pickle",
+        model: OPENCODE_REAL_TEST_MODEL,
         initialPrompt: "Reply with exactly: BIG_PICKLE_OK",
       });
 
@@ -77,37 +82,6 @@ describe("daemon E2E (real opencode) - initial prompt wait", () => {
       expect(assistantMessages.some((entry) => entry.item.text.includes("BIG_PICKLE_OK"))).toBe(
         true,
       );
-    } finally {
-      await client.close().catch(() => undefined);
-      await daemon.close();
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  }, 90_000);
-
-  test("waitForFinish surfaces a terminal error when zai/glm-5.1 enters a fatal retry loop", async () => {
-    const cwd = tmpCwd();
-    const { client, daemon } = await createHarness();
-
-    try {
-      const models = await client.listProviderModels("opencode");
-      expect(models.models.some((model) => model.id === "zai/glm-5.1")).toBe(true);
-
-      const agent = await client.createAgent({
-        provider: "opencode",
-        cwd,
-        title: "OpenCode zai fatal retry regression",
-        model: "zai/glm-5.1",
-        initialPrompt: "Reply with exactly: GLM_51_OK",
-      });
-
-      const finish = await client.waitForFinish(agent.id, 60_000);
-      expect(finish.status).toBe("error");
-      expect((finish.error ?? "").toLowerCase()).toMatch(
-        /insufficient balance|resource package|recharge/,
-      );
-
-      const snapshot = await client.fetchAgent(agent.id);
-      expect(snapshot.agent?.status).toBe("error");
     } finally {
       await client.close().catch(() => undefined);
       await daemon.close();

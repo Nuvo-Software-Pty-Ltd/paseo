@@ -1,17 +1,44 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { CheckoutPrStatusSchema } from "@getpaseo/protocol/messages";
+import { i18n } from "@/i18n/i18next";
 
 import { buildGitActions, type BuildGitActionsInput } from "./policy";
+
+function githubStatus(
+  overrides: Partial<NonNullable<BuildGitActionsInput["pullRequestGithub"]>> = {},
+): NonNullable<BuildGitActionsInput["pullRequestGithub"]> {
+  return {
+    mergeStateStatus: "CLEAN",
+    autoMergeRequest: null,
+    viewerCanEnableAutoMerge: false,
+    viewerCanDisableAutoMerge: false,
+    viewerCanMergeAsAdmin: false,
+    viewerCanUpdateBranch: false,
+    repository: {
+      autoMergeAllowed: true,
+      mergeCommitAllowed: true,
+      squashMergeAllowed: true,
+      rebaseMergeAllowed: true,
+      viewerDefaultMergeMethod: "SQUASH",
+    },
+    isMergeQueueEnabled: false,
+    isInMergeQueue: false,
+    ...overrides,
+  };
+}
 
 function createInput(overrides: Partial<BuildGitActionsInput> = {}): BuildGitActionsInput {
   return {
     isGit: true,
     githubFeaturesEnabled: true,
+    githubAutoMergeActionsEnabled: true,
     hasPullRequest: false,
     pullRequestUrl: null,
     pullRequestState: null,
     pullRequestIsDraft: false,
     pullRequestIsMerged: false,
     pullRequestMergeable: "UNKNOWN",
+    pullRequestGithub: null,
     hasRemote: false,
     isPaseoOwnedWorktree: false,
     isOnBaseBranch: true,
@@ -23,7 +50,7 @@ function createInput(overrides: Partial<BuildGitActionsInput> = {}): BuildGitAct
     aheadOfOrigin: 0,
     behindOfOrigin: 0,
     shouldPromoteArchive: false,
-    shipDefault: "merge",
+    shipDefault: "pr",
     runtime: {
       commit: {
         disabled: false,
@@ -65,6 +92,26 @@ function createInput(overrides: Partial<BuildGitActionsInput> = {}): BuildGitAct
         status: "idle",
         handler: () => undefined,
       },
+      "enable-pr-auto-merge-squash": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
+      "enable-pr-auto-merge-merge": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
+      "enable-pr-auto-merge-rebase": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
+      "disable-pr-auto-merge": {
+        disabled: false,
+        status: "idle",
+        handler: () => undefined,
+      },
       "merge-branch": {
         disabled: false,
         status: "idle",
@@ -86,6 +133,10 @@ function createInput(overrides: Partial<BuildGitActionsInput> = {}): BuildGitAct
 }
 
 describe("git-actions-policy", () => {
+  afterEach(async () => {
+    await i18n.changeLanguage("en");
+  });
+
   it("shows only remote sync actions on the base branch", () => {
     const actions = buildGitActions(createInput({ hasRemote: true }));
 
@@ -118,6 +169,44 @@ describe("git-actions-policy", () => {
       unavailableMessage:
         "Push isn't available yet because there are newer changes to bring in first",
     });
+  });
+
+  it("keeps push available for a no-upstream Paseo worktree with local commits", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isPaseoOwnedWorktree: true,
+        isOnBaseBranch: false,
+        aheadCount: 1,
+        aheadOfOrigin: null,
+        behindOfOrigin: null,
+      }),
+    );
+    const pushAction = actions.secondary.find((action) => action.id === "push");
+
+    expect(pushAction).toMatchObject({
+      disabled: false,
+      unavailableMessage: undefined,
+    });
+  });
+
+  it("prioritizes push over pull request merge when local commits are unpushed", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        aheadOfOrigin: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({ id: "push", label: "Push" });
   });
 
   it("shows update-from-base only on feature branches that are behind the base branch", () => {
@@ -167,6 +256,9 @@ describe("git-actions-policy", () => {
         behindBaseCount: 1,
         hasPullRequest: true,
         pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
       }),
     );
 
@@ -200,6 +292,38 @@ describe("git-actions-policy", () => {
       label: "Pull and push",
       disabled: false,
       unavailableMessage: undefined,
+    });
+  });
+
+  it("keeps pull-and-push unavailable when the branch only has outgoing commits", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        aheadOfOrigin: 2,
+        behindOfOrigin: 0,
+      }),
+    );
+    const action = actions.secondary.find((entry) => entry.id === "pull-and-push");
+
+    expect(action).toMatchObject({
+      label: "Pull and push",
+      unavailableMessage: expect.any(String),
+    });
+  });
+
+  it("keeps pull-and-push unavailable when the branch only has incoming commits", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        aheadOfOrigin: 0,
+        behindOfOrigin: 2,
+      }),
+    );
+    const action = actions.secondary.find((entry) => entry.id === "pull-and-push");
+
+    expect(action).toMatchObject({
+      label: "Pull and push",
+      unavailableMessage: expect.any(String),
     });
   });
 
@@ -246,18 +370,19 @@ describe("git-actions-policy", () => {
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
         pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
         shipDefault: "pr",
       }),
     );
 
     expect(actions.primary).toMatchObject({
       id: "merge-pr-squash",
-      label: "Squash and merge",
+      label: "Merge PR (squash)",
     });
   });
 
-  it("respects the ship preference when choosing between PR merge and local merge", () => {
-    const prPreferredActions = buildGitActions(
+  it("uses GitHub merge state, not mergeable, for direct merge readiness", () => {
+    const actions = buildGitActions(
       createInput({
         hasRemote: true,
         isOnBaseBranch: false,
@@ -265,34 +390,131 @@ describe("git-actions-policy", () => {
         hasPullRequest: true,
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
-        pullRequestMergeable: "MERGEABLE",
+        pullRequestMergeable: "UNKNOWN",
+        pullRequestGithub: githubStatus({ mergeStateStatus: "CLEAN" }),
         shipDefault: "pr",
       }),
     );
-    const localMergePreferredActions = buildGitActions(
+
+    expect(actions.primary).toMatchObject({
+      id: "merge-pr-squash",
+      label: "Merge PR (squash)",
+    });
+  });
+
+  it("offers direct PR merge when GitHub says the PR is mergeable even if the local branch is behind", () => {
+    const actions = buildGitActions(
       createInput({
         hasRemote: true,
         isOnBaseBranch: false,
         aheadCount: 2,
+        behindBaseCount: 3,
+        aheadOfOrigin: 0,
+        behindOfOrigin: 2,
         hasPullRequest: true,
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
         pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({ mergeStateStatus: "CLEAN" }),
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.secondary).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "merge-pr-squash",
+          disabled: false,
+          unavailableMessage: undefined,
+        }),
+        expect.objectContaining({
+          id: "merge-pr-merge",
+          disabled: false,
+          unavailableMessage: undefined,
+        }),
+        expect.objectContaining({
+          id: "merge-pr-rebase",
+          disabled: false,
+          unavailableMessage: undefined,
+        }),
+      ]),
+    );
+  });
+
+  it("promotes ready PR merge over update-from-base", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        behindBaseCount: 3,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({ mergeStateStatus: "CLEAN" }),
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "merge-pr-squash",
+      label: "Merge PR (squash)",
+    });
+  });
+
+  it("promotes push over Create PR when local commits are unpushed", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        aheadOfOrigin: 2,
+        behindBaseCount: 3,
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "push",
+      label: "Push",
+    });
+  });
+
+  it("uses local merge when merge is the stored ship default", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        behindBaseCount: 3,
         shipDefault: "merge",
       }),
     );
 
-    expect(prPreferredActions.primary).toMatchObject({
-      id: "merge-pr-squash",
-      label: "Squash and merge",
-    });
-    expect(localMergePreferredActions.primary).toMatchObject({
+    expect(actions.primary).toMatchObject({
       id: "merge-branch",
       label: "Merge locally",
     });
-    expect(
-      localMergePreferredActions.secondary.some((action) => action.id === "merge-pr-squash"),
-    ).toBe(true);
+  });
+
+  it("promotes ready PR merge over local merge", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "merge-pr-squash",
+      label: "Merge PR (squash)",
+    });
+    expect(actions.secondary.some((action) => action.id === "merge-branch")).toBe(true);
   });
 
   it("keeps the merge-pr actions in the feature branch menu", () => {
@@ -305,6 +527,7 @@ describe("git-actions-policy", () => {
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
         pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
       }),
     );
 
@@ -321,6 +544,73 @@ describe("git-actions-policy", () => {
     ]);
   });
 
+  it("keeps the visible PR action model stable on feature branches", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
+      }),
+    );
+    const pullRequestActions = actions.secondary
+      .filter((action) =>
+        ["pr", "merge-pr-squash", "merge-pr-merge", "merge-pr-rebase"].includes(action.id),
+      )
+      .map((action) => ({
+        id: action.id,
+        label: action.label,
+        pendingLabel: action.pendingLabel,
+        successLabel: action.successLabel,
+        disabled: action.disabled,
+        unavailableMessage: action.unavailableMessage,
+        startsGroup: action.startsGroup,
+      }));
+
+    expect(pullRequestActions).toEqual([
+      {
+        id: "pr",
+        label: "View PR",
+        pendingLabel: "View PR",
+        successLabel: "View PR",
+        disabled: false,
+        unavailableMessage: undefined,
+        startsGroup: false,
+      },
+      {
+        id: "merge-pr-squash",
+        label: "Merge PR (squash)",
+        pendingLabel: "Merging PR...",
+        successLabel: "PR merged",
+        disabled: false,
+        unavailableMessage: undefined,
+        startsGroup: true,
+      },
+      {
+        id: "merge-pr-merge",
+        label: "Merge PR (merge)",
+        pendingLabel: "Merging PR...",
+        successLabel: "PR merged",
+        disabled: false,
+        unavailableMessage: undefined,
+        startsGroup: false,
+      },
+      {
+        id: "merge-pr-rebase",
+        label: "Merge PR (rebase)",
+        pendingLabel: "Merging PR...",
+        successLabel: "PR merged",
+        disabled: false,
+        unavailableMessage: undefined,
+        startsGroup: false,
+      },
+    ]);
+  });
+
   it("uses Merge locally for the local merge action", () => {
     const actions = buildGitActions(
       createInput({
@@ -333,28 +623,35 @@ describe("git-actions-policy", () => {
     expect(action).toMatchObject({ label: "Merge locally" });
   });
 
+  it("uses the active language for policy-owned action labels and unavailable messages", async () => {
+    await i18n.changeLanguage("zh-CN");
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        behindOfOrigin: 1,
+        isOnBaseBranch: false,
+        aheadCount: 0,
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "pull",
+      label: "Pull",
+      pendingLabel: "正在 pull...",
+      successLabel: "已 pull",
+    });
+    expect(actions.secondary.find((entry) => entry.id === "pr")).toMatchObject({
+      label: "创建 PR",
+      unavailableMessage: "无法创建 PR，因为此分支还没有新的 commit",
+    });
+  });
+
   it.each([
-    [
-      "draft",
-      { pullRequestIsDraft: true },
-      "Merge PR isn't available because the pull request is still a draft",
-    ],
-    [
-      "merged",
-      { pullRequestIsMerged: true },
-      "Merge PR isn't available because the pull request is already merged",
-    ],
-    [
-      "closed",
-      { pullRequestState: "closed" as const },
-      "Merge PR isn't available because the pull request is closed",
-    ],
-    [
-      "conflicting",
-      { pullRequestMergeable: "CONFLICTING" as const },
-      "Merge PR isn't available because the pull request has conflicts",
-    ],
-  ])("marks merge-pr actions unavailable when the PR is %s", (_name, overrides, message) => {
+    ["draft", { pullRequestIsDraft: true }],
+    ["merged", { pullRequestIsMerged: true }],
+    ["closed", { pullRequestState: "closed" as const }],
+    ["conflicting", { pullRequestMergeable: "CONFLICTING" as const }],
+  ])("does not offer direct merge actions when the PR is %s", (_name, overrides) => {
     const actions = buildGitActions(
       createInput({
         hasRemote: true,
@@ -364,6 +661,7 @@ describe("git-actions-policy", () => {
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
         pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
         ...overrides,
       }),
     );
@@ -371,13 +669,263 @@ describe("git-actions-policy", () => {
       ["merge-pr-squash", "merge-pr-merge", "merge-pr-rebase"].includes(action.id),
     );
 
-    expect(mergePrActions).toHaveLength(3);
-    expect(mergePrActions.map((action) => action.unavailableMessage)).toEqual([
-      message,
-      message,
-      message,
+    expect(mergePrActions).toEqual([]);
+    expect(actions.secondary).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "pr", label: "View PR" })]),
+    );
+  });
+
+  it("preserves legacy direct merge actions when old payloads have no GitHub facts", () => {
+    const oldDaemonStatus = CheckoutPrStatusSchema.parse({
+      number: 456,
+      url: "https://example.com/pr/456",
+      title: "Legacy payload",
+      state: "open",
+      baseRefName: "main",
+      headRefName: "feature",
+      isMerged: false,
+      mergeable: "MERGEABLE",
+    });
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: oldDaemonStatus.url,
+        pullRequestState: "open",
+        pullRequestIsDraft: oldDaemonStatus.isDraft,
+        pullRequestIsMerged: oldDaemonStatus.isMerged,
+        pullRequestMergeable: oldDaemonStatus.mergeable,
+        pullRequestGithub: oldDaemonStatus.github,
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(oldDaemonStatus.github).toBeUndefined();
+    expect(actions.primary).toMatchObject({
+      id: "merge-pr-squash",
+      label: "Merge PR (squash)",
+    });
+    expect(actions.secondary.map((action) => action.id)).toEqual([
+      "pull",
+      "push",
+      "pull-and-push",
+      "merge-from-base",
+      "merge-branch",
+      "pr",
+      "merge-pr-squash",
+      "merge-pr-merge",
+      "merge-pr-rebase",
     ]);
-    expect(mergePrActions.map((action) => action.disabled)).toEqual([true, true, true]);
+  });
+
+  it("requires GitHub's direct-merge allowlist before promoting PR merge", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/993",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({
+          mergeStateStatus: "BLOCKED",
+          viewerCanEnableAutoMerge: true,
+          repository: {
+            autoMergeAllowed: true,
+            mergeCommitAllowed: false,
+            squashMergeAllowed: true,
+            rebaseMergeAllowed: false,
+            viewerDefaultMergeMethod: "SQUASH",
+          },
+        }),
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "enable-pr-auto-merge-squash",
+      label: "Auto merge (squash)",
+    });
+    expect(actions.secondary.map((action) => action.id)).toEqual([
+      "pull",
+      "push",
+      "pull-and-push",
+      "merge-from-base",
+      "merge-branch",
+      "pr",
+      "enable-pr-auto-merge-squash",
+    ]);
+    expect(
+      actions.secondary.some((action) =>
+        ["merge-pr-squash", "merge-pr-merge", "merge-pr-rebase"].includes(action.id),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["SQUASH", "enable-pr-auto-merge-squash", "Auto merge (squash)"],
+    ["MERGE", "enable-pr-auto-merge-merge", "Auto merge (merge)"],
+    ["REBASE", "enable-pr-auto-merge-rebase", "Auto merge (rebase)"],
+  ] as const)(
+    "labels the %s auto-merge action with its method",
+    (viewerDefaultMergeMethod, id, label) => {
+      const actions = buildGitActions(
+        createInput({
+          hasRemote: true,
+          isOnBaseBranch: false,
+          aheadCount: 2,
+          hasPullRequest: true,
+          pullRequestUrl: "https://example.com/pr/993",
+          pullRequestState: "open",
+          pullRequestMergeable: "MERGEABLE",
+          pullRequestGithub: githubStatus({
+            mergeStateStatus: "BLOCKED",
+            viewerCanEnableAutoMerge: true,
+            repository: {
+              autoMergeAllowed: true,
+              mergeCommitAllowed: true,
+              squashMergeAllowed: true,
+              rebaseMergeAllowed: true,
+              viewerDefaultMergeMethod,
+            },
+          }),
+          shipDefault: "pr",
+        }),
+      );
+
+      expect(actions.primary).toMatchObject({ id, label });
+    },
+  );
+
+  it("does not offer auto-merge when the daemon feature gate is missing", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/993",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({
+          mergeStateStatus: "BLOCKED",
+          viewerCanEnableAutoMerge: true,
+        }),
+        githubAutoMergeActionsEnabled: false,
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({ id: "pr", label: "View PR" });
+    expect(actions.secondary.some((action) => action.id.startsWith("enable-pr-auto-merge"))).toBe(
+      false,
+    );
+  });
+
+  it("shows existing auto-merge as state and disables it when the viewer can", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({
+          autoMergeRequest: {
+            enabledAt: "2026-05-13T12:00:00Z",
+            mergeMethod: "SQUASH",
+            enabledBy: "octocat",
+          },
+          viewerCanDisableAutoMerge: true,
+        }),
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({ id: "pr", label: "View PR" });
+    expect(actions.secondary).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "disable-pr-auto-merge",
+          label: "Auto-merge enabled",
+          disabled: false,
+          unavailableMessage: undefined,
+        }),
+      ]),
+    );
+    expect(
+      actions.secondary.some((action) =>
+        ["merge-pr-squash", "merge-pr-merge", "merge-pr-rebase"].includes(action.id),
+      ),
+    ).toBe(false);
+  });
+
+  it("respects repository merge method policy for direct merge actions", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({
+          repository: {
+            autoMergeAllowed: true,
+            mergeCommitAllowed: true,
+            squashMergeAllowed: false,
+            rebaseMergeAllowed: false,
+            viewerDefaultMergeMethod: "SQUASH",
+          },
+        }),
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({
+      id: "merge-pr-merge",
+      label: "Merge PR (merge)",
+    });
+    expect(actions.secondary.map((action) => action.id)).toEqual([
+      "pull",
+      "push",
+      "pull-and-push",
+      "merge-from-base",
+      "merge-branch",
+      "pr",
+      "merge-pr-merge",
+    ]);
+  });
+
+  it("does not treat merge queue repositories as direct mergeable", () => {
+    const actions = buildGitActions(
+      createInput({
+        hasRemote: true,
+        isOnBaseBranch: false,
+        aheadCount: 2,
+        hasPullRequest: true,
+        pullRequestUrl: "https://example.com/pr/456",
+        pullRequestState: "open",
+        pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus({
+          mergeStateStatus: "CLEAN",
+          isMergeQueueEnabled: true,
+        }),
+        shipDefault: "pr",
+      }),
+    );
+
+    expect(actions.primary).toMatchObject({ id: "pr", label: "View PR" });
+    expect(
+      actions.secondary.some((action) =>
+        ["merge-pr-squash", "merge-pr-merge", "merge-pr-rebase"].includes(action.id),
+      ),
+    ).toBe(false);
   });
 
   it("groups merge-pr actions behind their own menu separator via startsGroup", () => {
@@ -390,6 +938,7 @@ describe("git-actions-policy", () => {
         pullRequestUrl: "https://example.com/pr/456",
         pullRequestState: "open",
         pullRequestMergeable: "MERGEABLE",
+        pullRequestGithub: githubStatus(),
         isPaseoOwnedWorktree: true,
       }),
     );

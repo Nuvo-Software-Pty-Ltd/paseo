@@ -1,14 +1,15 @@
 import { expect, type Page } from "@playwright/test";
 import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 import { gotoHome } from "./app";
+import { escapeRegex } from "./regex";
 
 export async function openNewAgentComposer(page: Page): Promise<void> {
   await gotoHome(page);
 }
 
 /**
- * Wait for the sidebar to show at least one project row, indicating that the
- * WebSocket connection is up and workspace hydration has completed.
+ * Wait for the sidebar to show at least one project row. Use this after a spec
+ * seeds a workspace/project; zero-project flows need their own assertion.
  */
 export async function waitForSidebarHydration(page: Page, timeout = 60_000): Promise<void> {
   await page
@@ -17,33 +18,12 @@ export async function waitForSidebarHydration(page: Page, timeout = 60_000): Pro
     .waitFor({ state: "visible", timeout });
 }
 
-export function workspaceLabelFromPath(value: string): string {
-  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? normalized;
+export async function waitForNoProjectsInSidebar(page: Page, timeout = 60_000): Promise<void> {
+  await page.getByTestId("sidebar-project-empty-state").waitFor({ state: "visible", timeout });
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function candidateWorkspaceIds(inputPath: string): string[] {
-  const trimmed = inputPath.replace(/\/+$/, "");
-  const candidates = new Set<string>([trimmed]);
-  if (trimmed.startsWith("/var/")) {
-    candidates.add(`/private${trimmed}`);
-  }
-  if (trimmed.startsWith("/private/var/")) {
-    candidates.add(trimmed.replace(/^\/private/, ""));
-  }
-  return Array.from(candidates);
-}
-
-function workspaceRowLocator(page: Page, serverId: string, workspacePath: string) {
-  const ids = candidateWorkspaceIds(workspacePath).map(
-    (id) => `[data-testid="sidebar-workspace-row-${serverId}:${id}"]`,
-  );
-  return page.locator(ids.join(",")).first();
+function workspaceRowLocator(page: Page, serverId: string, workspaceId: string) {
+  return page.getByTestId(`sidebar-workspace-row-${serverId}:${workspaceId}`).first();
 }
 
 export async function expectSidebarWorkspaceSelected(input: {
@@ -72,13 +52,13 @@ export async function expectSidebarWorkspaceSelected(input: {
 export async function switchWorkspaceViaSidebar(input: {
   page: Page;
   serverId: string;
-  targetWorkspacePath: string;
+  workspaceId: string;
 }): Promise<void> {
-  const row = workspaceRowLocator(input.page, input.serverId, input.targetWorkspacePath);
+  const row = workspaceRowLocator(input.page, input.serverId, input.workspaceId);
   await expect(row).toBeVisible({ timeout: 30_000 });
   await row.click();
 
-  const targetWorkspaceRoute = buildHostWorkspaceRoute(input.serverId, input.targetWorkspacePath);
+  const targetWorkspaceRoute = buildHostWorkspaceRoute(input.serverId, input.workspaceId);
   await expect(input.page).toHaveURL(new RegExp(escapeRegex(targetWorkspaceRoute)), {
     timeout: 30_000,
   });
@@ -92,11 +72,10 @@ export async function waitForWorkspaceInSidebar(
   page: Page,
   input: { serverId: string; workspaceId: string },
 ): Promise<void> {
-  const candidates = candidateWorkspaceIds(input.workspaceId);
-  const selector = candidates
-    .map((id) => `[data-testid="sidebar-workspace-row-${input.serverId}:${id}"]`)
-    .join(",");
-  await page.locator(selector).first().waitFor({ state: "visible", timeout: 60_000 });
+  await workspaceRowLocator(page, input.serverId, input.workspaceId).waitFor({
+    state: "visible",
+    timeout: 60_000,
+  });
 }
 
 export async function expectWorkspaceHeader(

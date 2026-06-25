@@ -12,7 +12,7 @@ Transfer the current task — context, decisions, failed attempts, constraints �
 
 ## Prerequisites
 
-Read the **paseo** skill — provider for the receiving agent comes from orchestration preferences unless the user names one.
+Read the **paseo** skill. Before choosing a provider, read `~/.paseo/orchestration-preferences.json` unless the user explicitly named a provider in this request. Do not create the receiving agent until you have read it.
 
 ## Parsing arguments
 
@@ -29,7 +29,7 @@ The receiving agent has zero context. Include:
 [Imperative description.]
 
 ## Context
-[Why this task exists, background needed.]
+[Why this task exists, required context.]
 
 ## Relevant files
 - `path/to/file.ts` — [what it is and why it matters]
@@ -54,6 +54,18 @@ The receiving agent has zero context. Include:
 
 ## Launch
 
-Create the agent via Paseo with a `[Handoff] <task>` title, the briefing as initial prompt, and cwd set to the worktree path if `--worktree`.
+Create the agent via Paseo with a `[Handoff] <task>` title, the briefing as initial prompt, and `relationship: { kind: "detached" }`.
+
+Use `workspace` for placement:
+
+- No worktree: `workspace: { kind: "current" }`.
+- Worktree: `workspace: { kind: "create", source: { kind: "worktree", target: { kind: "branch-off", worktreeSlug: "<short-task-slug>", branchName: "fix/<short-task-slug>" } } }`.
+- Existing worktree already created by `create_worktree`: `workspace: { kind: "existing", workspaceId: "<returned-workspace-id>" }`.
+
+Do not use `workspace: { kind: "current", cwd: "<worktreePath>" }` to place a handoff in a worktree; that keeps the agent in the caller's workspace with only a different runtime cwd.
+
+Leave `notifyOnFinish` omitted unless the user explicitly wants no callback.
+
+Handoff agents are siblings/root agents, not your subagents. They must survive you being archived and must not appear in your subagent track.
 
 Don't wait by default — the user decides whether to follow along or move on. Tell them the agent ID and how to follow along (the paseo skill explains).

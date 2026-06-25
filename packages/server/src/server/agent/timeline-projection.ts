@@ -28,6 +28,14 @@ interface ProjectedWindowSelection {
   maxSeq: number | null;
 }
 
+export interface ProjectedTimelinePageSelection {
+  entries: TimelineProjectionEntry[];
+  startSeq: number | null;
+  endSeq: number | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
 function appendSeqToRanges(ranges: TimelineSeqRange[], seq: number): TimelineSeqRange[] {
   if (ranges.length === 0) {
     return [{ startSeq: seq, endSeq: seq }];
@@ -142,6 +150,7 @@ function collapseToolLifecycle(entries: readonly WorkingEntry[]): WorkingEntry[]
     output[existingIndex] = {
       ...existing,
       item: mergedItem,
+      timestamp: entry.timestamp,
       seqEnd: Math.max(existing.seqEnd, entry.seqEnd),
       sourceSeqRanges: mergedRanges,
       collapsed,
@@ -181,6 +190,7 @@ function mergeReasoningChunks(entries: readonly WorkingEntry[]): WorkingEntry[] 
         type: "reasoning",
         text: `${previousReasoning.text}${entryReasoning.text}`,
       },
+      timestamp: entry.timestamp,
       seqEnd: entry.seqEnd,
       sourceSeqRanges: mergeSeqRanges(previous.sourceSeqRanges, entry.sourceSeqRanges),
       collapsed: Array.from(collapsedKinds),
@@ -210,6 +220,13 @@ function mergeAssistantChunks(entries: readonly WorkingEntry[]): WorkingEntry[] 
       { type: "assistant_message" }
     >;
     const entryAssistant = entry.item as Extract<AgentTimelineItem, { type: "assistant_message" }>;
+    if (
+      entryAssistant.messageId !== undefined &&
+      previousAssistant.messageId !== entryAssistant.messageId
+    ) {
+      output.push(entry);
+      continue;
+    }
 
     const collapsedKinds = new Set<TimelineProjectionKind>([
       ...previous.collapsed,
@@ -222,7 +239,9 @@ function mergeAssistantChunks(entries: readonly WorkingEntry[]): WorkingEntry[] 
       item: {
         type: "assistant_message",
         text: `${previousAssistant.text}${entryAssistant.text}`,
+        ...(previousAssistant.messageId ? { messageId: previousAssistant.messageId } : {}),
       },
+      timestamp: entry.timestamp,
       seqEnd: entry.seqEnd,
       sourceSeqRanges: mergeSeqRanges(previous.sourceSeqRanges, entry.sourceSeqRanges),
       collapsed: Array.from(collapsedKinds),
@@ -255,15 +274,11 @@ export function selectTimelineWindowByProjectedLimit(input: {
   rows: readonly AgentTimelineRow[];
   direction: TimelineLimitDirection;
   limit: number;
-  collapseToolLifecycle?: boolean;
 }): ProjectedWindowSelection {
   const { rows, direction } = input;
   const limit = Math.max(0, Math.floor(input.limit));
-  const collapseTools = input.collapseToolLifecycle ?? true;
   const canonical = makeCanonicalEntries(rows);
-  const projectedAll = mergeReasoningChunks(
-    mergeAssistantChunks(collapseTools ? collapseToolLifecycle(canonical) : canonical),
-  );
+  const projectedAll = mergeReasoningChunks(mergeAssistantChunks(collapseToolLifecycle(canonical)));
 
   if (projectedAll.length === 0) {
     return {
@@ -309,27 +324,25 @@ export function selectTimelineWindowByProjectedLimit(input: {
   let { minSeq, maxSeq } = computeWindowBounds(projectedEntries);
   let expandedEntries = projectedEntries;
 
-  if (collapseTools) {
-    // Expand to include any projected entries that overlap the selected
-    // canonical range. Tool lifecycle collapse can produce non-monotonic
-    // seqEnd values, which would otherwise create cursor gaps.
-    for (let iteration = 0; iteration < projectedAll.length + 1; iteration += 1) {
-      const overlapping = projectedAll.filter(
-        (entry) => entry.seqStart <= maxSeq && entry.seqEnd >= minSeq,
-      );
-      const nextBounds = computeWindowBounds(overlapping);
-      if (
-        overlapping.length === expandedEntries.length &&
-        nextBounds.minSeq === minSeq &&
-        nextBounds.maxSeq === maxSeq
-      ) {
-        expandedEntries = overlapping;
-        break;
-      }
+  // Expand to include any projected entries that overlap the selected canonical
+  // range. Tool lifecycle collapse can produce non-monotonic seqEnd values,
+  // which would otherwise create cursor gaps.
+  for (let iteration = 0; iteration < projectedAll.length + 1; iteration += 1) {
+    const overlapping = projectedAll.filter(
+      (entry) => entry.seqStart <= maxSeq && entry.seqEnd >= minSeq,
+    );
+    const nextBounds = computeWindowBounds(overlapping);
+    if (
+      overlapping.length === expandedEntries.length &&
+      nextBounds.minSeq === minSeq &&
+      nextBounds.maxSeq === maxSeq
+    ) {
       expandedEntries = overlapping;
-      minSeq = nextBounds.minSeq;
-      maxSeq = nextBounds.maxSeq;
+      break;
     }
+    expandedEntries = overlapping;
+    minSeq = nextBounds.minSeq;
+    maxSeq = nextBounds.maxSeq;
   }
 
   const selectedRows = rows.filter((row) => row.seq >= minSeq && row.seq <= maxSeq);
@@ -339,6 +352,124 @@ export function selectTimelineWindowByProjectedLimit(input: {
     selectedRows,
     minSeq: Number.isFinite(minSeq) ? minSeq : null,
     maxSeq: Number.isFinite(maxSeq) ? maxSeq : null,
+  };
+}
+
+function getTimelineBounds(
+  rows: readonly AgentTimelineRow[],
+): { minSeq: number; maxSeq: number } | null {
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  if (!first || !last) {
+    return null;
+  }
+  return { minSeq: first.seq, maxSeq: last.seq };
+}
+
+function selectEntriesOverlappingSeqRange(input: {
+  entries: readonly TimelineProjectionEntry[];
+  startSeq: number;
+  endSeq: number;
+}): TimelineProjectionEntry[] {
+  return input.entries.filter(
+    (entry) => entry.seqStart <= input.endSeq && entry.seqEnd >= input.startSeq,
+  );
+}
+
+export function selectProjectedTimelinePage(input: {
+  rows: readonly AgentTimelineRow[];
+  bounds?: { minSeq: number; maxSeq: number };
+  direction: TimelineLimitDirection;
+  cursorSeq?: number;
+  limit?: number;
+}): ProjectedTimelinePageSelection {
+  const limit = input.limit === undefined ? 0 : Math.max(0, Math.floor(input.limit));
+  const bounds = input.bounds ?? getTimelineBounds(input.rows);
+  const projectedAll = projectTimelineRows({ rows: input.rows, mode: "projected" });
+  if (!bounds) {
+    return {
+      entries: [],
+      startSeq: null,
+      endSeq: null,
+      hasOlder: false,
+      hasNewer: false,
+    };
+  }
+
+  if (projectedAll.length === 0) {
+    if (input.direction === "after") {
+      const cursorSeq = input.cursorSeq ?? bounds.minSeq - 1;
+      return {
+        entries: [],
+        startSeq: null,
+        endSeq: null,
+        hasOlder: cursorSeq >= bounds.minSeq,
+        hasNewer: cursorSeq < bounds.maxSeq,
+      };
+    }
+    if (input.direction === "before") {
+      const cursorSeq = input.cursorSeq ?? bounds.maxSeq + 1;
+      return {
+        entries: [],
+        startSeq: null,
+        endSeq: null,
+        hasOlder: cursorSeq > bounds.minSeq,
+        hasNewer: cursorSeq <= bounds.maxSeq,
+      };
+    }
+    return {
+      entries: [],
+      startSeq: null,
+      endSeq: null,
+      hasOlder: false,
+      hasNewer: false,
+    };
+  }
+
+  if (input.direction === "tail") {
+    const selected = selectTimelineWindowByProjectedLimit({
+      rows: input.rows,
+      direction: "tail",
+      limit,
+    });
+    return {
+      entries: selected.projectedEntries,
+      startSeq: selected.minSeq,
+      endSeq: selected.maxSeq,
+      hasOlder: selected.minSeq !== null && selected.minSeq > bounds.minSeq,
+      hasNewer: false,
+    };
+  }
+
+  let startSeq: number;
+  let endSeq: number;
+  if (input.direction === "after") {
+    const cursorSeq = input.cursorSeq ?? bounds.minSeq - 1;
+    startSeq = Math.max(bounds.minSeq, cursorSeq + 1);
+    endSeq = limit === 0 ? bounds.maxSeq : Math.min(bounds.maxSeq, cursorSeq + limit);
+  } else {
+    const cursorSeq = input.cursorSeq ?? bounds.maxSeq + 1;
+    endSeq = Math.min(bounds.maxSeq, cursorSeq - 1);
+    startSeq = limit === 0 ? bounds.minSeq : Math.max(bounds.minSeq, cursorSeq - limit);
+  }
+
+  if (startSeq > endSeq) {
+    return {
+      entries: [],
+      startSeq: null,
+      endSeq: null,
+      hasOlder: startSeq > bounds.minSeq,
+      hasNewer: endSeq < bounds.maxSeq,
+    };
+  }
+
+  const entries = selectEntriesOverlappingSeqRange({ entries: projectedAll, startSeq, endSeq });
+  return {
+    entries,
+    startSeq,
+    endSeq,
+    hasOlder: startSeq > bounds.minSeq,
+    hasNewer: endSeq < bounds.maxSeq,
   };
 }
 

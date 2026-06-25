@@ -5,8 +5,8 @@
 // The two records live in SEPARATE daemon stores + RPC families (see
 // packages/server/src/server/trigger/types.ts for why). The merged list is a
 // client-side concern only; nothing here crosses the wire.
-import type { ScheduleSummary } from "@server/server/schedule/types";
-import type { WebhookTriggerSummary } from "@server/server/trigger/types";
+import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTriggerSummary } from "@getpaseo/protocol/trigger/types";
 
 export type AutomationKind = "schedule" | "webhook";
 

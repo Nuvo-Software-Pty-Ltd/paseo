@@ -12,8 +12,8 @@ import {
 import { Github, Lock } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useQuery } from "@tanstack/react-query";
-import type { DaemonClient } from "@server/client/daemon-client";
-import type { ProjectDescriptorPayload } from "@server/shared/messages";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { ProjectDescriptorPayload } from "@getpaseo/protocol/messages";
 import { listGithubRepos, type GithubRepoSummary } from "@/lib/orchestra-cloud-client";
 import {
   GITHUB_PICKER_EMPTY,
@@ -38,7 +38,7 @@ export interface GithubRepoPickerProps {
   onClose: () => void;
   // The daemon-side workspace container the project is added to.
   workspaceId: string;
-  client: Pick<DaemonClient, "addProject">;
+  client: Pick<DaemonClient, "addProjectFromSource">;
   // Called with the added project so the host can refresh its list / open it.
   onProjectAdded: (project: ProjectDescriptorPayload) => void;
 }
@@ -143,7 +143,7 @@ export function GithubRepoPicker({
       setError(null);
       void (async () => {
         try {
-          const payload = await client.addProject({
+          const payload = await client.addProjectFromSource({
             workspaceId,
             source: { kind: "github_repo", repoUrl: repo.cloneUrl },
           });

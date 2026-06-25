@@ -36,7 +36,7 @@ vi.mock("@/lib/orchestra-cloud-client", () => ({
   mintWorkspaceToken: hoisted.mintWorkspaceToken,
 }));
 
-vi.mock("@server/client/daemon-client", () => {
+vi.mock("@getpaseo/client/internal/daemon-client", () => {
   class FakeDaemonClient {
     public config: Record<string, unknown>;
     constructor(config: Record<string, unknown>) {
@@ -52,7 +52,7 @@ import type { HostConnection, HostProfile } from "@/types/host-connection";
 import type {
   DaemonTransport,
   DaemonTransportFactory,
-} from "@server/client/daemon-client-transport-types";
+} from "@getpaseo/client/internal/daemon-client-transport-types";
 
 function makeHost(): HostProfile {
   return {

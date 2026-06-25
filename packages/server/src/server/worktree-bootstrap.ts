@@ -2,7 +2,6 @@ import { v4 as uuidv4 } from "uuid";
 import type { Logger } from "pino";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import type { TerminalSession } from "../terminal/terminal.js";
-import { buildScriptHostname } from "../utils/script-hostname.js";
 import {
   getScriptConfigs,
   getWorktreeTerminalSpecs,
@@ -17,7 +16,7 @@ import {
   type WorktreeSetupCommandResult,
   type WorktreeRuntimeEnv,
 } from "../utils/worktree.js";
-import { findFreePort, type ScriptRouteStore } from "./script-proxy.js";
+import { findFreePort, type ServiceProxySubsystem } from "./service-proxy.js";
 import type { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import type { AgentTimelineItem, ToolCallDetail } from "./agent/agent-sdk-types.js";
 import {
@@ -41,6 +40,9 @@ export interface WorktreeBootstrapTerminalResult {
 
 export interface RunAsyncWorktreeBootstrapOptions {
   agentId: string;
+  // Workspace the bootstrapped terminals belong to. Stamping it lets
+  // workspaceId-scoped archive tear these terminals down.
+  workspaceId: string;
   worktree: WorktreeConfig;
   shouldBootstrap?: boolean;
   terminalManager: TerminalManager | null;
@@ -541,6 +543,7 @@ async function runWorktreeTerminalBootstrap(
           cwd: options.worktree.worktreePath,
           name: spec.name,
           env: runtimeEnv,
+          workspaceId: options.workspaceId,
         });
         await waitForTerminalBootstrapReadiness(terminal);
         terminal.send({
@@ -699,7 +702,8 @@ interface SpawnWorkspaceScriptOptions {
   scriptName: string;
   daemonPort?: number | null;
   daemonListenHost?: string | null;
-  routeStore: ScriptRouteStore;
+  serviceProxyPublicBaseUrl?: string | null;
+  serviceProxy: ServiceProxySubsystem;
   runtimeStore: WorkspaceScriptRuntimeStore;
   terminalManager: TerminalManager;
   logger?: Logger;
@@ -721,8 +725,9 @@ async function setupServiceScriptRoute(params: {
   workspaceId: string;
   daemonPort: number | null | undefined;
   daemonListenHost: string | null | undefined;
+  serviceProxyPublicBaseUrl: string | null | undefined;
   existingRuntimeEntry: ReturnType<WorkspaceScriptRuntimeStore["get"]>;
-  routeStore: ScriptRouteStore;
+  serviceProxy: ServiceProxySubsystem;
 }): Promise<ServiceScriptSetupResult> {
   const {
     scriptConfigs,
@@ -733,10 +738,10 @@ async function setupServiceScriptRoute(params: {
     workspaceId,
     daemonPort,
     daemonListenHost,
+    serviceProxyPublicBaseUrl,
     existingRuntimeEntry,
-    routeStore,
+    serviceProxy,
   } = params;
-  const hostname = buildScriptHostname({ projectSlug, branchName, scriptName });
 
   const serviceDeclarations: Array<{ scriptName: string; port?: number }> = [];
   for (const [configuredScriptName, scriptConfig] of scriptConfigs) {
@@ -779,17 +784,19 @@ async function setupServiceScriptRoute(params: {
     branchName,
     daemonPort,
     daemonListenHost,
+    serviceProxyPublicBaseUrl,
     peers,
   });
 
-  routeStore.registerRoute({
-    hostname,
+  const registeredRoute = serviceProxy.registerWorkspaceService({
     port,
     workspaceId,
     projectSlug,
+    branchName,
     scriptName,
+    publicBaseUrl: serviceProxyPublicBaseUrl ?? null,
   });
-  return { hostname, port, env };
+  return { hostname: registeredRoute.hostname, port, env };
 }
 
 async function acquireWorkspaceScriptTerminal(params: {
@@ -797,11 +804,19 @@ async function acquireWorkspaceScriptTerminal(params: {
   existingRuntimeEntry: ReturnType<WorkspaceScriptRuntimeStore["get"]>;
   terminalManager: TerminalManager;
   repoRoot: string;
+  workspaceId: string;
   scriptName: string;
   env: Record<string, string> | undefined;
 }): Promise<{ terminal: TerminalSession; reusableTerminal: TerminalSession | null }> {
-  const { serviceScript, existingRuntimeEntry, terminalManager, repoRoot, scriptName, env } =
-    params;
+  const {
+    serviceScript,
+    existingRuntimeEntry,
+    terminalManager,
+    repoRoot,
+    workspaceId,
+    scriptName,
+    env,
+  } = params;
   let reusableTerminal: TerminalSession | null = null;
   if (!serviceScript && existingRuntimeEntry?.terminalId) {
     reusableTerminal = terminalManager.getTerminal(existingRuntimeEntry.terminalId) ?? null;
@@ -810,6 +825,7 @@ async function acquireWorkspaceScriptTerminal(params: {
     reusableTerminal ??
     (await terminalManager.createTerminal({
       cwd: repoRoot,
+      workspaceId,
       name: scriptName,
       title: scriptName,
       env,
@@ -828,7 +844,8 @@ export async function spawnWorkspaceScript(
     scriptName,
     daemonPort,
     daemonListenHost,
-    routeStore,
+    serviceProxyPublicBaseUrl,
+    serviceProxy,
     runtimeStore,
     terminalManager,
     logger,
@@ -869,8 +886,9 @@ export async function spawnWorkspaceScript(
         workspaceId,
         daemonPort,
         daemonListenHost,
+        serviceProxyPublicBaseUrl,
         existingRuntimeEntry,
-        routeStore,
+        serviceProxy,
       });
       hostname = serviceSetup.hostname;
       port = serviceSetup.port;
@@ -883,6 +901,7 @@ export async function spawnWorkspaceScript(
       existingRuntimeEntry,
       terminalManager,
       repoRoot,
+      workspaceId,
       scriptName,
       env,
     });
@@ -907,7 +926,7 @@ export async function spawnWorkspaceScript(
       disposeLifecycleListeners = null;
 
       if (input.removeRoute && hostname) {
-        routeStore.removeRouteForWorkspaceScript({ workspaceId, scriptName });
+        serviceProxy.removeWorkspaceService({ workspaceId, scriptName });
       }
       runtimeStore.set({
         workspaceId,
@@ -975,7 +994,7 @@ export async function spawnWorkspaceScript(
   } catch (error) {
     disposeLifecycleListeners?.();
     if (routeRegistered && hostname) {
-      routeStore.removeRoute(hostname);
+      serviceProxy.removeServiceRoutesByHostnames([hostname]);
     }
     if (runtimeRegistered) {
       runtimeStore.remove({ workspaceId, scriptName });
@@ -998,12 +1017,12 @@ export async function spawnWorkspaceScript(
 
 export function teardownWorktreeScripts(options: {
   hostnames: string[];
-  routeStore: ScriptRouteStore;
+  serviceProxy: Pick<ServiceProxySubsystem, "removeServiceRoutesByHostnames">;
   logger: Logger;
 }): void {
-  const { hostnames, routeStore, logger } = options;
+  const { hostnames, serviceProxy, logger } = options;
+  serviceProxy.removeServiceRoutesByHostnames(hostnames);
   for (const hostname of hostnames) {
-    routeStore.removeRoute(hostname);
     logger.info({ hostname }, "Removed script proxy route");
   }
 }

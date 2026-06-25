@@ -2,6 +2,28 @@ import { describe, expect, it } from "vitest";
 
 import { translateOpenCodeEvent, type OpenCodeEventTranslationState } from "../opencode-agent.js";
 
+const openCodePermissionActions = [
+  {
+    id: "deny",
+    label: "Deny",
+    behavior: "deny",
+    variant: "danger",
+    intent: "dismiss",
+  },
+  {
+    id: "allow_always",
+    label: "Allow always",
+    behavior: "allow",
+    variant: "secondary",
+  },
+  {
+    id: "allow_once",
+    label: "Allow once",
+    behavior: "allow",
+    variant: "primary",
+  },
+];
+
 function createState(sessionId = "session-1"): OpenCodeEventTranslationState {
   return {
     sessionId,
@@ -9,6 +31,8 @@ function createState(sessionId = "session-1"): OpenCodeEventTranslationState {
     accumulatedUsage: {},
     streamedPartKeys: new Set(),
     emittedStructuredMessageIds: new Set(),
+    compactionSummaryMessageIds: new Set(),
+    emittedCompactionPartIds: new Set(),
     partTypes: new Map(),
   };
 }
@@ -306,6 +330,7 @@ describe("translateOpenCodeEvent", () => {
             type: "shell",
             command: "ls /home/user/secrets",
           },
+          actions: openCodePermissionActions,
         },
       },
     ]);
@@ -358,6 +383,98 @@ describe("translateOpenCodeEvent", () => {
             },
             output: null,
           },
+          actions: openCodePermissionActions,
+        },
+      },
+    ]);
+  });
+
+  it("forwards permission requests from linked OpenCode subagent sessions", () => {
+    const state = createState();
+
+    translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-subagent",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "tool",
+            tool: "task",
+            callID: "call-subagent",
+            state: {
+              status: "running",
+              input: {
+                subagent_type: "explore",
+                description: "Explore external config",
+              },
+            },
+          },
+        },
+      },
+      state,
+    );
+    translateOpenCodeEvent(
+      {
+        type: "session.created",
+        properties: {
+          sessionID: "child-session-1",
+          info: {
+            id: "child-session-1",
+            parentID: "session-1",
+          },
+        },
+      },
+      state,
+    );
+
+    const result = translateOpenCodeEvent(
+      {
+        type: "permission.asked",
+        properties: {
+          id: "perm-child-1",
+          sessionID: "child-session-1",
+          permission: "external_directory",
+          patterns: ["/Users/example/.config/nvim"],
+          metadata: {
+            reason: "Need to inspect the requested config directory",
+          },
+        },
+      },
+      state,
+    );
+
+    expect(result).toEqual([
+      {
+        type: "permission_requested",
+        provider: "opencode",
+        request: {
+          id: "perm-child-1",
+          provider: "opencode",
+          name: "external_directory",
+          kind: "tool",
+          title: "Access external directory",
+          description:
+            "Need to inspect the requested config directory - Scope: /Users/example/.config/nvim",
+          input: {
+            patterns: ["/Users/example/.config/nvim"],
+            metadata: {
+              reason: "Need to inspect the requested config directory",
+            },
+          },
+          detail: {
+            type: "unknown",
+            input: {
+              permission: "external_directory",
+              patterns: ["/Users/example/.config/nvim"],
+              metadata: {
+                reason: "Need to inspect the requested config directory",
+              },
+            },
+            output: null,
+          },
+          actions: openCodePermissionActions,
         },
       },
     ]);
@@ -418,6 +535,72 @@ describe("translateOpenCodeEvent", () => {
     });
   });
 
+  it("reports totalCostUsd as cumulative session cost across turns", () => {
+    const state = createState();
+    state.accumulatedUsage.contextWindowMaxTokens = 400_000;
+    state.sessionTotalCostUsd = 0.5;
+
+    const events = translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "step-finish-1",
+            sessionID: "session-1",
+            messageID: "message-usage-1",
+            type: "step-finish",
+            reason: "stop",
+            cost: 0.25,
+            tokens: {
+              total: 55_000,
+              input: 30_000,
+              output: 12_000,
+              reasoning: 10_000,
+              cache: {
+                read: 2_000,
+                write: 1_000,
+              },
+            },
+          },
+        },
+      },
+      state,
+    );
+
+    expect(events).toEqual([
+      {
+        type: "usage_updated",
+        provider: "opencode",
+        usage: expect.objectContaining({
+          totalCostUsd: 0.75,
+        }),
+      },
+    ]);
+    expect(state.sessionTotalCostUsd).toBe(0.75);
+    expect(state.accumulatedUsage.totalCostUsd).toBe(0.75);
+  });
+
+  it("seeds cumulative session cost from OpenCode session updates", () => {
+    const state = createState();
+
+    translateOpenCodeEvent(
+      {
+        type: "session.updated",
+        properties: {
+          sessionID: "session-1",
+          info: {
+            id: "session-1",
+            cost: 1.25,
+          },
+        },
+      } as Parameters<typeof translateOpenCodeEvent>[0],
+      state,
+    );
+
+    expect(state.sessionTotalCostUsd).toBe(1.25);
+    expect(state.accumulatedUsage.totalCostUsd).toBe(1.25);
+  });
+
   it("emits normalized todo timeline items from todo.updated", () => {
     const state = createState();
 
@@ -451,6 +634,143 @@ describe("translateOpenCodeEvent", () => {
     ]);
   });
 
+  it("suppresses live todowrite tool parts because OpenCode emits todo.updated separately", () => {
+    const state = createState();
+
+    const events = translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "part-todowrite",
+            sessionID: "session-1",
+            messageID: "message-1",
+            type: "tool",
+            tool: "todowrite",
+            callID: "call-todowrite",
+            state: {
+              status: "running",
+              input: {},
+            },
+          },
+        },
+      },
+      state,
+    );
+
+    expect(events).toEqual([]);
+  });
+
+  it("maps live OpenCode tool parts through canonical detail branches", () => {
+    const state = createState();
+
+    const patchText = [
+      "*** Begin Patch",
+      "*** Delete File: /tmp/repo/src/App.tsx",
+      "*** End Patch",
+    ].join("\n");
+
+    const events = [
+      {
+        id: "part-grep",
+        tool: "grep",
+        callID: "call-grep",
+        state: { status: "completed", input: { pattern: "sendCorrelatedSessionRequest" } },
+      },
+      {
+        id: "part-skill",
+        tool: "skill",
+        callID: "call-skill",
+        state: {
+          status: "completed",
+          input: { name: "diagnose" },
+          output: '<skill_content name="diagnose"># Skill: diagnose</skill_content>',
+        },
+      },
+      {
+        id: "part-apply-patch",
+        tool: "apply_patch",
+        callID: "call-apply-patch",
+        state: {
+          status: "completed",
+          input: { patchText },
+          output: "Success. Updated the following files:\nD /tmp/repo/src/App.tsx",
+        },
+      },
+    ].flatMap((part) =>
+      translateOpenCodeEvent(
+        {
+          type: "message.part.updated",
+          properties: {
+            part: {
+              ...part,
+              sessionID: "session-1",
+              messageID: "message-1",
+              type: "tool",
+            },
+          },
+        },
+        state,
+      ),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "tool_call",
+          callId: "call-grep",
+          name: "grep",
+          status: "completed",
+          detail: {
+            type: "search",
+            query: "sendCorrelatedSessionRequest",
+            toolName: "grep",
+          },
+          error: null,
+        },
+      },
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "tool_call",
+          callId: "call-skill",
+          name: "skill",
+          status: "completed",
+          detail: {
+            type: "plain_text",
+            label: "diagnose",
+            icon: "sparkles",
+            text: '<skill_content name="diagnose"># Skill: diagnose</skill_content>',
+          },
+          error: null,
+        },
+      },
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "tool_call",
+          callId: "call-apply-patch",
+          name: "apply_patch",
+          status: "completed",
+          detail: {
+            type: "edit",
+            filePath: "/tmp/repo/src/App.tsx",
+            unifiedDiff: [
+              "diff --git a//tmp/repo/src/App.tsx b//tmp/repo/src/App.tsx",
+              "--- a//tmp/repo/src/App.tsx",
+              "+++ /dev/null",
+            ].join("\n"),
+          },
+          error: null,
+        },
+      },
+    ]);
+  });
+
   it("emits compaction loading timeline items from compaction parts", () => {
     const state = createState();
 
@@ -478,6 +798,107 @@ describe("translateOpenCodeEvent", () => {
           type: "compaction",
           status: "loading",
           trigger: "auto",
+        },
+      },
+    ]);
+  });
+
+  it("does not render OpenCode compaction summaries as assistant messages", () => {
+    const state = createState();
+
+    const loading = translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "compaction-part-1",
+            sessionID: "session-1",
+            messageID: "message-compaction-user-1",
+            type: "compaction",
+            auto: true,
+          },
+        },
+      },
+      state,
+    );
+
+    translateOpenCodeEvent(
+      {
+        type: "message.updated",
+        properties: {
+          info: {
+            id: "message-compaction-summary-1",
+            sessionID: "session-1",
+            role: "assistant",
+            mode: "compaction",
+            agent: "compaction",
+            summary: true,
+          },
+        },
+      },
+      state,
+    );
+
+    const summaryText = translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "summary-text-part-1",
+            sessionID: "session-1",
+            messageID: "message-compaction-summary-1",
+            type: "text",
+            text: "## Goal\n- Preserve context while continuing the task.",
+            time: { start: 1, end: 2 },
+          },
+        },
+      },
+      state,
+    );
+
+    const duplicateLoading = translateOpenCodeEvent(
+      {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "compaction-part-1",
+            sessionID: "session-1",
+            messageID: "message-compaction-user-1",
+            type: "compaction",
+            auto: true,
+            tail_start_id: "message-tail-1",
+          },
+        },
+      },
+      state,
+    );
+
+    const completed = translateOpenCodeEvent(
+      {
+        type: "session.compacted",
+        properties: {
+          sessionID: "session-1",
+        },
+      },
+      state,
+    );
+
+    expect([...loading, ...summaryText, ...duplicateLoading, ...completed]).toEqual([
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "compaction",
+          status: "loading",
+          trigger: "auto",
+        },
+      },
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "compaction",
+          status: "completed",
         },
       },
     ]);
@@ -857,5 +1278,53 @@ describe("translateOpenCodeEvent", () => {
       },
     ]);
     expect(second).toEqual([]);
+  });
+
+  it("translates session.error with MessageAbortedError as turn_canceled, not turn_failed", () => {
+    const state = createState();
+
+    const events = translateOpenCodeEvent(
+      {
+        type: "session.error",
+        properties: {
+          sessionID: "session-1",
+          error: {
+            name: "MessageAbortedError",
+            data: { message: "aborted" },
+          },
+        },
+      },
+      state,
+    );
+
+    expect(events).toEqual([
+      { type: "turn_canceled", provider: "opencode", reason: "interrupted" },
+    ]);
+  });
+
+  it("translates session.error with a real error as turn_failed", () => {
+    const state = createState();
+
+    const events = translateOpenCodeEvent(
+      {
+        type: "session.error",
+        properties: {
+          sessionID: "session-1",
+          error: {
+            name: "UnknownError",
+            data: { message: "something broke" },
+          },
+        },
+      },
+      state,
+    );
+
+    expect(events).toEqual([
+      {
+        type: "turn_failed",
+        provider: "opencode",
+        error: '{"name":"UnknownError","data":{"message":"something broke"}}',
+      },
+    ]);
   });
 });

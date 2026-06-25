@@ -5,12 +5,13 @@ import type {
   CreateTriggerOptions,
   UpdateScheduleOptions,
   UpdateTriggerOptions,
-} from "@server/client/daemon-client";
-import type { ScheduleSummary } from "@server/server/schedule/types";
-import type { WebhookTriggerSummary } from "@server/server/trigger/types";
+} from "@getpaseo/client/internal/daemon-client";
+import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTriggerSummary } from "@getpaseo/protocol/trigger/types";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { type Automation, mergeAutomations } from "@/lib/automations/automation-model";
+import { i18n } from "@/i18n/i18next";
 
 export function schedulesQueryKey(serverId: string | null) {
   return ["automations", "schedules", serverId] as const;
@@ -47,7 +48,7 @@ export function useSchedules(serverId: string | null): UseSchedulesResult {
     staleTime: 30_000,
     queryFn: async () => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.scheduleList();
     },
@@ -81,7 +82,7 @@ export function useWebhookTriggers(serverId: string | null): UseWebhookTriggersR
     staleTime: 30_000,
     queryFn: async () => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.triggerList();
     },
@@ -140,7 +141,7 @@ export function useCreateSchedule(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: Omit<CreateScheduleOptions, "requestId">) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.scheduleCreate(input);
     },
@@ -156,7 +157,7 @@ export function useCreateWebhookTrigger(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: Omit<CreateTriggerOptions, "requestId">) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.triggerCreate(input);
     },
@@ -172,7 +173,7 @@ export function useUpdateSchedule(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: Omit<UpdateScheduleOptions, "requestId">) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.scheduleUpdate(input);
     },
@@ -188,7 +189,7 @@ export function useUpdateWebhookTrigger(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: Omit<UpdateTriggerOptions, "requestId">) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.triggerUpdate(input);
     },
@@ -204,7 +205,7 @@ export function usePauseSchedule(serverId: string | null) {
   return useMutation({
     mutationFn: async (id: string) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.schedulePause({ id });
     },
@@ -220,7 +221,7 @@ export function useResumeSchedule(serverId: string | null) {
   return useMutation({
     mutationFn: async (id: string) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.scheduleResume({ id });
     },
@@ -236,7 +237,7 @@ export function useRunScheduleOnce(serverId: string | null) {
   return useMutation({
     mutationFn: async (id: string) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.scheduleRunOnce({ id });
     },
@@ -252,7 +253,7 @@ export function useRunTriggerOnce(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: { id: string; payload?: unknown }) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.triggerRunOnce(input);
     },
@@ -268,7 +269,7 @@ export function useRotateWebhookSecret(serverId: string | null) {
   return useMutation({
     mutationFn: async (id: string) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return client.triggerRotateSecret({ id });
     },
@@ -284,7 +285,7 @@ export function useDeleteAutomation(serverId: string | null) {
   return useMutation({
     mutationFn: async (input: { id: string; kind: Automation["kind"] }) => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       if (input.kind === "schedule") {
         return client.scheduleDelete({ id: input.id });

@@ -116,6 +116,17 @@ vi.mock("./isolated-bottom-sheet-modal", () => ({
   },
 }));
 
+// upstream-0.1.99 made combobox import the real adaptive-modal-sheet, which pulls a
+// heavy native graph (unistyles withUnistyles, safe-area-context, reanimated) — one
+// of whose deps loads as raw TS under this test's hand-rolled mock set. This test
+// exercises only the web-modal render path, so stub the sheet shell (mirrors
+// rename-modal.test.tsx). With searchable={false} the AdaptiveTextInput never renders.
+vi.mock("@/components/adaptive-modal-sheet", () => ({
+  AdaptiveTextInput: () => null,
+  InlineHeaderView: () => null,
+  SheetHeaderView: () => null,
+}));
+
 import { View } from "react-native";
 import { Combobox, type ComboboxOption } from "./combobox";
 

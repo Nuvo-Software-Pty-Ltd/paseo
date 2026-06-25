@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { expect, type Page } from "@playwright/test";
 import { buildCreateAgentPreferences, buildSeededHost } from "./daemon-registry";
-import { createNodeWebSocketFactory, type NodeWebSocketFactory } from "./node-ws-factory";
+import { getE2EDaemonPort } from "./daemon-port";
+import { getServerId } from "./server-id";
 import { waitForWorkspaceTabsVisible } from "./workspace-tabs";
 import {
   buildHostAgentDetailRoute,
@@ -15,53 +14,7 @@ export interface ArchiveTabAgent {
   id: string;
   title: string;
   cwd: string;
-}
-
-interface ArchiveTabDaemonClient {
-  connect(): Promise<void>;
-  close(): Promise<void>;
-  createAgent(options: {
-    provider: string;
-    model: string;
-    thinkingOptionId?: string;
-    modeId: string;
-    cwd: string;
-    title: string;
-    initialPrompt?: string;
-  }): Promise<{ id: string }>;
-  archiveAgent(agentId: string): Promise<{ archivedAt: string }>;
-  waitForFinish(agentId: string, timeout?: number): Promise<{ status: string }>;
-  waitForAgentUpsert(
-    agentId: string,
-    predicate: (snapshot: { status: string }) => boolean,
-    timeout?: number,
-  ): Promise<{ status: string }>;
-  fetchAgentHistory(options?: {
-    page?: { limit: number };
-  }): Promise<{ entries: Array<{ id: string }> }>;
-}
-
-function getDaemonPort(): string {
-  const daemonPort = process.env.E2E_DAEMON_PORT;
-  if (!daemonPort) {
-    throw new Error("E2E_DAEMON_PORT is not set.");
-  }
-  if (daemonPort === "6767") {
-    throw new Error("E2E_DAEMON_PORT must not point at the developer daemon.");
-  }
-  return daemonPort;
-}
-
-function getServerId(): string {
-  const serverId = process.env.E2E_SERVER_ID;
-  if (!serverId) {
-    throw new Error("E2E_SERVER_ID is not set.");
-  }
-  return serverId;
-}
-
-function getDaemonWsUrl(): string {
-  return `ws://127.0.0.1:${getDaemonPort()}/ws`;
+  workspaceId: string;
 }
 
 function buildSeededStoragePayload() {
@@ -69,55 +22,44 @@ function buildSeededStoragePayload() {
   return {
     daemon: buildSeededHost({
       serverId: getServerId(),
-      endpoint: `127.0.0.1:${getDaemonPort()}`,
+      endpoint: `127.0.0.1:${getE2EDaemonPort()}`,
       nowIso,
     }),
     preferences: buildCreateAgentPreferences(getServerId()),
   };
 }
 
-interface ArchiveTabDaemonClientConfig {
-  url: string;
-  clientId: string;
-  clientType: "cli";
-  webSocketFactory?: NodeWebSocketFactory;
-}
-
-async function loadDaemonClientConstructor(): Promise<
-  new (config: ArchiveTabDaemonClientConfig) => ArchiveTabDaemonClient
-> {
-  const repoRoot = path.resolve(__dirname, "../../../../");
-  const moduleUrl = pathToFileURL(
-    path.join(repoRoot, "packages/server/dist/server/server/exports.js"),
-  ).href;
-  const mod = (await import(moduleUrl)) as {
-    DaemonClient: new (config: ArchiveTabDaemonClientConfig) => ArchiveTabDaemonClient;
-  };
-  return mod.DaemonClient;
-}
-
-export async function connectArchiveTabDaemonClient(): Promise<ArchiveTabDaemonClient> {
-  const DaemonClient = await loadDaemonClientConstructor();
-  const webSocketFactory = createNodeWebSocketFactory();
-  const client = new DaemonClient({
-    url: getDaemonWsUrl(),
-    clientId: `app-e2e-archive-tab-${randomUUID()}`,
-    clientType: "cli",
-    webSocketFactory,
-  });
-  await client.connect();
-  return client;
+/**
+ * The slice of a daemon client `createIdleAgent` needs: spawn an agent and await
+ * its idle upsert. The shared seed client satisfies it, so a spec can seed an
+ * idle agent from the same client it uses for everything else.
+ */
+export interface IdleAgentSeedClient {
+  createAgent(options: {
+    provider: string;
+    model: string;
+    modeId: string;
+    cwd: string;
+    workspaceId: string;
+    title: string;
+  }): Promise<{ id: string }>;
+  waitForAgentUpsert(
+    agentId: string,
+    predicate: (snapshot: { status: string }) => boolean,
+    timeout?: number,
+  ): Promise<{ status: string }>;
 }
 
 export async function createIdleAgent(
-  client: ArchiveTabDaemonClient,
-  input: { cwd: string; title: string },
+  client: IdleAgentSeedClient,
+  input: { cwd: string; workspaceId: string; title: string },
 ): Promise<ArchiveTabAgent> {
   const created = await client.createAgent({
     provider: "opencode",
     model: "opencode/gpt-5-nano",
     modeId: "bypassPermissions",
     cwd: input.cwd,
+    workspaceId: input.workspaceId,
     title: input.title,
   });
   const snapshot = await client.waitForAgentUpsert(
@@ -132,14 +74,31 @@ export async function createIdleAgent(
     id: created.id,
     title: input.title,
     cwd: input.cwd,
+    workspaceId: input.workspaceId,
   };
 }
 
 export async function archiveAgentFromDaemon(
-  client: ArchiveTabDaemonClient,
+  client: { archiveAgent(agentId: string): Promise<{ archivedAt: string }> },
   agentId: string,
 ): Promise<void> {
   await client.archiveAgent(agentId);
+}
+
+export async function fetchAgentArchivedAt(
+  client: {
+    fetchAgent(agentId: string): Promise<{ agent: { archivedAt?: string | null } } | null>;
+  },
+  agentId: string,
+): Promise<string | null> {
+  const result = await client.fetchAgent(agentId);
+  return result?.agent.archivedAt ?? null;
+}
+
+export function getWorktreeRestoreFeature(client: {
+  getLastServerInfoMessage(): { features?: { worktreeRestore?: boolean } | null } | null;
+}): boolean {
+  return client.getLastServerInfoMessage()?.features?.worktreeRestore === true;
 }
 
 export async function primeAdditionalPage(page: Page): Promise<void> {
@@ -194,7 +153,7 @@ export async function openWorkspaceWithAgents(
 ): Promise<void> {
   const serverId = getServerId();
   for (const agent of agents) {
-    await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.cwd));
+    await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.workspaceId));
 
     // The workspace layout consumes `?open=agent:xxx`, returns null during the effect,
     // then replaces the URL with the clean workspace route after preparing the tab.
@@ -263,7 +222,7 @@ export async function openSessions(page: Page): Promise<void> {
   await expect(page).toHaveURL(new RegExp(`${buildHostSessionsRoute(getServerId())}$`), {
     timeout: 30_000,
   });
-  await expect(page.getByText("Sessions", { exact: true }).last()).toBeVisible({
+  await expect(page.getByText("History", { exact: true }).last()).toBeVisible({
     timeout: 30_000,
   });
 }
@@ -280,6 +239,12 @@ export async function expectSessionRowVisible(page: Page, title: string): Promis
 
 export async function expectSessionRowArchived(page: Page, title: string): Promise<void> {
   await expect(getSessionRowByTitle(page, title)).toContainText("Archived", { timeout: 30_000 });
+}
+
+export async function expectSessionRowNotArchived(page: Page, title: string): Promise<void> {
+  await expect(getSessionRowByTitle(page, title)).not.toContainText("Archived", {
+    timeout: 30_000,
+  });
 }
 
 export async function clickSessionRow(page: Page, title: string): Promise<void> {

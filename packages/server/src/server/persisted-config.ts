@@ -5,10 +5,11 @@ import { z } from "zod";
 import {
   AgentProviderRuntimeSettingsMapSchema,
   migrateProviderSettings,
-  ProviderOverrideSchema,
+  ProviderOverridesSchema,
 } from "./agent/provider-launch-config.js";
 import type { AgentProviderRuntimeSettingsMap } from "./agent/provider-launch-config.js";
-import { ensurePrivateFile, writePrivateFileSync } from "./private-files.js";
+import { ensurePrivateFile, writePrivateFileAtomicSync } from "./private-files.js";
+import { TerminalProfileSchema } from "@getpaseo/protocol/messages";
 
 export const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
 export const LogFormatSchema = z.enum(["pretty", "json"]);
@@ -63,6 +64,12 @@ const ProvidersSchema = z
   })
   .strict();
 
+const WorktreesConfigSchema = z
+  .object({
+    root: z.string().min(1).optional(),
+  })
+  .strict();
+
 const BcryptHashSchema = z.string().regex(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/, {
   message: "Expected a bcrypt hash",
 });
@@ -86,6 +93,7 @@ const FeatureDictationSchema = z
       .object({
         provider: SpeechProviderIdSchema.optional(),
         model: z.string().min(1).optional(),
+        language: z.string().trim().min(1).optional(),
         confidenceThreshold: z.number().optional(),
       })
       .strict()
@@ -107,6 +115,7 @@ const FeatureVoiceModeSchema = z
       .object({
         provider: SpeechProviderIdSchema.optional(),
         model: z.string().min(1).optional(),
+        language: z.string().trim().min(1).optional(),
       })
       .strict()
       .optional(),
@@ -129,58 +138,21 @@ const FeatureVoiceModeSchema = z
   })
   .strict();
 
-const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi"] as const;
-const PROVIDER_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
+const StructuredGenerationProviderConfigSchema = z
+  .object({
+    provider: z.string().min(1),
+    model: z.string().min(1).optional(),
+    thinkingOptionId: z.string().min(1).optional(),
+  })
+  .strict();
 
-const ProviderOverridesSchema = z
-  .record(z.string(), ProviderOverrideSchema)
-  .superRefine((providers, ctx) => {
-    const builtinProviderIdSet = new Set<string>(BUILTIN_PROVIDER_IDS);
-    const validExtendsValues = new Set<string>([...BUILTIN_PROVIDER_IDS, "acp"]);
+const AgentMetadataGenerationSchema = z
+  .object({
+    providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
+  })
+  .strict();
 
-    for (const [providerId, provider] of Object.entries(providers)) {
-      if (!PROVIDER_ID_PATTERN.test(providerId)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [providerId],
-          message: `Provider ID "${providerId}" must match ${PROVIDER_ID_PATTERN}.`,
-        });
-      }
-
-      const isBuiltinProvider = builtinProviderIdSet.has(providerId);
-      if (!isBuiltinProvider && !provider.extends) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [providerId, "extends"],
-          message: `Custom provider "${providerId}" must declare extends.`,
-        });
-      }
-
-      if (!isBuiltinProvider && !provider.label) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [providerId, "label"],
-          message: `Custom provider "${providerId}" must declare label.`,
-        });
-      }
-
-      if (provider.extends && !validExtendsValues.has(provider.extends)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [providerId, "extends"],
-          message: `Provider "${providerId}" extends unknown provider "${provider.extends}".`,
-        });
-      }
-
-      if (provider.extends === "acp" && !provider.command) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [providerId, "command"],
-          message: `Provider "${providerId}" extending "acp" must declare command.`,
-        });
-      }
-    }
-  });
+const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -232,6 +204,8 @@ function normalizeAgentProviders(value: unknown): unknown {
 
 export const PersistedConfigSchema = z
   .object({
+    $schema: z.string().optional(),
+
     // v1 schema marker
     version: z.literal(1).optional(),
 
@@ -248,6 +222,10 @@ export const PersistedConfigSchema = z
           })
           .passthrough()
           .optional(),
+        autoArchiveAfterMerge: z.boolean().optional(),
+        enableTerminalAgentHooks: z.boolean().optional(),
+        appendSystemPrompt: z.string().optional(),
+        terminalProfiles: z.array(TerminalProfileSchema).optional(),
         cors: z
           .object({
             allowedOrigins: z.array(z.string()).optional(),
@@ -260,6 +238,18 @@ export const PersistedConfigSchema = z
             endpoint: z.string().optional(),
             publicEndpoint: z.string().optional(),
             useTls: z.boolean().optional(),
+            publicUseTls: z.boolean().optional(),
+          })
+          .strict()
+          .optional(),
+        serviceProxy: z
+          .object({
+            // COMPAT(serviceProxyEnabled): added 2026-06-02, remove after 2026-12-02.
+            // Parsed only to suppress optional public/listen layers for old configs;
+            // localhost service proxying remains always enabled.
+            enabled: z.boolean().optional(),
+            listen: z.string().optional(),
+            publicBaseUrl: z.url().optional(),
           })
           .strict()
           .optional(),
@@ -280,9 +270,11 @@ export const PersistedConfigSchema = z
       .optional(),
 
     providers: ProvidersSchema.optional(),
+    worktrees: WorktreesConfigSchema.optional(),
     agents: z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
+        metadataGeneration: AgentMetadataGenerationSchema.optional(),
       })
       .strict()
       .optional(),
@@ -370,7 +362,10 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
 
   if (!existsSync(configPath)) {
     try {
-      writePrivateFileSync(configPath, JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n");
+      writePrivateFileAtomicSync(
+        configPath,
+        JSON.stringify(DEFAULT_PERSISTED_CONFIG, null, 2) + "\n",
+      );
       log?.info(`Initialized config file at ${configPath}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -384,7 +379,9 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
     raw = readFileSync(configPath, "utf-8");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Failed to read ${configPath}: ${message}`, { cause: err });
+    throw new Error(`[Config] Failed to read ${configPath}: ${message}`, {
+      cause: err,
+    });
   }
 
   let parsed: unknown;
@@ -392,7 +389,9 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
     parsed = JSON.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Invalid JSON in ${configPath}: ${message}`, { cause: err });
+    throw new Error(`[Config] Invalid JSON in ${configPath}: ${message}`, {
+      cause: err,
+    });
   }
 
   const migrated = stripDeprecatedLocalSpeechConfigFields(parsed);
@@ -425,10 +424,12 @@ export function savePersistedConfig(
   }
 
   try {
-    writePrivateFileSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
+    writePrivateFileAtomicSync(configPath, JSON.stringify(result.data, null, 2) + "\n");
     log?.info(`Saved to ${configPath}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Failed to write ${configPath}: ${message}`, { cause: err });
+    throw new Error(`[Config] Failed to write ${configPath}: ${message}`, {
+      cause: err,
+    });
   }
 }

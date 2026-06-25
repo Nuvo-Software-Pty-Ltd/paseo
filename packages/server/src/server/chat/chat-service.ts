@@ -7,7 +7,7 @@ import {
   type ChatMessage,
   type ChatRoom,
   type ChatRoomDetail,
-} from "./chat-types.js";
+} from "@getpaseo/protocol/chat/types";
 import type { ChatStore, ChatStorePayload } from "./chat-store.js";
 
 function normalizeRoomName(name: string): string {

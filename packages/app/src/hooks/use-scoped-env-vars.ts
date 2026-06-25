@@ -1,9 +1,10 @@
 import { useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { DaemonClient } from "@server/client/daemon-client";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useHostRuntimeClient } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
+import { i18n } from "@/i18n/i18next";
 
 // D-3.5c — client-side access to the scoped env-var RPCs. One typed
 // loader/cache keyed by (serverId, scope, scopeId) so both the
@@ -74,7 +75,7 @@ export function useScopedEnvVars(input: {
     enabled: enabled && Boolean(client) && Boolean(scopeId),
     queryFn: () => {
       if (!client) {
-        throw new Error("Daemon client unavailable");
+        throw new Error(i18n.t("common.errors.daemonClientUnavailable"));
       }
       return fetchScopedEnvVars(client, scope, scopeId);
     },
@@ -87,7 +88,7 @@ export function useScopedEnvVars(input: {
   const setMutation = useMutation({
     mutationFn: async (vars: { key: string; value: string; secret?: boolean }) => {
       if (!client) {
-        throw new Error("Daemon client unavailable");
+        throw new Error(i18n.t("common.errors.daemonClientUnavailable"));
       }
       return client.setScopedEnvVar({ scope, scopeId, ...vars });
     },
@@ -97,7 +98,7 @@ export function useScopedEnvVars(input: {
   const deleteMutation = useMutation({
     mutationFn: async (key: string) => {
       if (!client) {
-        throw new Error("Daemon client unavailable");
+        throw new Error(i18n.t("common.errors.daemonClientUnavailable"));
       }
       return client.deleteScopedEnvVar({ scope, scopeId, key });
     },

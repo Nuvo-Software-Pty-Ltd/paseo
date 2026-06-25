@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import type { AgentSnapshotPayload } from "@getpaseo/server";
+import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema, CommandError } from "../../output/index.js";
 import { collectMultiple } from "../../utils/command-options.js";
@@ -13,7 +13,7 @@ export function addLsOptions(cmd: Command): Command {
   return cmd
     .description("List agents. By default excludes archived agents.")
     .option("-a, --all", "Include archived agents")
-    .option("-g, --global", "Legacy no-op (kept for compatibility)")
+    .option("-g, --global", "List agents across all directories")
     .option(
       "--label <key=value>",
       "Filter by label (can be used multiple times)",
@@ -107,7 +107,7 @@ export type AgentLsResult = ListResult<AgentListItem>;
 export interface AgentLsOptions extends CommandOptions {
   /** -a: Include archived agents */
   all?: boolean;
-  /** Legacy flag retained for CLI compatibility */
+  /** -g: List agents across all directories */
   global?: boolean;
   /** Filter by specific status */
   status?: string;
@@ -133,7 +133,7 @@ function parseLabelFilters(labels: string[] | undefined): Record<string, string>
 }
 
 export function buildAgentLsFetchOptions(
-  options: Pick<AgentLsOptions, "all" | "label" | "thinking">,
+  options: Pick<AgentLsOptions, "all" | "global" | "label" | "thinking">,
 ): FetchAgentsOptions {
   const labelFilters = parseLabelFilters(options.label);
   const normalizedThinkingOptionId = options.thinking?.trim();
@@ -150,7 +150,7 @@ export function buildAgentLsFetchOptions(
   }
 
   const fetchOptions: FetchAgentsOptions = {};
-  if (!options.all) {
+  if (!options.global) {
     fetchOptions.scope = "active";
   }
   if (Object.keys(daemonFilter).length > 0) {
@@ -162,7 +162,9 @@ export function buildAgentLsFetchOptions(
 /**
  * Agent ls command semantics:
  * - `paseo agent ls`    → active non-archived agents
- * - `paseo agent ls -a` → include archived agents
+ * - `paseo agent ls -g` → global non-archived agents
+ * - `paseo agent ls -a` → active agents, including archived
+ * - `paseo agent ls -ag` → global agents, including archived
  */
 export async function runLsCommand(
   options: AgentLsOptions,
@@ -178,7 +180,8 @@ export async function runLsCommand(
     const error: CommandError = {
       code: "DAEMON_NOT_RUNNING",
       message: `Cannot connect to daemon at ${host}: ${message}`,
-      details: "Start the daemon with: paseo daemon start",
+      details:
+        "Start the daemon with: paseo daemon start\nFor a remote daemon, pass --host <host:port> or set PASEO_HOST.",
     };
     throw error;
   }

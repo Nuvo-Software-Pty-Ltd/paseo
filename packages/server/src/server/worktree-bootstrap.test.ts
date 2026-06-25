@@ -119,6 +119,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     await expect(
       runAsyncWorktreeBootstrap({
         agentId: "agent-live-failure",
+        workspaceId: "ws-live-failure",
         worktree: worktreeBootstrap.worktree,
         shouldBootstrap: worktreeBootstrap.shouldBootstrap,
         terminalManager: null,
@@ -169,6 +170,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     const persisted: AgentTimelineItem[] = [];
     await runAsyncWorktreeBootstrap({
       agentId: "agent-large-output",
+      workspaceId: "ws-large-output",
       worktree: worktreeBootstrap.worktree,
       shouldBootstrap: worktreeBootstrap.shouldBootstrap,
       terminalManager: null,
@@ -238,6 +240,7 @@ describe("runAsyncWorktreeBootstrap", () => {
 
     await runAsyncWorktreeBootstrap({
       agentId: "agent-terminal-readiness",
+      workspaceId: "ws-terminal-readiness",
       worktree: worktreeBootstrap.worktree,
       shouldBootstrap: worktreeBootstrap.shouldBootstrap,
       terminalManager: {
@@ -382,8 +385,11 @@ describe("runAsyncWorktreeBootstrap", () => {
           }),
           kill: () => {},
           onTitleChange: () => () => {},
+          onActivityChange: () => () => {},
           getSize: () => ({ rows: 1, cols: 1 }),
           getTitle: () => undefined,
+          getActivity: () => null,
+          setActivity: () => {},
           getExitInfo: () => null,
           killAndWait: async () => {},
         };
@@ -391,16 +397,34 @@ describe("runAsyncWorktreeBootstrap", () => {
         return session;
       },
       registerCwdEnv() {},
+      validateTerminalActivityToken() {
+        return "unknown" as const;
+      },
       getTerminal(id) {
         return sessionsById.get(id);
       },
+      async getTerminalState() {
+        return null;
+      },
+      setTerminalTitle() {
+        return false;
+      },
+      async setTerminalActivity() {
+        return false;
+      },
       killTerminal() {},
       async killTerminalAndWait() {},
+      async captureTerminal() {
+        return { lines: [], totalLines: 0 };
+      },
       listDirectories() {
         return [];
       },
       killAll() {},
       subscribeTerminalsChanged() {
+        return () => {};
+      },
+      subscribeTerminalActivity() {
         return () => {};
       },
     };
@@ -420,13 +444,13 @@ describe("runAsyncWorktreeBootstrap", () => {
     expect(createTerminalCalls[0]?.env?.PASEO_PORT).toEqual(expect.any(String));
     expect(createTerminalCalls[0]?.env?.HOST).toBe("127.0.0.1");
     expect(createTerminalCalls[0]?.env?.PASEO_URL).toBe(
-      "http://api.feature-socket-service.repo.localhost:6767",
+      "http://api--feature-socket-service--repo.localhost:6767",
     );
     expect(createTerminalCalls[0]?.env?.PASEO_SERVICE_API_PORT).toBe(
       createTerminalCalls[0]?.env?.PASEO_PORT,
     );
     expect(createTerminalCalls[0]?.env?.PASEO_SERVICE_API_URL).toBe(
-      "http://api.feature-socket-service.repo.localhost:6767",
+      "http://api--feature-socket-service--repo.localhost:6767",
     );
   }
 
@@ -450,7 +474,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       String(plannedAppServerPort),
     );
     expect(createTerminalCalls[0]?.env?.PASEO_SERVICE_APP_SERVER_URL).toBe(
-      "http://app-server.feature-socket-service.repo.localhost:6767",
+      "http://app-server--feature-socket-service--repo.localhost:6767",
     );
   }
 
@@ -497,7 +521,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-socket-service",
       scriptName: "web",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager: createStubTerminalManager(createTerminalCalls, terminalRecords),
     });
@@ -541,7 +565,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-exit",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -580,7 +604,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-rerun",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -600,7 +624,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-rerun",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -659,7 +683,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-existing-terminal",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -701,7 +725,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-terminal-exit",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -738,7 +762,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-script-duplicate",
       scriptName: "typecheck",
       daemonPort: null,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -751,7 +775,7 @@ describe("runAsyncWorktreeBootstrap", () => {
         branchName: "feature-script-duplicate",
         scriptName: "typecheck",
         daemonPort: null,
-        routeStore,
+        serviceProxy: routeStore,
         runtimeStore,
         terminalManager,
       }),
@@ -786,7 +810,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-socket-service",
       scriptName: "api",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager: createStubTerminalManager(createTerminalCalls, terminalRecords),
     });
@@ -794,7 +818,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     expect(result.scriptName).toBe("api");
     expect(routeStore.listRoutes()).toEqual([
       {
-        hostname: "api.feature-socket-service.repo.localhost",
+        hostname: "api--feature-socket-service--repo.localhost",
         port: expect.any(Number),
         workspaceId: repoDir,
         projectSlug: "repo",
@@ -811,6 +835,60 @@ describe("runAsyncWorktreeBootstrap", () => {
       lifecycle: "running",
       exitCode: null,
     });
+  });
+
+  it("spawns services with public aliases and public service URLs", async () => {
+    commitPaseoScripts(
+      {
+        api: {
+          type: "service",
+          command: "npm run api",
+        },
+        "app-server": {
+          type: "service",
+          command: "npm run app",
+        },
+      },
+      "add public service script config",
+    );
+
+    const routeStore = new ScriptRouteStore();
+    const runtimeStore = new WorkspaceScriptRuntimeStore();
+    const createTerminalCalls: CreateTerminalCall[] = [];
+    const terminalRecords: StubTerminalRecord[] = [];
+
+    const result = await spawnWorkspaceScript({
+      repoRoot: repoDir,
+      workspaceId: repoDir,
+      projectSlug: "repo",
+      branchName: "feature-public-service",
+      scriptName: "api",
+      daemonPort: 6767,
+      serviceProxyPublicBaseUrl: "https://services.example.com",
+      serviceProxy: routeStore,
+      runtimeStore,
+      terminalManager: createStubTerminalManager(createTerminalCalls, terminalRecords),
+    });
+
+    expect(result.hostname).toBe("api--feature-public-service--repo.localhost");
+    expect(
+      routeStore.getRouteEntry("api--feature-public-service--repo.services.example.com"),
+    ).toMatchObject({
+      hostname: "api--feature-public-service--repo.localhost",
+      publicHostname: "api--feature-public-service--repo.services.example.com",
+      publicBaseUrl: "https://services.example.com",
+      workspaceId: repoDir,
+      scriptName: "api",
+    });
+    expect(createTerminalCalls[0]?.env?.PASEO_URL).toBe(
+      "https://api--feature-public-service--repo.services.example.com",
+    );
+    expect(createTerminalCalls[0]?.env?.PASEO_SERVICE_API_URL).toBe(
+      "https://api--feature-public-service--repo.services.example.com",
+    );
+    expect(createTerminalCalls[0]?.env?.PASEO_SERVICE_APP_SERVER_URL).toBe(
+      "https://app-server--feature-public-service--repo.services.example.com",
+    );
   });
 
   it("refreshes a stopped service port on respawn and updates the route", async () => {
@@ -852,7 +930,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-respawn-service",
       scriptName: "api",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -864,7 +942,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-respawn-service",
       scriptName: "worker",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -889,7 +967,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       lifecycle: "stopped",
       exitCode: 0,
     });
-    expect(routeStore.getRouteEntry("api.feature-respawn-service.repo.localhost")).toBeNull();
+    expect(routeStore.getRouteEntry("api--feature-respawn-service--repo.localhost")).toBeNull();
 
     const secondResult = await spawnWorkspaceScript({
       repoRoot: repoDir,
@@ -898,7 +976,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-respawn-service",
       scriptName: "api",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
@@ -911,8 +989,8 @@ describe("runAsyncWorktreeBootstrap", () => {
     expect(secondPort).not.toBe(firstPort);
     expect(secondPort).toEqual(expect.any(Number));
     expect(createTerminalCalls[2]?.env?.PASEO_SERVICE_WORKER_PORT).toBe(String(workerPort));
-    expect(routeStore.getRouteEntry("api.feature-respawn-service.repo.localhost")).toMatchObject({
-      hostname: "api.feature-respawn-service.repo.localhost",
+    expect(routeStore.getRouteEntry("api--feature-respawn-service--repo.localhost")).toMatchObject({
+      hostname: "api--feature-respawn-service--repo.localhost",
       port: secondPort,
       workspaceId: repoDir,
       projectSlug: "repo",
@@ -955,20 +1033,20 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-before-rename",
       scriptName: "api",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager,
     });
 
     const updateRoutesForBranchChange = createBranchChangeRouteHandler({
-      routeStore,
+      serviceProxy: routeStore,
       onRoutesChanged: () => {},
     });
     updateRoutesForBranchChange(repoDir, "feature-before-rename", "feature-after-rename");
 
     expect(routeStore.listRoutesForWorkspace(repoDir)).toEqual([
       expect.objectContaining({
-        hostname: "api.feature-after-rename.repo.localhost",
+        hostname: "api--feature-after-rename--repo.localhost",
         scriptName: "api",
       }),
     ]);
@@ -1020,7 +1098,7 @@ describe("runAsyncWorktreeBootstrap", () => {
         branchName: "feature-collision-service",
         scriptName: "app-server",
         daemonPort: 6767,
-        routeStore,
+        serviceProxy: routeStore,
         runtimeStore,
         terminalManager: createStubTerminalManager(createTerminalCalls),
       }),
@@ -1029,7 +1107,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     expect(createTerminalCalls).toHaveLength(0);
     expect(routeStore.listRoutes()).toEqual([]);
     expect(
-      routeStore.getRouteEntry("app-server.feature-collision-service.repo.localhost"),
+      routeStore.getRouteEntry("app-server--feature-collision-service--repo.localhost"),
     ).toBeNull();
 
     writeFileSync(
@@ -1055,7 +1133,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       branchName: "feature-collision-service",
       scriptName: "app-server",
       daemonPort: 6767,
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager: createStubTerminalManager(createTerminalCalls),
     });
@@ -1108,7 +1186,7 @@ describe("runAsyncWorktreeBootstrap", () => {
       scriptName: "web",
       daemonPort: 6767,
       daemonListenHost: "100.64.0.20",
-      routeStore,
+      serviceProxy: routeStore,
       runtimeStore,
       terminalManager: createStubTerminalManager(createTerminalCalls),
     });
@@ -1116,7 +1194,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     expect(createTerminalCalls).toHaveLength(1);
     expect(createTerminalCalls[0]?.env?.HOST).toBe("0.0.0.0");
     expect(createTerminalCalls[0]?.env?.PASEO_URL).toBe(
-      "http://web.feature-remote-service.repo.localhost:6767",
+      "http://web--feature-remote-service--repo.localhost:6767",
     );
   });
 });

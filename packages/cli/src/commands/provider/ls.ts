@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import type { CommandOptions, ListResult, OutputSchema } from "../../output/index.js";
-import { AGENT_PROVIDER_DEFINITIONS, type ProviderSnapshotEntry } from "@getpaseo/server";
+import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
+import { AGENT_PROVIDER_DEFINITIONS } from "@getpaseo/protocol/provider-manifest";
 import { tryConnectToDaemon } from "../../utils/client.js";
 
 export interface ProviderListItem {
@@ -17,7 +18,7 @@ const PROVIDERS: ProviderListItem[] = AGENT_PROVIDER_DEFINITIONS.map((def) => ({
   provider: def.id,
   label: def.label,
   status: "available",
-  enabled: "Enabled",
+  enabled: def.enabledByDefault === false ? "Disabled" : "Enabled",
   defaultMode: def.defaultModeId ?? "-",
   modes: def.modes.length > 0 ? def.modes.map((m) => m.label).join(", ") : "-",
 }));

@@ -11,8 +11,8 @@
 // while re-throwing any genuine error (host disconnected, timeout) so it still
 // surfaces to the user instead of being silently treated as "try webhook".
 import type { AutomationKind } from "@/lib/automations/automation-model";
-import type { ScheduleRun, StoredSchedule } from "@server/server/schedule/types";
-import type { WebhookTrigger } from "@server/server/trigger/types";
+import type { ScheduleRun, StoredSchedule } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 
 export type AutomationDetailRecord =
   | { kind: "schedule"; record: StoredSchedule; runs: ScheduleRun[] }

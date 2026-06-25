@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProviderSnapshotEntry } from "@server/server/agent/agent-sdk-types";
+import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import { buildSelectableProviderOptions, isSelectableProviderEntry } from "./provider-definitions";
 
 function entry(overrides: Partial<ProviderSnapshotEntry>): ProviderSnapshotEntry {

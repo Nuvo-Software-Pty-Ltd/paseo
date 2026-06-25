@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { DaemonClient } from "@server/client/daemon-client";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 import { useSessionStore, type Agent, type WorkspaceDescriptor } from "@/stores/session-store";
 import {
@@ -25,6 +25,7 @@ function workspace(
     workspaceKind: input.workspaceKind ?? "checkout",
     name: input.name ?? "main",
     status: input.status ?? "running",
+    statusEnteredAt: input.statusEnteredAt ?? null,
     archivingAt: input.archivingAt ?? null,
     diffStat: input.diffStat ?? null,
     scripts: input.scripts ?? [],

@@ -1,18 +1,25 @@
-import { beforeAll, beforeEach, describe, test, expect } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, test, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 
-import { OpenCodeAgentClient } from "./opencode-agent.js";
-import { isProviderAvailable } from "../../daemon-e2e/agent-configs.js";
+import { OpenCodeServerManager } from "./opencode/server-manager.js";
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
+import {
+  canRunRealProvider,
+  createRealProviderClient,
+  getRealProviderConfig,
+} from "../../daemon-e2e/real-provider-test-config.js";
+
+const OPENCODE_REAL_TEST_MODEL = getRealProviderConfig("opencode").model;
 
 describe("OpenCode reasoning dedup", () => {
   let canRun = false;
+  const logger = pino({ level: "silent" });
 
   beforeAll(async () => {
-    canRun = await isProviderAvailable("opencode");
+    canRun = await canRunRealProvider("opencode");
   });
 
   beforeEach((context) => {
@@ -21,16 +28,19 @@ describe("OpenCode reasoning dedup", () => {
     }
   });
 
+  afterAll(async () => {
+    await OpenCodeServerManager.getInstance(logger).shutdown();
+  });
+
   test("reasoning content is not duplicated as assistant_message", async () => {
     const cwd = mkdtempSync(path.join(tmpdir(), "opencode-reasoning-dedup-"));
-    const logger = pino({ level: "silent" });
-    const client = new OpenCodeAgentClient(logger);
+    const client = createRealProviderClient("opencode", logger);
 
     try {
       const session = await client.createSession({
         provider: "opencode",
         cwd,
-        model: "opencode/gpt-5-nano",
+        model: OPENCODE_REAL_TEST_MODEL,
         modeId: "build",
       });
 

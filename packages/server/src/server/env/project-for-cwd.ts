@@ -1,4 +1,4 @@
-import type { ProjectCheckoutLitePayload } from "../../shared/messages.js";
+import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import { classifyDirectoryForProjectMembership } from "../workspace-registry-model.js";
 import type { PersistedProjectRecord, ProjectRegistry } from "../workspace-registry.js";
 

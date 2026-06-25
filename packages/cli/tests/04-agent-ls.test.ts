@@ -50,6 +50,8 @@ try {
     assert(result.stdout.includes("--all"), "help should mention --all flag");
     assert(result.stdout.includes("-g"), "help should mention -g flag");
     assert(result.stdout.includes("--global"), "help should mention --global flag");
+    assert(result.stdout.includes("across all directories"), "help should describe global scope");
+    assert(!result.stdout.includes("Legacy no-op"), "help should not describe -g as a no-op");
     assert(result.stdout.includes("--host"), "help should mention --host option");
     assert(!result.stdout.includes("--ui"), "help should not mention --ui");
     console.log("✓ paseo ls --help shows options\n");
@@ -70,6 +72,8 @@ try {
       output.toLowerCase().includes("connect") ||
       output.toLowerCase().includes("cannot");
     assert(hasError, "error message should mention connection issue");
+    assert(output.includes("--host <host:port>"), "error message should mention --host");
+    assert(output.includes("PASEO_HOST"), "error message should mention PASEO_HOST");
     console.log("✓ paseo ls handles daemon not running\n");
   }
 

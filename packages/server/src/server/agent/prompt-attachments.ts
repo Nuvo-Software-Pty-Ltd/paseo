@@ -1,4 +1,4 @@
-import type { AgentAttachment } from "../../shared/messages.js";
+import type { AgentAttachment } from "@getpaseo/protocol/messages";
 
 const REVIEW_LINE_MARKERS = { add: "+", remove: "-", context: " " } as const;
 
@@ -53,6 +53,14 @@ export function renderPromptAttachmentAsText(attachment: AgentAttachment): strin
         }
       });
       return lines.join("\n");
+    }
+    case "uploaded_file": {
+      return [
+        `Uploaded file: ${attachment.fileName}`,
+        `Path: ${attachment.path}`,
+        `MIME: ${attachment.mimeType}`,
+        `Size: ${attachment.size} bytes`,
+      ].join("\n");
     }
     default:
       throw new Error("unreachable");

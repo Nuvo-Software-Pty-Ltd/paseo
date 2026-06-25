@@ -39,6 +39,7 @@ function makeWorkspace(projects: ProjectDescriptor[] | undefined): WorkspaceDesc
     workspaceKind: "worktree",
     name: "Container One",
     status: "done",
+    statusEnteredAt: null,
     archivingAt: null,
     diffStat: null,
     scripts: [],

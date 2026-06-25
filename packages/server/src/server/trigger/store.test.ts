@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { FileBackedWebhookTriggerStore } from "./store.js";
-import type { WebhookTrigger } from "./types.js";
+import type { WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 
 function baseTrigger(
   overrides: Partial<Omit<WebhookTrigger, "id">> = {},

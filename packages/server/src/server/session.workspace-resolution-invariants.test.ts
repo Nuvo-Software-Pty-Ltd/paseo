@@ -9,15 +9,17 @@ import path from "node:path";
 import { expect, test, vi } from "vitest";
 
 import { Session, type SessionOptions } from "./session.js";
-import type { SessionOutboundMessage } from "../shared/messages.js";
+import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { createNoopWorkspaceGitService } from "./test-utils/workspace-git-service-stub.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
+import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import {
   createPersistedProjectRecord,
   createPersistedWorkspaceRecord,
   type PersistedProjectRecord,
   type PersistedWorkspaceRecord,
 } from "./workspace-registry.js";
+import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 
 interface Harness {
   session: Session;
@@ -137,6 +139,7 @@ function createHarness(input: {
         workspaces.delete(id);
       },
     }),
+    filesystem: { isDirectory: async () => true },
     chatService: createStub<SessionOptions["chatService"]>({}),
     scheduleService: createStub<SessionOptions["scheduleService"]>({}),
     loopService: createStub<SessionOptions["loopService"]>({}),
@@ -146,6 +149,7 @@ function createHarness(input: {
         unsubscribe: () => {},
       }),
       scheduleRefreshForCwd: () => {},
+      onWorkspaceStateMayHaveChanged: () => {},
       getMetrics: () => ({
         checkoutDiffTargetCount: 0,
         checkoutDiffSubscriptionCount: 0,
@@ -162,6 +166,7 @@ function createHarness(input: {
     mcpBaseUrl: null,
     stt: null,
     tts: null,
+    providerSnapshotManager: createProviderSnapshotManagerStub().manager,
     terminalManager: null,
   });
 
@@ -200,7 +205,7 @@ const PARENT_CHILD = path.join(PARENT, "child");
 
 function gitWorkspace(rootPath: string, archivedAt: string | null = null) {
   return createPersistedWorkspaceRecord({
-    workspaceId: rootPath,
+    workspaceId: `ws-${path.basename(rootPath) || "root"}`,
     projectId: rootPath,
     cwd: rootPath,
     kind: "local_checkout",
@@ -213,7 +218,7 @@ function gitWorkspace(rootPath: string, archivedAt: string | null = null) {
 
 function dirWorkspace(cwd: string, archivedAt: string | null = null) {
   return createPersistedWorkspaceRecord({
-    workspaceId: cwd,
+    workspaceId: `ws-${path.basename(cwd) || "root"}`,
     projectId: cwd,
     cwd,
     kind: "directory",
@@ -248,6 +253,17 @@ function dirProject(rootPath: string, archivedAt: string | null = null) {
   });
 }
 
+function workspaceByCwd(
+  workspaces: Map<string, PersistedWorkspaceRecord>,
+  cwd: string,
+): PersistedWorkspaceRecord | null {
+  return Array.from(workspaces.values()).find((workspace) => workspace.cwd === cwd) ?? null;
+}
+
+function hasWorkspaceCwd(workspaces: Map<string, PersistedWorkspaceRecord>, cwd: string): boolean {
+  return workspaceByCwd(workspaces, cwd) !== null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // S1. Open a fresh git repo: creates a workspace at the canonical root.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,7 +274,7 @@ test("S1: open fresh git repo creates workspace at canonical root", async () => 
   expect(resp?.error).toBeNull();
   expect(resp?.workspace?.workspaceDirectory).toBe(FOO);
   expect(resp?.workspace?.workspaceKind).toBe("local_checkout");
-  expect(h.workspaces.has(FOO)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, FOO)).toBe(true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -272,7 +288,7 @@ test("S2: open fresh non-git directory creates a directory workspace at exact pa
   expect(resp?.error).toBeNull();
   expect(resp?.workspace?.workspaceDirectory).toBe(BAR);
   expect(resp?.workspace?.workspaceKind).toBe("directory");
-  expect(h.workspaces.has(BAR)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, BAR)).toBe(true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,9 +303,9 @@ test("S3: re-open active workspace by exact path returns the same record", async
   });
   await openProject(h.session, FOO);
   const resp = getOpenResponse(h.emitted, "req-1");
-  expect(resp?.workspace?.id).toBe(FOO);
+  expect(resp?.workspace?.id).toBe(workspaceByCwd(h.workspaces, FOO)?.workspaceId);
   expect(h.workspaces.size).toBe(1);
-  expect(h.workspaces.get(FOO)?.archivedAt).toBeNull();
+  expect(workspaceByCwd(h.workspaces, FOO)?.archivedAt).toBeNull();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -304,7 +320,7 @@ test("S4: open subdir of active git workspace returns the repo-root workspace", 
   });
   await openProject(h.session, FOO_SUB);
   const resp = getOpenResponse(h.emitted, "req-1");
-  expect(resp?.workspace?.id).toBe(FOO);
+  expect(resp?.workspace?.id).toBe(workspaceByCwd(h.workspaces, FOO)?.workspaceId);
   expect(h.workspaces.size).toBe(1);
 });
 
@@ -320,8 +336,8 @@ test("S5: open subdir of active non-git directory creates a SEPARATE workspace",
   await openProject(h.session, BAR_BAZ);
   const resp = getOpenResponse(h.emitted, "req-1");
   expect(resp?.workspace?.workspaceDirectory).toBe(BAR_BAZ);
-  expect(h.workspaces.has(BAR)).toBe(true);
-  expect(h.workspaces.has(BAR_BAZ)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, BAR)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, BAR_BAZ)).toBe(true);
   expect(h.workspaces.size).toBe(2);
 });
 
@@ -337,7 +353,7 @@ test("S6: re-opening an archived git workspace by exact path UNARCHIVES it", asy
     gitRoots: [TOOLBOX],
   });
   await openProject(h.session, TOOLBOX);
-  expect(h.workspaces.get(TOOLBOX)?.archivedAt).toBeNull();
+  expect(workspaceByCwd(h.workspaces, TOOLBOX)?.archivedAt).toBeNull();
   expect(h.projects.get(TOOLBOX)?.archivedAt).toBeNull();
 });
 
@@ -353,8 +369,8 @@ test("S7: open nested git repo (own .git) creates a SEPARATE workspace at the in
   await openProject(h.session, FOO_SUB);
   const resp = getOpenResponse(h.emitted, "req-1");
   expect(resp?.workspace?.workspaceDirectory).toBe(FOO_SUB);
-  expect(h.workspaces.has(FOO)).toBe(true);
-  expect(h.workspaces.has(FOO_SUB)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, FOO)).toBe(true);
+  expect(hasWorkspaceCwd(h.workspaces, FOO_SUB)).toBe(true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,8 +385,8 @@ test("S8: open child of archived non-git ancestor creates fresh workspace; ances
     projects: [dirProject(USERS_DEVELOPER, archivedAt)],
   });
   await openProject(h.session, USERS_PROJECT);
-  expect(h.workspaces.get(USERS_DEVELOPER)?.archivedAt).toBe(archivedAt);
-  expect(h.workspaces.has(USERS_PROJECT)).toBe(true);
+  expect(workspaceByCwd(h.workspaces, USERS_DEVELOPER)?.archivedAt).toBe(archivedAt);
+  expect(hasWorkspaceCwd(h.workspaces, USERS_PROJECT)).toBe(true);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,7 +402,7 @@ test("S9: opening child of archived git workspace does NOT auto-unarchive the pa
     gitRoots: [TOOLBOX],
   });
   await openProject(h.session, TOOLBOX_FLOMO);
-  expect(h.workspaces.get(TOOLBOX)?.archivedAt).toBe(archivedAt);
+  expect(workspaceByCwd(h.workspaces, TOOLBOX)?.archivedAt).toBe(archivedAt);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -410,8 +426,8 @@ test("S10: opening a git repo nested inside an archived non-git directory create
   expect(resp?.error).toBeNull();
   expect(resp?.workspace?.workspaceDirectory).toBe(SOME_GIT_REPO);
   expect(resp?.workspace?.workspaceKind).toBe("local_checkout");
-  expect(h.workspaces.has(SOME_GIT_REPO)).toBe(true);
-  expect(h.workspaces.get(PROJECTS)?.archivedAt).toBe(archivedAt);
+  expect(hasWorkspaceCwd(h.workspaces, SOME_GIT_REPO)).toBe(true);
+  expect(workspaceByCwd(h.workspaces, PROJECTS)?.archivedAt).toBe(archivedAt);
   expect(h.projects.get(PROJECTS)?.archivedAt).toBe(archivedAt);
 });
 
@@ -430,28 +446,28 @@ test("S11: re-opening an archived project by exact path unarchives project + wor
   await openProject(h.session, TOOLBOX);
   const resp = getOpenResponse(h.emitted, "req-1");
   expect(resp?.error).toBeNull();
-  expect(resp?.workspace?.id).toBe(TOOLBOX);
+  expect(resp?.workspace?.id).toBe(workspaceByCwd(h.workspaces, TOOLBOX)?.workspaceId);
   expect(resp?.workspace?.projectId).toBe(TOOLBOX);
   expect(h.workspaces.size).toBe(1);
   expect(h.projects.size).toBe(1);
-  expect(h.workspaces.get(TOOLBOX)?.archivedAt).toBeNull();
+  expect(workspaceByCwd(h.workspaces, TOOLBOX)?.archivedAt).toBeNull();
   expect(h.projects.get(TOOLBOX)?.archivedAt).toBeNull();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // S12. Prefix-fallback resolver must not surface an archived ancestor: looking
 //      up a child cwd whose only matching record is an archived parent should
-//      return null (not the archived parent).
+//      return null (not the archived parent). The behavior lives in
+//      `resolveWorkspaceIdForPath` now; this invariant keeps archive-by-path
+//      from accidentally resolving into an archived workspace subtree.
 // ─────────────────────────────────────────────────────────────────────────────
-test("S12: findWorkspaceByDirectory does not return archived ancestor via prefix fallback", async () => {
+test("S12: resolveWorkspaceIdForPath does not return archived ancestor via prefix fallback", async () => {
   const archivedAt = "2026-04-22T13:08:05.400Z";
   const h = createHarness({
     workspaces: [dirWorkspace(PARENT, archivedAt)],
     projects: [dirProject(PARENT, archivedAt)],
   });
-  const found = await asInternals<{
-    findWorkspaceByDirectory(cwd: string): Promise<unknown>;
-  }>(h.session).findWorkspaceByDirectory(PARENT_CHILD);
+  const found = resolveWorkspaceIdForPath(PARENT_CHILD, Array.from(h.workspaces.values()));
   expect(found).toBeNull();
 });
 

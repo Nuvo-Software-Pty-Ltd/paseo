@@ -3,20 +3,14 @@ import type { WebSocketRoute } from "@playwright/test";
 import { expect, test, type Page } from "./fixtures";
 import { gotoAppShell, openSettings } from "./helpers/app";
 import {
-  archiveAgentFromDaemon,
-  connectArchiveTabDaemonClient,
   createIdleAgent,
   expectWorkspaceTabHidden,
   expectWorkspaceTabVisible,
   openWorkspaceWithAgents,
 } from "./helpers/archive-tab";
-import {
-  archiveLocalWorkspaceFromDaemon,
-  connectNewWorkspaceDaemonClient,
-  openProjectViaDaemon,
-} from "./helpers/new-workspace";
 import { expectComposerVisible } from "./helpers/composer";
-import { createTempGitRepo } from "./helpers/workspace";
+import { daemonWsRoutePattern, getE2EDaemonPort } from "./helpers/daemon-port";
+import { seedWorkspace } from "./helpers/seed-client";
 import {
   getVisibleWorkspaceAgentTabIds,
   expectOnlyWorkspaceAgentTabsVisible,
@@ -37,12 +31,10 @@ import {
   expectWorkspaceDeckEntryCount,
 } from "./helpers/workspace-ui";
 import { clickSettingsBackToWorkspace } from "./helpers/settings";
+import { getServerId } from "./helpers/server-id";
+import { injectDesktopBridge } from "./helpers/desktop-updates";
 
 const LOADING_WORKSPACE_TEXT_PATTERN = /Loading workspace/i;
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 async function expectNoLoadingWorkspacePane(
   page: Page,
@@ -88,11 +80,48 @@ async function closeFirstVisibleDraftTab(page: Page): Promise<void> {
   await closeButton.first().click();
 }
 
-async function installDaemonWebSocketGate(page: Page, daemonPort: string) {
+async function openWorkspaceThroughApp(
+  page: Page,
+  input: {
+    serverId: string;
+    workspace: Awaited<ReturnType<typeof seedWorkspace>>;
+  },
+): Promise<void> {
+  await gotoAppShell(page);
+  await waitForSidebarHydration(page);
+  await switchWorkspaceViaSidebar({
+    page,
+    serverId: input.serverId,
+    workspaceId: input.workspace.workspaceId,
+  });
+  await waitForWorkspaceTabsVisible(page);
+  await expectWorkspaceLocation(page, input);
+}
+
+async function expectWorkspaceLocation(
+  page: Page,
+  input: {
+    serverId: string;
+    workspace: Awaited<ReturnType<typeof seedWorkspace>>;
+  },
+): Promise<void> {
+  await expect(page).toHaveURL(
+    buildHostWorkspaceRoute(input.serverId, input.workspace.workspaceId),
+    {
+      timeout: 30_000,
+    },
+  );
+  await expectWorkspaceHeader(page, {
+    title: input.workspace.workspaceName,
+    subtitle: input.workspace.projectDisplayName,
+  });
+}
+
+async function installDaemonWebSocketGate(page: Page) {
   let acceptingConnections = true;
   const activeSockets = new Set<WebSocketRoute>();
 
-  await page.routeWebSocket(new RegExp(`:${escapeRegex(daemonPort)}\\b`), (ws) => {
+  await page.routeWebSocket(daemonWsRoutePattern(), (ws) => {
     if (!acceptingConnections) {
       void ws.close({ code: 1008, reason: "Blocked by workspace reconnect regression test." });
       return;
@@ -166,36 +195,22 @@ test.describe("Workspace navigation regression", () => {
   });
 
   test("keeps the workspace rendered while reconnecting to the host", async ({ page }) => {
-    const serverId = process.env.E2E_SERVER_ID;
-    const daemonPort = process.env.E2E_DAEMON_PORT;
-    if (!serverId) {
-      throw new Error("E2E_SERVER_ID is not set.");
-    }
-    if (!daemonPort) {
-      throw new Error("E2E_DAEMON_PORT is not set.");
-    }
+    const serverId = getServerId();
 
-    const daemonGate = await installDaemonWebSocketGate(page, daemonPort);
+    const daemonGate = await installDaemonWebSocketGate(page);
 
-    const workspaceClient = await connectNewWorkspaceDaemonClient();
-    const archiveClient = await connectArchiveTabDaemonClient();
-    const workspaceIds = new Set<string>();
-    const agentIds: string[] = [];
-    const repo = await createTempGitRepo("workspace-reconnect-");
+    const workspace = await seedWorkspace({ repoPrefix: "workspace-reconnect-" });
 
     try {
-      const workspace = await openProjectViaDaemon(workspaceClient, repo.path);
-      workspaceIds.add(workspace.workspaceId);
-
-      const agent = await createIdleAgent(archiveClient, {
-        cwd: repo.path,
+      const agent = await createIdleAgent(workspace.client, {
+        cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
         title: `workspace-reconnect-${Date.now()}`,
       });
-      agentIds.push(agent.id);
 
       await gotoAppShell(page);
       await waitForSidebarHydration(page);
-      await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.cwd));
+      await page.goto(buildHostAgentDetailRoute(serverId, agent.id, agent.workspaceId));
       await page.waitForURL(
         (url) => url.pathname.includes("/workspace/") && !url.searchParams.has("open"),
         { timeout: 60_000 },
@@ -231,31 +246,16 @@ test.describe("Workspace navigation regression", () => {
       await expectComposerVisible(page);
     } finally {
       daemonGate.restore();
-      for (const agentId of agentIds) {
-        await archiveAgentFromDaemon(archiveClient, agentId).catch(() => undefined);
-      }
-      for (const workspaceId of workspaceIds) {
-        await archiveLocalWorkspaceFromDaemon(workspaceClient, workspaceId).catch(() => undefined);
-      }
-      await archiveClient.close().catch(() => undefined);
-      await workspaceClient.close().catch(() => undefined);
-      await repo.cleanup();
+      await workspace.cleanup();
     }
   });
 
   test("cold offline workspace route gates the screen interior but keeps settings reachable", async ({
     page,
   }) => {
-    const serverId = process.env.E2E_SERVER_ID;
-    const daemonPort = process.env.E2E_DAEMON_PORT;
-    if (!serverId) {
-      throw new Error("E2E_SERVER_ID is not set.");
-    }
-    if (!daemonPort) {
-      throw new Error("E2E_DAEMON_PORT is not set.");
-    }
+    const serverId = getServerId();
 
-    await page.routeWebSocket(new RegExp(`:${escapeRegex(daemonPort)}\\b`), async (ws) => {
+    await page.routeWebSocket(daemonWsRoutePattern(), async (ws) => {
       await ws.close({ code: 1008, reason: "Blocked cold offline workspace route test." });
     });
 
@@ -272,22 +272,12 @@ test.describe("Workspace navigation regression", () => {
   });
 
   test("cold workspace URL keeps sidebar workspace navigation functional", async ({ page }) => {
-    const serverId = process.env.E2E_SERVER_ID;
-    if (!serverId) {
-      throw new Error("E2E_SERVER_ID is not set.");
-    }
+    const serverId = getServerId();
 
-    const workspaceClient = await connectNewWorkspaceDaemonClient();
-    const workspaceIds = new Set<string>();
-    const firstRepo = await createTempGitRepo("workspace-cold-url-a-");
-    const secondRepo = await createTempGitRepo("workspace-cold-url-b-");
+    const firstWorkspace = await seedWorkspace({ repoPrefix: "workspace-cold-url-a-" });
+    const secondWorkspace = await seedWorkspace({ repoPrefix: "workspace-cold-url-b-" });
 
     try {
-      const firstWorkspace = await openProjectViaDaemon(workspaceClient, firstRepo.path);
-      const secondWorkspace = await openProjectViaDaemon(workspaceClient, secondRepo.path);
-      workspaceIds.add(firstWorkspace.workspaceId);
-      workspaceIds.add(secondWorkspace.workspaceId);
-
       await page.goto(buildHostWorkspaceRoute(serverId, firstWorkspace.workspaceId));
       await waitForSidebarHydration(page);
       await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, firstWorkspace.workspaceId), {
@@ -304,45 +294,66 @@ test.describe("Workspace navigation regression", () => {
         timeout: 30_000,
       });
     } finally {
-      for (const workspaceId of workspaceIds) {
-        await archiveLocalWorkspaceFromDaemon(workspaceClient, workspaceId).catch(() => undefined);
-      }
-      await workspaceClient.close().catch(() => undefined);
-      await secondRepo.cleanup();
-      await firstRepo.cleanup();
+      await secondWorkspace.cleanup();
+      await firstWorkspace.cleanup();
+    }
+  });
+
+  test("refresh keeps the user on the same workspace route", async ({ page }) => {
+    const serverId = getServerId();
+    const daemonGate = await installDaemonWebSocketGate(page);
+    const workspace = await seedWorkspace({ repoPrefix: "workspace-refresh-route-" });
+
+    try {
+      const agent = await createIdleAgent(workspace.client, {
+        cwd: workspace.repoPath,
+        workspaceId: workspace.workspaceId,
+        title: `workspace-refresh-route-${Date.now()}`,
+      });
+      await injectDesktopBridge(page, {
+        serverId,
+        manageBuiltInDaemon: true,
+        hangDaemonStart: true,
+        daemonListen: `127.0.0.1:${getE2EDaemonPort()}`,
+      });
+      await openWorkspaceThroughApp(page, { serverId, workspace });
+      await waitForWorkspaceTabsVisible(page);
+      await expectWorkspaceTabVisible(page, agent.id);
+      await expectWorkspaceLocation(page, { serverId, workspace });
+
+      await daemonGate.drop();
+      await page.reload();
+      await expect(page.getByTestId("startup-splash")).toBeVisible({ timeout: 30_000 });
+      daemonGate.restore();
+      await waitForSidebarHydration(page);
+
+      await expectWorkspaceLocation(page, { serverId, workspace });
+      await waitForWorkspaceTabsVisible(page);
+    } finally {
+      daemonGate.restore();
+      await workspace.cleanup();
     }
   });
 
   test("sidebar navigation and reload keep workspace selection and tabs aligned", async ({
     page,
   }) => {
-    const serverId = process.env.E2E_SERVER_ID;
-    if (!serverId) {
-      throw new Error("E2E_SERVER_ID is not set.");
-    }
+    const serverId = getServerId();
 
-    const workspaceClient = await connectNewWorkspaceDaemonClient();
-    const archiveClient = await connectArchiveTabDaemonClient();
-    const workspaceIds = new Set<string>();
-    const agentIds: string[] = [];
-    const firstRepo = await createTempGitRepo("workspace-nav-reg-a-");
-    const secondRepo = await createTempGitRepo("workspace-nav-reg-b-");
+    const firstWorkspace = await seedWorkspace({ repoPrefix: "workspace-nav-reg-a-" });
+    const secondWorkspace = await seedWorkspace({ repoPrefix: "workspace-nav-reg-b-" });
 
     try {
-      const firstWorkspace = await openProjectViaDaemon(workspaceClient, firstRepo.path);
-      const secondWorkspace = await openProjectViaDaemon(workspaceClient, secondRepo.path);
-      workspaceIds.add(firstWorkspace.workspaceId);
-      workspaceIds.add(secondWorkspace.workspaceId);
-
-      const firstAgent = await createIdleAgent(archiveClient, {
-        cwd: firstRepo.path,
+      const firstAgent = await createIdleAgent(firstWorkspace.client, {
+        cwd: firstWorkspace.repoPath,
+        workspaceId: firstWorkspace.workspaceId,
         title: `workspace-nav-a-${Date.now()}`,
       });
-      const secondAgent = await createIdleAgent(archiveClient, {
-        cwd: secondRepo.path,
+      const secondAgent = await createIdleAgent(secondWorkspace.client, {
+        cwd: secondWorkspace.repoPath,
+        workspaceId: secondWorkspace.workspaceId,
         title: `workspace-nav-b-${Date.now()}`,
       });
-      agentIds.push(firstAgent.id, secondAgent.id);
 
       await gotoAppShell(page);
       await waitForSidebarHydration(page);
@@ -358,7 +369,7 @@ test.describe("Workspace navigation regression", () => {
       await switchWorkspaceViaSidebar({
         page,
         serverId,
-        targetWorkspacePath: firstWorkspace.workspaceId,
+        workspaceId: firstWorkspace.workspaceId,
       });
       await waitForWorkspaceTabsVisible(page);
       await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, firstWorkspace.workspaceId), {
@@ -390,7 +401,7 @@ test.describe("Workspace navigation regression", () => {
       await switchWorkspaceViaSidebar({
         page,
         serverId,
-        targetWorkspacePath: secondWorkspace.workspaceId,
+        workspaceId: secondWorkspace.workspaceId,
       });
       await waitForWorkspaceTabsVisible(page);
       await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, secondWorkspace.workspaceId), {
@@ -454,7 +465,7 @@ test.describe("Workspace navigation regression", () => {
       await switchWorkspaceViaSidebar({
         page,
         serverId,
-        targetWorkspacePath: firstWorkspace.workspaceId,
+        workspaceId: firstWorkspace.workspaceId,
       });
       await waitForWorkspaceTabsVisible(page);
       await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, firstWorkspace.workspaceId), {
@@ -487,16 +498,8 @@ test.describe("Workspace navigation regression", () => {
         `workspace-tab-agent_${firstAgent.id}`,
       ]);
     } finally {
-      for (const agentId of agentIds) {
-        await archiveAgentFromDaemon(archiveClient, agentId).catch(() => undefined);
-      }
-      for (const workspaceId of workspaceIds) {
-        await archiveLocalWorkspaceFromDaemon(workspaceClient, workspaceId).catch(() => undefined);
-      }
-      await archiveClient.close().catch(() => undefined);
-      await workspaceClient.close().catch(() => undefined);
-      await secondRepo.cleanup();
-      await firstRepo.cleanup();
+      await secondWorkspace.cleanup();
+      await firstWorkspace.cleanup();
     }
   });
 });

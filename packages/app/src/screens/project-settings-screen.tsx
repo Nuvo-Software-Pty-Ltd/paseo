@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Image, Pressable, Text, TextInput, View } from "react-native";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+import { Pressable, Text, TextInput, View } from "react-native";
 import { router } from "expo-router";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronDown, MoreVertical, Plus } from "lucide-react-native";
-import { useProjectIconQuery } from "@/hooks/use-project-icon-query";
+import { ArrowLeft, Check, ChevronDown, MoreVertical, Pencil, Plus, X } from "lucide-react-native";
+import { ProjectIconView } from "@/components/project-icon-view";
 import type {
   PaseoConfigRaw,
   PaseoConfigRevision,
   ProjectConfigRpcError,
-} from "@server/shared/messages";
-import type { DaemonClient } from "@server/client/daemon-client";
+} from "@getpaseo/protocol/messages";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -22,13 +24,15 @@ import { Alert } from "@/components/ui/alert";
 import { ExternalLink } from "@/components/ui/external-link";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Switch } from "@/components/ui/switch";
-import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
+import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
+import { SettingsTextAreaCard } from "@/components/settings-textarea";
 import { SettingsGroup } from "@/screens/settings/settings-group";
 import { SettingsSection } from "@/screens/settings/settings-section";
 import { ScopedEnvVarsEditor } from "@/components/scoped-env-vars-editor";
 import { ENV_VARS_GROUP_INFO, ENV_VARS_GROUP_TITLE } from "@/lib/env-vars-copy";
 import { settingsStyles } from "@/styles/settings";
 import { useProjects } from "@/hooks/use-projects";
+import { useProjectIconDataByProjectKey } from "@/projects/project-icons";
 import { useHostRuntimeClient, useHostRuntimeSnapshot } from "@/runtime/host-runtime";
 import { useToast } from "@/contexts/toast-context";
 import { confirmDialog } from "@/utils/confirm-dialog";
@@ -49,52 +53,34 @@ const SCRIPT_SERVICE_TYPE = "service";
 const ICON_SIZE = 14;
 
 interface MetadataPromptField {
-  title: string;
-  placeholder: string;
+  titleKey: string;
+  placeholderKey: string;
   sectionTestID: string;
   inputTestID: string;
 }
 
 const METADATA_PROMPT_FIELDS: Record<MetadataPromptKey, MetadataPromptField> = {
-  agentTitle: {
-    title: "Agent titles",
-    placeholder: "Keep titles imperative and under 40 characters",
-    sectionTestID: "metadata-prompt-agent-title-section",
-    inputTestID: "metadata-prompt-agent-title-input",
-  },
   branchName: {
-    title: "Branch names",
-    placeholder: "Prefix branches with feat/ or fix/, mb/ for personal branches",
+    titleKey: "settings.project.metadata.branchName",
+    placeholderKey: "settings.project.metadata.branchNamePlaceholder",
     sectionTestID: "metadata-prompt-branch-name-section",
     inputTestID: "metadata-prompt-branch-name-input",
   },
   commitMessage: {
-    title: "Commit messages",
-    placeholder: "Use Conventional Commits with a scope",
+    titleKey: "settings.project.metadata.commitMessage",
+    placeholderKey: "settings.project.metadata.commitMessagePlaceholder",
     sectionTestID: "metadata-prompt-commit-message-section",
     inputTestID: "metadata-prompt-commit-message-input",
   },
   pullRequest: {
-    title: "Pull requests",
-    placeholder: "Lead with a one-paragraph summary, include a Test plan section",
+    titleKey: "settings.project.metadata.pullRequest",
+    placeholderKey: "settings.project.metadata.pullRequestPlaceholder",
     sectionTestID: "metadata-prompt-pull-request-section",
     inputTestID: "metadata-prompt-pull-request-input",
   },
 };
 
-const WORKTREE_GROUP_INFO =
-  "Commands that run when a worktree is created or torn down for this project";
 const WORKTREE_DOCS_URL = "https://paseo.sh/docs/worktrees";
-const WORKTREE_DOCS_TOOLTIP =
-  "See docs for more details and the environment variables available to these commands";
-const SCRIPTS_GROUP_INFO =
-  "Long-running services and one-off commands you can launch from any agent in this project";
-const METADATA_GROUP_INFO =
-  "Project-specific instructions injected into the AI prompts Paseo uses to generate metadata — use them to enforce your team's conventions like branch naming, commit style, or PR format";
-
-const NO_TARGET_MESSAGE = "We don't have an editable copy of this project on any connected host.";
-
-const HOST_SWITCHER_LABEL = "Switch host";
 
 type ReadProjectConfigData = Awaited<ReturnType<DaemonClient["readProjectConfig"]>>;
 
@@ -158,34 +144,36 @@ function navigateBackToProjects() {
 }
 
 function NoEditableTarget() {
+  const { t } = useTranslation();
   return (
     <View style={styles.noTargetContainer}>
       <BackToProjectsButton />
-      <Text style={styles.noTargetText}>{NO_TARGET_MESSAGE}</Text>
+      <Text style={styles.noTargetText}>{t("settings.project.noEditableTarget")}</Text>
       <Button
         testID="project-settings-back-button"
         onPress={navigateBackToProjects}
         variant="secondary"
         size="md"
       >
-        Back to projects
+        {t("settings.project.backToProjects")}
       </Button>
     </View>
   );
 }
 
 function BackToProjectsButton() {
+  const { t } = useTranslation();
   return (
     <Button
       testID="project-settings-back-link"
-      accessibilityLabel="Back to projects"
+      accessibilityLabel={t("settings.project.backToProjects")}
       onPress={navigateBackToProjects}
       variant="ghost"
       size="sm"
       leftIcon={ArrowLeft}
       style={styles.backButton}
     >
-      Back to projects
+      {t("settings.project.backToProjects")}
     </Button>
   );
 }
@@ -219,6 +207,21 @@ function ProjectSettingsBody({
   });
 
   const data = readQuery.data;
+  const projectIconTargets = useMemo(
+    () => [
+      {
+        serverId: selectedHost.serverId,
+        projectKey: project.projectKey,
+        iconWorkingDir: selectedHost.repoRoot,
+      },
+    ],
+    [project.projectKey, selectedHost.repoRoot, selectedHost.serverId],
+  );
+  const projectIconDataByKey = useProjectIconDataByProjectKey({
+    serverId: null,
+    projects: projectIconTargets,
+  });
+  const projectIconDataUri = projectIconDataByKey.get(project.projectKey) ?? null;
   const loadedConfig: PaseoConfigRaw | null = data?.ok ? (data.config ?? {}) : null;
   const loadedRevision: PaseoConfigRevision | null = data?.ok ? data.revision : null;
   const readError: ProjectConfigRpcError | null = data && !data.ok ? data.error : null;
@@ -235,8 +238,12 @@ function ProjectSettingsBody({
 
       <View style={styles.headerBlock}>
         <View style={styles.titleRow}>
-          <ProjectTitleIcon host={selectedHost} projectName={project.projectName} />
-          <Text style={styles.projectTitle}>{project.projectName}</Text>
+          <ProjectTitleIcon
+            iconDataUri={projectIconDataUri}
+            projectName={project.projectName}
+            projectKey={project.projectKey}
+          />
+          <ProjectNameEditor project={project} client={client} />
         </View>
         <HostContext hosts={hosts} selectedHost={selectedHost} onSelectHost={onSelectHost} />
       </View>
@@ -370,12 +377,18 @@ interface ReadFailureCalloutProps {
 }
 
 function ReadFailureCallout({ kind, error, onReload, hasMultipleHosts }: ReadFailureCalloutProps) {
-  const { testID, title, description } = resolveReadFailureCopy({ kind, error, hasMultipleHosts });
+  const { t } = useTranslation();
+  const { testID, title, description } = resolveReadFailureCopy({
+    kind,
+    error,
+    hasMultipleHosts,
+    t,
+  });
   return (
     <View style={styles.errorBlock}>
       <Alert testID={testID} variant="error" title={title} description={description}>
         <Button testID={`${testID}-action-0`} onPress={onReload} variant="outline" size="sm">
-          Reload
+          {t("settings.project.actions.reload")}
         </Button>
       </Alert>
     </View>
@@ -386,35 +399,36 @@ function resolveReadFailureCopy(input: {
   kind: ReadFailureCalloutProps["kind"];
   error: unknown;
   hasMultipleHosts: boolean;
+  t: TFunction;
 }): { testID: string; title: string; description: string } {
   if (input.kind === "invalid_project_config") {
     return {
       testID: "invalid-callout",
-      title: "paseo.json couldn't be parsed",
-      description: "Fix the file on disk, then reload.",
+      title: input.t("settings.project.readFailures.invalidTitle"),
+      description: input.t("settings.project.readFailures.invalidDescription"),
     };
   }
   if (input.kind === "project_not_found") {
     return {
       testID: "project-not-found-callout",
-      title: "This host doesn't have this project",
+      title: input.t("settings.project.readFailures.missingTitle"),
       description: input.hasMultipleHosts
-        ? "Switch to another host above, or reload."
-        : "The selected host has no record of this project.",
+        ? input.t("settings.project.readFailures.missingWithHosts")
+        : input.t("settings.project.readFailures.missingSingleHost"),
     };
   }
   if (input.kind === "transport") {
     const detail = errorToDetail(input.error);
     return {
       testID: "read-transport-callout",
-      title: "Couldn't load paseo.json",
-      description: detail ?? "The host didn't respond.",
+      title: input.t("settings.project.readFailures.transportTitle"),
+      description: detail ?? input.t("settings.project.readFailures.transportFallback"),
     };
   }
   return {
     testID: "read-failed-callout",
-    title: "Couldn't load paseo.json",
-    description: "Reload to try again.",
+    title: input.t("settings.project.readFailures.failedTitle"),
+    description: input.t("settings.project.readFailures.failedDescription"),
   };
 }
 
@@ -441,6 +455,7 @@ function ProjectConfigForm({
   client,
   onReload,
 }: ProjectConfigFormProps) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const toast = useToast();
 
@@ -470,7 +485,7 @@ function ProjectConfigForm({
         });
         setWriteError(null);
         queryClient.invalidateQueries({ queryKey: ["projects"] });
-        toast.show("Project saved", { variant: "success" });
+        toast.show(t("settings.project.actions.saved"), { variant: "success" });
       } else {
         setWriteError(result.error);
       }
@@ -513,10 +528,12 @@ function ProjectConfigForm({
   const handleRemoveScript = useCallback(
     async (script: ProjectScriptDraft) => {
       const ok = await confirmDialog({
-        title: "Remove script?",
-        message: `Remove ${script.name || "this script"}?`,
-        confirmLabel: "Remove",
-        cancelLabel: "Cancel",
+        title: t("settings.project.scripts.removeTitle"),
+        message: t("settings.project.scripts.removeMessage", {
+          name: script.name || t("settings.project.scripts.removeFallbackName"),
+        }),
+        confirmLabel: t("settings.project.scripts.actions.remove"),
+        cancelLabel: t("settings.project.actions.cancel"),
         destructive: true,
       });
       if (!ok) return;
@@ -525,7 +542,7 @@ function ProjectConfigForm({
         scripts: d.scripts.filter((entry) => entry.id !== script.id),
       }));
     },
-    [updateDraft],
+    [t, updateDraft],
   );
 
   const handleEditScript = useCallback((script: ProjectScriptDraft) => {
@@ -587,8 +604,8 @@ function ProjectConfigForm({
   const editingScript = draft.scripts.find((entry) => entry.id === editingScriptId);
 
   const hasInvalidScripts = useMemo(
-    () => draft.scripts.some((script) => validateScript(script).hasErrors),
-    [draft.scripts],
+    () => draft.scripts.some((script) => validateScript(script, t).hasErrors),
+    [draft.scripts, t],
   );
 
   const scriptsTrailing = useMemo(
@@ -598,36 +615,36 @@ function ProjectConfigForm({
         hitSlop={8}
         style={settingsStyles.sectionHeaderLink}
         accessibilityRole="button"
-        accessibilityLabel="Add script"
+        accessibilityLabel={t("settings.project.scripts.actions.add")}
         testID="scripts-add-button"
       >
         <Plus size={ICON_SIZE} color={styles.iconColor.color} />
       </Pressable>
     ),
-    [handleAddScript],
+    [handleAddScript, t],
   );
 
   const setupDocsLink = useMemo(
     () => (
       <ExternalLink
         href={WORKTREE_DOCS_URL}
-        label="Docs"
-        tooltip={WORKTREE_DOCS_TOOLTIP}
+        label={t("settings.project.worktree.docs")}
+        tooltip={t("settings.project.worktree.docsTooltip")}
         testID="worktree-setup-docs-link"
       />
     ),
-    [],
+    [t],
   );
   const teardownDocsLink = useMemo(
     () => (
       <ExternalLink
         href={WORKTREE_DOCS_URL}
-        label="Docs"
-        tooltip={WORKTREE_DOCS_TOOLTIP}
+        label={t("settings.project.worktree.docs")}
+        tooltip={t("settings.project.worktree.docsTooltip")}
         testID="worktree-teardown-docs-link"
       />
     ),
-    [],
+    [t],
   );
 
   const isStale = writeError?.code === "stale_project_config";
@@ -637,56 +654,50 @@ function ProjectConfigForm({
   return (
     <View>
       <SettingsGroup
-        title="Worktree lifecycle hooks"
-        info={WORKTREE_GROUP_INFO}
+        title={t("settings.project.worktree.title")}
+        info={t("settings.project.worktree.info")}
         testID="worktree-group"
       >
-        <SettingsSection title="Setup" testID="worktree-setup-section" trailing={setupDocsLink}>
-          <View style={settingsStyles.card}>
-            <TextInput
-              testID="worktree-setup-input"
-              accessibilityLabel="Worktree setup commands"
-              multiline
-              value={draft.setupText}
-              onChangeText={handleSetupChange}
-              placeholder="npm install"
-              placeholderTextColor={styles.placeholderColor.color}
-              style={styles.lifecycleInput}
-            />
-          </View>
+        <SettingsSection
+          title={t("settings.project.worktree.setup")}
+          testID="worktree-setup-section"
+          trailing={setupDocsLink}
+        >
+          <SettingsTextAreaCard
+            testID="worktree-setup-input"
+            accessibilityLabel={t("settings.project.worktree.setupAccessibility")}
+            value={draft.setupText}
+            onChangeText={handleSetupChange}
+            placeholder="npm install"
+          />
         </SettingsSection>
 
         <SettingsSection
-          title="Teardown"
+          title={t("settings.project.worktree.teardown")}
           testID="worktree-teardown-section"
           trailing={teardownDocsLink}
           flush
         >
-          <View style={settingsStyles.card}>
-            <TextInput
-              testID="worktree-teardown-input"
-              accessibilityLabel="Worktree teardown commands"
-              multiline
-              value={draft.teardownText}
-              onChangeText={handleTeardownChange}
-              placeholder="docker compose down"
-              placeholderTextColor={styles.placeholderColor.color}
-              style={styles.lifecycleInput}
-            />
-          </View>
+          <SettingsTextAreaCard
+            testID="worktree-teardown-input"
+            accessibilityLabel={t("settings.project.worktree.teardownAccessibility")}
+            value={draft.teardownText}
+            onChangeText={handleTeardownChange}
+            placeholder="docker compose down"
+          />
         </SettingsSection>
       </SettingsGroup>
 
       <SettingsGroup
-        title="Scripts"
-        info={SCRIPTS_GROUP_INFO}
+        title={t("settings.project.scripts.title")}
+        info={t("settings.project.scripts.info")}
         trailing={scriptsTrailing}
         testID="scripts-group"
       >
         <View style={settingsStyles.card} testID="scripts-list">
           {draft.scripts.length === 0 ? (
             <View style={settingsStyles.row}>
-              <Text style={styles.emptyScripts}>No scripts yet.</Text>
+              <Text style={styles.emptyScripts}>{t("settings.project.scripts.empty")}</Text>
             </View>
           ) : (
             draft.scripts.map((script, index) => (
@@ -702,7 +713,11 @@ function ProjectConfigForm({
         </View>
       </SettingsGroup>
 
-      <SettingsGroup title="Metadata generation" info={METADATA_GROUP_INFO} testID="metadata-group">
+      <SettingsGroup
+        title={t("settings.project.metadata.title")}
+        info={t("settings.project.metadata.info")}
+        testID="metadata-group"
+      >
         {METADATA_PROMPT_KEYS.map((key, index) => (
           <MetadataPromptSection
             key={key}
@@ -719,8 +734,8 @@ function ProjectConfigForm({
           <Alert
             testID="stale-callout"
             variant="error"
-            title="Config changed on disk"
-            description="Reload to fetch the latest paseo.json before saving."
+            title={t("settings.project.writeFailures.staleTitle")}
+            description={t("settings.project.writeFailures.staleDescription")}
           >
             <Button
               testID="stale-callout-action-0"
@@ -728,7 +743,7 @@ function ProjectConfigForm({
               variant="outline"
               size="sm"
             >
-              Reload
+              {t("settings.project.actions.reload")}
             </Button>
           </Alert>
         </View>
@@ -739,8 +754,8 @@ function ProjectConfigForm({
           <Alert
             testID="write-failed-callout"
             variant="error"
-            title="Couldn't save paseo.json"
-            description="Try again, or reload the latest version from disk."
+            title={t("settings.project.writeFailures.failedTitle")}
+            description={t("settings.project.writeFailures.failedDescription")}
           >
             <Button
               testID="write-failed-callout-action-0"
@@ -748,7 +763,7 @@ function ProjectConfigForm({
               variant="outline"
               size="sm"
             >
-              Try again
+              {t("settings.project.actions.tryAgain")}
             </Button>
             <Button
               testID="write-failed-callout-action-1"
@@ -756,7 +771,7 @@ function ProjectConfigForm({
               variant="outline"
               size="sm"
             >
-              Reload
+              {t("settings.project.actions.reload")}
             </Button>
           </Alert>
         </View>
@@ -765,14 +780,16 @@ function ProjectConfigForm({
       <View style={styles.footer}>
         <Button
           testID="save-button"
-          accessibilityLabel="Save project config"
+          accessibilityLabel={t("settings.project.actions.save")}
           variant="default"
           size="md"
           disabled={saveDisabled}
           loading={saveMutation.isPending}
           onPress={handleSave}
         >
-          {saveMutation.isPending ? "Saving…" : "Save"}
+          {saveMutation.isPending
+            ? t("settings.project.actions.saving")
+            : t("settings.project.actions.save")}
         </Button>
       </View>
 
@@ -792,19 +809,145 @@ function ResolveSpinnerColor(): string {
   return styles.spinnerColor.color;
 }
 
-function ProjectTitleIcon({ host, projectName }: { host: ProjectHostEntry; projectName: string }) {
-  const initial = projectName.trim().charAt(0).toUpperCase() || "?";
-  const { icon } = useProjectIconQuery({ serverId: host.serverId, cwd: host.repoRoot });
-  const iconDataUri =
-    icon && icon.data && icon.mimeType ? `data:${icon.mimeType};base64,${icon.data}` : null;
-  const imageSource = useMemo(() => ({ uri: iconDataUri ?? "" }), [iconDataUri]);
-  if (iconDataUri) {
-    return <Image source={imageSource} style={styles.titleIcon} />;
+interface ProjectNameEditorProps {
+  project: ProjectSummary;
+  client: DaemonClient;
+}
+
+function ProjectNameEditor({ project, client }: ProjectNameEditorProps) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const toast = useToast();
+  const [isEditing, setIsEditing] = useState(false);
+  const [value, setValue] = useState(project.projectCustomName ?? "");
+
+  const renameMutation = useMutation({
+    mutationFn: (customName: string | null) => client.renameProject(project.projectKey, customName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      setIsEditing(false);
+      toast.show(t("settings.project.rename.renamedToast"), { variant: "success" });
+    },
+    onError: (error) => {
+      const message =
+        error instanceof Error ? error.message : t("settings.project.rename.errorFallback");
+      toast.show(message, { variant: "error" });
+    },
+  });
+
+  const handleStartEdit = useCallback(() => {
+    setValue(project.projectCustomName ?? "");
+    setIsEditing(true);
+  }, [project.projectCustomName]);
+
+  const handleCancel = useCallback(() => {
+    setIsEditing(false);
+    setValue(project.projectCustomName ?? "");
+  }, [project.projectCustomName]);
+
+  const handleSave = useCallback(() => {
+    const trimmed = value.trim();
+    const next = trimmed.length === 0 ? null : trimmed;
+    if (next === (project.projectCustomName ?? null)) {
+      setIsEditing(false);
+      return;
+    }
+    renameMutation.mutate(next);
+  }, [value, project.projectCustomName, renameMutation]);
+
+  const handleReset = useCallback(() => {
+    renameMutation.mutate(null);
+  }, [renameMutation]);
+
+  if (!isEditing) {
+    return (
+      <View style={styles.nameEditorRow}>
+        <Text style={styles.projectTitle} numberOfLines={1}>
+          {project.projectName}
+        </Text>
+        <Pressable
+          testID="project-name-edit-button"
+          accessibilityLabel={t("settings.project.rename.renameLabel")}
+          onPress={handleStartEdit}
+          hitSlop={8}
+          style={styles.nameEditorIconButton}
+        >
+          <Pencil size={ICON_SIZE} color={styles.iconColor.color} />
+        </Pressable>
+        {project.projectCustomName ? (
+          <Pressable
+            testID="project-name-reset-button"
+            accessibilityLabel={t("settings.project.rename.resetLabel")}
+            onPress={handleReset}
+            disabled={renameMutation.isPending}
+            hitSlop={8}
+            style={styles.nameEditorResetButton}
+          >
+            <Text style={styles.nameEditorResetText}>{t("settings.project.rename.reset")}</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
   }
+
   return (
-    <View style={styles.titleIconFallback}>
-      <Text style={styles.titleIconFallbackText}>{initial}</Text>
+    <View style={styles.nameEditorRow}>
+      <TextInput
+        testID="project-name-input"
+        accessibilityLabel={t("settings.project.rename.projectNameLabel")}
+        value={value}
+        onChangeText={setValue}
+        placeholder={project.projectName}
+        placeholderTextColor={styles.placeholderColor.color}
+        autoFocus
+        style={styles.nameEditorInput}
+        editable={!renameMutation.isPending}
+        onSubmitEditing={handleSave}
+        returnKeyType="done"
+      />
+      <Pressable
+        testID="project-name-save-button"
+        accessibilityLabel={t("settings.project.rename.saveLabel")}
+        onPress={handleSave}
+        disabled={renameMutation.isPending}
+        hitSlop={8}
+        style={styles.nameEditorIconButton}
+      >
+        <Check size={ICON_SIZE} color={styles.iconColor.color} />
+      </Pressable>
+      <Pressable
+        testID="project-name-cancel-button"
+        accessibilityLabel={t("settings.project.rename.cancelLabel")}
+        onPress={handleCancel}
+        disabled={renameMutation.isPending}
+        hitSlop={8}
+        style={styles.nameEditorIconButton}
+      >
+        <X size={ICON_SIZE} color={styles.iconColor.color} />
+      </Pressable>
     </View>
+  );
+}
+
+function ProjectTitleIcon({
+  iconDataUri,
+  projectName,
+  projectKey,
+}: {
+  iconDataUri: string | null;
+  projectName: string;
+  projectKey: string;
+}) {
+  const initial = projectName.trim().charAt(0).toUpperCase() || "?";
+  return (
+    <ProjectIconView
+      iconDataUri={iconDataUri}
+      initial={initial}
+      projectKey={projectKey}
+      imageStyle={styles.titleIcon}
+      fallbackStyle={styles.titleIconFallback}
+      textStyle={styles.titleIconFallbackText}
+    />
   );
 }
 
@@ -847,10 +990,11 @@ interface HostPickerProps {
 }
 
 function HostPicker({ hosts, selectedHost, onSelectHost }: HostPickerProps) {
+  const { t } = useTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        accessibilityLabel={HOST_SWITCHER_LABEL}
+        accessibilityLabel={t("settings.project.switchHost")}
         testID="host-picker"
         style={styles.hostIndicator}
       >
@@ -904,25 +1048,22 @@ interface MetadataPromptSectionProps {
 }
 
 function MetadataPromptSection({ promptKey, value, onChange, flush }: MetadataPromptSectionProps) {
+  const { t } = useTranslation();
   const meta = METADATA_PROMPT_FIELDS[promptKey];
+  const title = t(meta.titleKey);
   const handleChange = useCallback(
     (text: string) => onChange(promptKey, text),
     [onChange, promptKey],
   );
   return (
-    <SettingsSection title={meta.title} testID={meta.sectionTestID} flush={flush}>
-      <View style={settingsStyles.card}>
-        <TextInput
-          testID={meta.inputTestID}
-          accessibilityLabel={meta.title}
-          multiline
-          value={value}
-          onChangeText={handleChange}
-          placeholder={meta.placeholder}
-          placeholderTextColor={styles.placeholderColor.color}
-          style={styles.lifecycleInput}
-        />
-      </View>
+    <SettingsSection title={title} testID={meta.sectionTestID} flush={flush}>
+      <SettingsTextAreaCard
+        testID={meta.inputTestID}
+        accessibilityLabel={title}
+        value={value}
+        onChangeText={handleChange}
+        placeholder={t(meta.placeholderKey)}
+      />
     </SettingsSection>
   );
 }
@@ -935,6 +1076,7 @@ interface ScriptRowProps {
 }
 
 function ScriptRow({ script, isFirst, onEdit, onRemove }: ScriptRowProps) {
+  const { t } = useTranslation();
   const handleEdit = useCallback(() => onEdit(script), [onEdit, script]);
   const handleRemove = useCallback(() => onRemove(script), [onRemove, script]);
   const rowStyle = isFirst ? styles.scriptRow : styles.scriptRowWithBorder;
@@ -943,15 +1085,15 @@ function ScriptRow({ script, isFirst, onEdit, onRemove }: ScriptRowProps) {
     <View style={rowStyle} testID={`script-row-${script.id}`}>
       <Pressable style={styles.scriptRowMain} onPress={handleEdit}>
         <Text style={settingsStyles.rowTitle} numberOfLines={1}>
-          {script.name || "Untitled script"}
+          {script.name || t("settings.project.scripts.untitled")}
         </Text>
         <Text style={settingsStyles.rowHint} numberOfLines={1}>
-          {scriptHint(script)}
+          {scriptHint(script, t)}
         </Text>
       </Pressable>
       <DropdownMenu>
         <DropdownMenuTrigger
-          accessibilityLabel="Open script menu"
+          accessibilityLabel={t("settings.project.scripts.menuAccessibility")}
           testID={`script-row-menu-${script.id}`}
           style={styles.scriptKebab}
         >
@@ -959,14 +1101,14 @@ function ScriptRow({ script, isFirst, onEdit, onRemove }: ScriptRowProps) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" minWidth={160}>
           <DropdownMenuItem testID={`script-action-${script.id}-edit`} onSelect={handleEdit}>
-            Edit
+            {t("settings.project.scripts.actions.edit")}
           </DropdownMenuItem>
           <DropdownMenuItem
             testID={`script-action-${script.id}-remove`}
             destructive
             onSelect={handleRemove}
           >
-            Remove
+            {t("settings.project.scripts.actions.remove")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -974,10 +1116,10 @@ function ScriptRow({ script, isFirst, onEdit, onRemove }: ScriptRowProps) {
   );
 }
 
-function scriptHint(script: ProjectScriptDraft): string {
+function scriptHint(script: ProjectScriptDraft, t: TFunction): string {
   const pieces: string[] = [];
   if (script.type) pieces.push(script.type);
-  if (script.portText) pieces.push(`port ${script.portText}`);
+  if (script.portText) pieces.push(t("settings.project.scripts.port", { port: script.portText }));
   if (script.commandText) pieces.push(script.commandText.split("\n")[0] ?? "");
   return pieces.join(" · ");
 }
@@ -988,9 +1130,11 @@ interface ScriptValidation {
   commandError: string | null;
 }
 
-function validateScript(script: ProjectScriptDraft): ScriptValidation {
-  const nameError = script.name.trim().length === 0 ? "Name is required" : null;
-  const commandError = script.commandText.trim().length === 0 ? "Command is required" : null;
+function validateScript(script: ProjectScriptDraft, t: TFunction): ScriptValidation {
+  const nameError =
+    script.name.trim().length === 0 ? t("settings.project.scripts.nameRequired") : null;
+  const commandError =
+    script.commandText.trim().length === 0 ? t("settings.project.scripts.commandRequired") : null;
   return {
     hasErrors: Boolean(nameError || commandError),
     nameError,
@@ -1014,6 +1158,7 @@ const ALL_TOUCHED: ScriptFieldsTouched = { name: true, command: true };
 const NONE_TOUCHED: ScriptFieldsTouched = { name: false, command: false };
 
 function ScriptEditModal({ script, onChange, onCancel, onSave }: ScriptEditModalProps) {
+  const { t } = useTranslation();
   const [touched, setTouched] = useState<ScriptFieldsTouched>(NONE_TOUCHED);
 
   useEffect(() => {
@@ -1040,7 +1185,7 @@ function ScriptEditModal({ script, onChange, onCancel, onSave }: ScriptEditModal
   const handleNameBlur = useCallback(() => markTouched("name"), [markTouched]);
   const handleCommandBlur = useCallback(() => markTouched("command"), [markTouched]);
 
-  const validation = validateScript(script);
+  const validation = validateScript(script, t);
 
   const handleSavePress = useCallback(() => {
     if (validation.hasErrors) {
@@ -1053,20 +1198,28 @@ function ScriptEditModal({ script, onChange, onCancel, onSave }: ScriptEditModal
   const showNameError = touched.name && validation.nameError;
   const showCommandError = touched.command && validation.commandError;
   const isService = script.type === SCRIPT_SERVICE_TYPE;
+  const sheetHeader = useMemo<SheetHeader>(
+    () => ({
+      title: script.name
+        ? t("settings.project.scripts.editScript", { name: script.name })
+        : t("settings.project.scripts.newScript"),
+    }),
+    [script.name, t],
+  );
 
   return (
     <AdaptiveModalSheet
       visible
-      title={script.name ? `Edit ${script.name}` : "New script"}
+      header={sheetHeader}
       onClose={onCancel}
       testID="script-edit-modal"
       desktopMaxWidth={560}
     >
       <View style={styles.modalSection}>
-        <Text style={styles.modalLabel}>Name</Text>
+        <Text style={styles.modalLabel}>{t("settings.project.scripts.name")}</Text>
         <TextInput
           testID="script-edit-name"
-          accessibilityLabel="Script name"
+          accessibilityLabel={t("settings.project.scripts.nameAccessibility")}
           value={script.name}
           onChangeText={handleNameChange}
           onBlur={handleNameBlur}
@@ -1081,10 +1234,10 @@ function ScriptEditModal({ script, onChange, onCancel, onSave }: ScriptEditModal
         ) : null}
       </View>
       <View style={styles.modalSection}>
-        <Text style={styles.modalLabel}>Command</Text>
+        <Text style={styles.modalLabel}>{t("settings.project.scripts.command")}</Text>
         <TextInput
           testID="script-edit-command"
-          accessibilityLabel="Script command"
+          accessibilityLabel={t("settings.project.scripts.commandAccessibility")}
           multiline
           value={script.commandText}
           onChangeText={handleCommandChange}
@@ -1102,25 +1255,25 @@ function ScriptEditModal({ script, onChange, onCancel, onSave }: ScriptEditModal
       <View style={styles.modalSection}>
         <View style={styles.serviceToggleRow}>
           <View style={styles.serviceToggleText}>
-            <Text style={styles.serviceToggleLabel}>Run as a service</Text>
-            <Text style={styles.modalHint}>
-              Paseo supervises the process and assigns a port via $PASEO_PORT
+            <Text style={styles.serviceToggleLabel}>
+              {t("settings.project.scripts.runAsService")}
             </Text>
+            <Text style={styles.modalHint}>{t("settings.project.scripts.serviceHint")}</Text>
           </View>
           <Switch
             value={isService}
             onValueChange={handleServiceToggle}
-            accessibilityLabel="Run as a service"
+            accessibilityLabel={t("settings.project.scripts.runAsService")}
             testID="script-edit-service-toggle"
           />
         </View>
       </View>
       <View style={styles.modalFooter}>
         <Button onPress={onCancel} variant="ghost" size="md" testID="script-edit-cancel">
-          Cancel
+          {t("settings.project.actions.cancel")}
         </Button>
         <Button onPress={handleSavePress} variant="default" size="md" testID="script-edit-save">
-          Save
+          {t("settings.project.actions.save")}
         </Button>
       </View>
     </AdaptiveModalSheet>
@@ -1161,6 +1314,37 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: theme.fontWeight.medium,
     flexShrink: 1,
   },
+  nameEditorRow: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    minWidth: 0,
+  },
+  nameEditorIconButton: {
+    padding: theme.spacing[1],
+  },
+  nameEditorInput: {
+    flex: 1,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.lg,
+    fontWeight: theme.fontWeight.medium,
+    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+    borderRadius: theme.borderRadius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.surface2,
+    minWidth: 0,
+  },
+  nameEditorResetButton: {
+    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[2],
+  },
+  nameEditorResetText: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.xs,
+  },
   titleIcon: {
     width: 28,
     height: 28,
@@ -1170,12 +1354,10 @@ const styles = StyleSheet.create((theme) => ({
     width: 28,
     height: 28,
     borderRadius: theme.borderRadius.md,
-    backgroundColor: theme.colors.surface2,
     alignItems: "center",
     justifyContent: "center",
   },
   titleIconFallbackText: {
-    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
   },
@@ -1211,14 +1393,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   errorBlock: {
     marginTop: theme.spacing[2],
-  },
-  lifecycleInput: {
-    color: theme.colors.foreground,
-    fontSize: theme.fontSize.sm,
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[4],
-    minHeight: 96,
-    textAlignVertical: "top",
   },
   emptyScripts: {
     color: theme.colors.foregroundMuted,

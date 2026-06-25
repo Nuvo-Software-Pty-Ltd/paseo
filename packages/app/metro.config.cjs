@@ -6,7 +6,6 @@ const path = require("path");
 const projectRoot = __dirname;
 const appNodeModulesRoot = path.resolve(projectRoot, "node_modules");
 const appSrcRoot = path.resolve(projectRoot, "src");
-const serverSrcRoot = path.resolve(projectRoot, "../server/src");
 const relaySrcRoot = path.resolve(projectRoot, "../relay/src");
 const customWebPlatform = (process.env.PASEO_WEB_PLATFORM ?? "")
   .trim()
@@ -68,11 +67,7 @@ function resolveWithCustomWebOverlay(context, moduleName, platform) {
 
 config.resolver.resolveRequest = (context, moduleName, platform) => {
   const origin = context.originModulePath;
-  if (
-    origin &&
-    (origin.startsWith(serverSrcRoot) || origin.startsWith(relaySrcRoot)) &&
-    moduleName.endsWith(".js")
-  ) {
+  if (origin && origin.startsWith(relaySrcRoot) && moduleName.endsWith(".js")) {
     const tsModuleName = moduleName.replace(/\.js$/, ".ts");
     const candidatePath = path.resolve(path.dirname(origin), tsModuleName);
     if (fs.existsSync(candidatePath)) {
@@ -82,5 +77,32 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
 
   return resolveWithCustomWebOverlay(context, moduleName, platform);
 };
+
+if (process.env.PASEO_SERVE_SIM_PREVIEW === "1") {
+  const { simMiddleware } = require("serve-sim/middleware");
+  const originalEnhanceMiddleware = config.server?.enhanceMiddleware;
+  config.server = config.server ?? {};
+  config.server.enhanceMiddleware = (metroMiddleware, server) => {
+    const middleware = originalEnhanceMiddleware
+      ? originalEnhanceMiddleware(metroMiddleware, server)
+      : metroMiddleware;
+    const serveSimulator = simMiddleware({
+      basePath: "/.sim",
+      device: process.env.PASEO_SERVE_SIM_DEVICE_UDID,
+    });
+    return (req, res, next) => {
+      serveSimulator(req, res, (error) => {
+        if (error) {
+          if (next) {
+            next(error);
+            return;
+          }
+          throw error;
+        }
+        middleware(req, res, next);
+      });
+    };
+  };
+}
 
 module.exports = config;

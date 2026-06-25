@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { cloudHmacFetch } from "../cloud-hmac-fetch.js";
 import type { TriggerSecretStore } from "./secret-store.js";
-import type { TriggerProvisionResult, TriggerRotateResult } from "./types.js";
+import type { TriggerProvisionResult, TriggerRotateResult } from "@getpaseo/protocol/trigger/types";
 
 // D-3.5d — the ONLY place cloud and self-host webhook triggers differ.
 // Resolved exactly like `DynamoScheduleStore.notifyRegister`: the

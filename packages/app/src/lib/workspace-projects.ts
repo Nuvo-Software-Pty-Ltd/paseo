@@ -5,7 +5,7 @@
 // singular fields is a single-file change.
 
 import type { ProjectDescriptor, WorkspaceDescriptor } from "@/stores/session-store";
-import type { ProjectDescriptorPayload } from "@server/shared/messages";
+import type { ProjectDescriptorPayload } from "@getpaseo/protocol/messages";
 
 // Convert a daemon `list_projects` row into the client ProjectDescriptor. The
 // daemon guarantees `repoUrl` is credential-free (VERIFY-3.5a finding #1).

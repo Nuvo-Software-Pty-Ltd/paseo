@@ -15,354 +15,388 @@ export const AGENT_PAGES = [
   {
     slug: "claude-code",
     name: "Claude Code",
-    title: "Ship with Claude Code from your phone",
+    title: "Open source app for Claude Code",
     subtitle:
-      "Launch agents, check on progress, and merge from anywhere. Your Claude Code setup, your machine, your pocket.",
-    metaTitle: "Claude Code Mobile App – Ship from your phone | Paseo",
+      "Run Claude Code on your machine, drive it from your phone or desktop. Launch agents, watch them work, review and merge from anywhere.",
+    metaTitle: "Claude Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Claude Code from your phone. Launch agents, check on progress, review diffs, and merge — all from your pocket. Self-hosted, your code stays on your machine.",
+      "Open source mobile and desktop app for Claude Code. Run agents on your machine, monitor progress, review diffs, and merge from anywhere. Self-hosted, your code stays local.",
   },
   {
     slug: "codex",
     name: "Codex",
-    title: "Run Codex from anywhere",
+    title: "Open source app for Codex",
     subtitle:
-      "Kick off Codex agents on your machine from your phone. Check in on the train, review on the couch, merge from the park.",
-    metaTitle: "Codex Mobile App – Run Codex from anywhere | Paseo",
+      "Run OpenAI's Codex on your machine, drive it from your phone or desktop. Same setup, same machine, no laptop required.",
+    metaTitle: "Codex Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run OpenAI Codex from your phone. Kick off agents, monitor progress, and ship code without being at your desk. Self-hosted, your code never leaves your machine.",
+      "Open source mobile and desktop app for OpenAI Codex. Launch agents on your machine, monitor progress, and ship code from anywhere. Self-hosted.",
   },
   {
     slug: "opencode",
     name: "OpenCode",
-    title: "Run OpenCode from your phone",
+    title: "Open source app for OpenCode",
     subtitle:
-      "Launch agents, check on builds, and ship code from anywhere. Same setup, same machine, just not at your desk.",
-    metaTitle: "OpenCode Mobile App – Code from anywhere | Paseo",
+      "Run OpenCode on your machine, drive it from your phone or desktop. Open source on both ends, your code stays local.",
+    metaTitle: "OpenCode Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run OpenCode from your phone. Launch agents, watch them work, and ship code from wherever you are. Self-hosted, open source, your code stays local.",
+      "Open source mobile and desktop app for OpenCode. Launch agents on your machine, watch them work, ship code from anywhere. Self-hosted.",
   },
   {
     slug: "copilot",
     name: "GitHub Copilot",
-    title: "GitHub Copilot, mobile",
+    title: "Open source app for GitHub Copilot",
     subtitle:
-      "Drive Copilot from your phone. Kick off changes, watch them land, ship without sitting down at your desk.",
-    metaTitle: "GitHub Copilot Mobile App – Drive Copilot from anywhere | Paseo",
+      "Drive GitHub Copilot from your phone or desktop. Same account, same machine, ship without sitting down at your desk.",
+    metaTitle: "GitHub Copilot Mobile and Desktop App, Open Source",
     metaDescription:
-      "Control GitHub Copilot from your phone. Launch sessions, monitor progress, merge from anywhere. Your machine, your account, your pocket.",
+      "Open source mobile and desktop app for GitHub Copilot. Launch sessions on your machine, monitor progress, merge from anywhere.",
+  },
+  {
+    slug: "omp",
+    name: "OMP (Oh My Pi)",
+    title: "Open source app for OMP (Oh My Pi)",
+    subtitle:
+      "Run OMP (Oh My Pi) on your machine, drive it from your phone or desktop. Self-hosted and open source.",
+    metaTitle: "OMP (Oh My Pi) Mobile and Desktop App, Open Source",
+    metaDescription:
+      "Open source mobile and desktop app for OMP (Oh My Pi). Launch sessions on your machine, monitor progress, merge from anywhere. Self-hosted.",
   },
   {
     slug: "pi",
-    name: "Pi",
-    title: "Run Pi from your phone",
-    subtitle: "Tiny agent, full control. Launch Pi from anywhere and check in when it matters.",
-    metaTitle: "Pi Mobile App – Run pi from anywhere | Paseo",
+    name: "Pi Agent",
+    title: "Open source app for the Pi coding agent",
+    subtitle:
+      "Run the Pi coding agent on your machine, drive it from your phone or desktop. Self-hosted and open source.",
+    metaTitle: "Pi Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run the pi coding agent from your phone. Launch sessions on your machine, check progress, merge from your pocket. Self-hosted and open source.",
+      "Open source mobile and desktop app for the Pi coding agent. Launch sessions on your machine, monitor progress, merge from anywhere. Self-hosted.",
   },
   {
     slug: "cursor",
     name: "Cursor",
-    title: "Cursor, in your pocket",
-    subtitle: "Send tasks to Cursor on your machine, watch them run, review the diff on the train.",
-    metaTitle: "Cursor Mobile App – Drive Cursor from anywhere | Paseo",
+    title: "Open source app for Cursor",
+    subtitle:
+      "Send tasks to Cursor on your machine, drive it from your phone or desktop. Review the diff anywhere.",
+    metaTitle: "Cursor Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Cursor from your phone. Launch tasks, monitor output, review diffs, and merge — all from your pocket. Self-hosted, your code stays local.",
+      "Open source mobile and desktop app for Cursor. Launch tasks on your machine, monitor output, review diffs, and merge from anywhere. Self-hosted.",
   },
   {
     slug: "gemini",
     name: "Gemini CLI",
-    title: "Run Gemini from anywhere",
-    subtitle: "Kick off Google's Gemini CLI from your phone. Real coding work, no laptop required.",
-    metaTitle: "Gemini CLI Mobile App – Run Gemini from anywhere | Paseo",
+    title: "Open source app for Gemini CLI",
+    subtitle:
+      "Run Google's Gemini CLI on your machine, drive it from your phone or desktop. Real coding work, no laptop required.",
+    metaTitle: "Gemini CLI Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Google's Gemini CLI from your phone. Launch agents, monitor progress, and ship from anywhere. Self-hosted, your code never leaves your machine.",
+      "Open source mobile and desktop app for Google's Gemini CLI. Launch agents on your machine, monitor progress, and ship from anywhere. Self-hosted.",
   },
   {
     slug: "hermes",
     name: "Hermes Agent",
-    title: "Hermes Agent, on your phone",
+    title: "Open source app for the Hermes agent",
     subtitle:
-      "Drive Nous Research's Hermes Agent from anywhere. Your machine does the work, your pocket runs the show.",
-    metaTitle: "Hermes Agent Mobile App – Drive Hermes from anywhere | Paseo",
+      "Run Nous Research's Hermes Agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Hermes Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Nous Research's Hermes Agent from your phone. Launch sessions, monitor progress, ship code from your pocket.",
+      "Open source mobile and desktop app for Nous Research's Hermes Agent. Launch sessions on your machine, monitor progress, ship code from anywhere.",
   },
   {
     slug: "qwen-code",
     name: "Qwen Code",
-    title: "Qwen Code from anywhere",
-    subtitle: "Send Alibaba's Qwen agent to work on your machine while you're not at your desk.",
-    metaTitle: "Qwen Code Mobile App – Run Qwen from anywhere | Paseo",
+    title: "Open source app for Qwen Code",
+    subtitle: "Run Alibaba's Qwen Code on your machine, drive it from your phone or desktop.",
+    metaTitle: "Qwen Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Alibaba's Qwen Code from your phone. Launch agents on your machine, monitor progress, and merge from anywhere.",
+      "Open source mobile and desktop app for Alibaba's Qwen Code. Launch agents on your machine, monitor progress, and merge from anywhere.",
   },
   {
     slug: "kimi",
     name: "Kimi Code CLI",
-    title: "Kimi Code from your phone",
+    title: "Open source app for Kimi Code CLI",
     subtitle:
-      "Moonshot AI's Kimi Code CLI on your machine, controlled from anywhere. Same setup, no laptop.",
-    metaTitle: "Kimi Code Mobile App – Run Kimi Code from anywhere | Paseo",
+      "Run Moonshot AI's Kimi Code CLI on your machine, drive it from your phone or desktop.",
+    metaTitle: "Kimi Code CLI Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Moonshot AI's Kimi Code CLI from your phone. Launch sessions, monitor progress, ship from your pocket. Self-hosted and private.",
+      "Open source mobile and desktop app for Moonshot AI's Kimi Code CLI. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "amp",
     name: "Amp",
-    title: "Amp, mobile",
+    title: "Open source app for the Amp coding agent",
     subtitle:
-      "Drive the frontier coding agent from your phone. Kick off work, monitor progress, merge from anywhere.",
-    metaTitle: "Amp Mobile App – Run Amp from anywhere | Paseo",
+      "Run Sourcegraph's Amp on your machine, drive it from your phone or desktop. Frontier coding, no laptop required.",
+    metaTitle: "Amp Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Amp, the frontier coding agent, from your phone. Launch tasks on your machine, watch them ship from your pocket.",
+      "Open source mobile and desktop app for Amp, Sourcegraph's frontier coding agent. Launch tasks on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "auggie",
     name: "Auggie CLI",
-    title: "Auggie, in your pocket",
-    subtitle:
-      "Run Augment Code's agent from your phone. Industry-leading context, anywhere you are.",
-    metaTitle: "Auggie Mobile App – Drive Augment Code from anywhere | Paseo",
+    title: "Open source app for Auggie CLI",
+    subtitle: "Run Augment Code's Auggie CLI on your machine, drive it from your phone or desktop.",
+    metaTitle: "Auggie CLI Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Augment Code's Auggie CLI from your phone. Launch sessions on your machine, monitor progress, ship code from your pocket.",
+      "Open source mobile and desktop app for Augment Code's Auggie CLI. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "cline",
     name: "Cline",
-    title: "Cline from anywhere",
+    title: "Open source app for the Cline coding agent",
     subtitle:
-      "Autonomous coding agent on your machine, controlled from your phone. Watch it work, jump in when needed.",
-    metaTitle: "Cline Mobile App – Run Cline from anywhere | Paseo",
+      "Run the Cline coding agent on your machine, drive it from your phone or desktop. Watch it work, jump in when needed.",
+    metaTitle: "Cline Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Cline, the autonomous coding agent, from your phone. Launch tasks, monitor output, review diffs from anywhere.",
+      "Open source mobile and desktop app for Cline, the autonomous coding agent. Launch tasks, monitor output, review diffs from anywhere.",
   },
   {
     slug: "codebuddy",
     name: "Codebuddy Code",
-    title: "Codebuddy from your phone",
-    subtitle:
-      "Run Tencent Cloud's intelligent coding tool from anywhere. Your dev box, your pocket.",
-    metaTitle: "Codebuddy Code Mobile App – Run Codebuddy from anywhere | Paseo",
+    title: "Open source app for Codebuddy Code",
+    subtitle: "Run Tencent Cloud's Codebuddy on your machine, drive it from your phone or desktop.",
+    metaTitle: "Codebuddy Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Tencent Cloud's Codebuddy Code from your phone. Launch sessions on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for Tencent Cloud's Codebuddy Code. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "cortex-code",
     name: "Cortex Code",
-    title: "Cortex Code, mobile",
+    title: "Open source app for Cortex Code",
     subtitle:
-      "Snowflake's coding agent on your machine, driven from your phone. No laptop required.",
-    metaTitle: "Cortex Code Mobile App – Run Cortex Code from anywhere | Paseo",
+      "Run Snowflake's Cortex Code on your machine, drive it from your phone or desktop. No laptop required.",
+    metaTitle: "Cortex Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Snowflake's Cortex Code from your phone. Launch agents, monitor progress, and ship from anywhere.",
+      "Open source mobile and desktop app for Snowflake's Cortex Code. Launch agents on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "corust",
     name: "Corust Agent",
-    title: "Corust, in your pocket",
-    subtitle: "Build Rust with a seasoned partner on your machine, driven from your phone.",
-    metaTitle: "Corust Mobile App – Drive Corust agent from anywhere | Paseo",
+    title: "Open source app for the Corust agent",
+    subtitle:
+      "Build Rust with the Corust agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Corust Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run the Corust Rust-focused coding agent from your phone. Launch tasks on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for the Corust Rust-focused coding agent. Launch tasks on your machine, ship from anywhere.",
   },
   {
     slug: "crow",
     name: "crow-cli",
-    title: "crow-cli from your phone",
+    title: "Open source app for crow-cli",
     subtitle:
-      "Minimal native coding agent on your machine, controlled from anywhere. Lean, ACP-native, mobile.",
-    metaTitle: "crow-cli Mobile App – Run crow-cli from anywhere | Paseo",
+      "Run crow-cli, the minimal ACP-native coding agent, on your machine. Drive it from your phone or desktop.",
+    metaTitle: "Crow-CLI Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive crow-cli, the minimal ACP-native coding agent, from your phone. Launch tasks on your machine, monitor from anywhere.",
+      "Open source mobile and desktop app for crow-cli, the minimal ACP-native coding agent. Launch tasks on your machine, monitor from anywhere.",
   },
   {
     slug: "deepagents",
     name: "DeepAgents",
-    title: "DeepAgents from your phone",
+    title: "Open source app for DeepAgents",
     subtitle:
-      "LangChain-powered coding agent on your machine, driven from anywhere. Batteries included.",
-    metaTitle: "DeepAgents Mobile App – Run DeepAgents from anywhere | Paseo",
+      "Run LangChain's DeepAgents on your machine, drive it from your phone or desktop. Batteries included.",
+    metaTitle: "DeepAgents Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run the LangChain DeepAgents coding agent from your phone. Launch sessions, monitor progress, and ship code from anywhere.",
+      "Open source mobile and desktop app for the LangChain DeepAgents coding agent. Launch sessions on your machine, monitor progress, ship from anywhere.",
+  },
+  {
+    slug: "deepseek-tui",
+    name: "CodeWhale",
+    title: "Open source app for CodeWhale",
+    subtitle:
+      "Run CodeWhale's DeepSeek V4 terminal coding agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "CodeWhale Mobile and Desktop App, Open Source",
+    metaDescription:
+      "Open source mobile and desktop app for CodeWhale. Launch coding sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "dimcode",
     name: "DimCode",
-    title: "DimCode from anywhere",
-    subtitle: "Leading models, one command — driven from your phone. Your machine does the work.",
-    metaTitle: "DimCode Mobile App – Run DimCode from anywhere | Paseo",
+    title: "Open source app for DimCode",
+    subtitle:
+      "Leading models, one command. Run DimCode on your machine, drive it from your phone or desktop.",
+    metaTitle: "DimCode Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive DimCode, the multi-model coding agent, from your phone. Launch tasks on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for DimCode, the multi-model coding agent. Launch tasks on your machine, ship from anywhere.",
   },
   {
     slug: "dirac",
     name: "Dirac",
-    title: "Dirac, mobile",
+    title: "Open source app for the Dirac coding agent",
     subtitle:
-      "Hash-anchored parallel edits on your machine, driven from your pocket. Faster, cheaper, fully open source.",
-    metaTitle: "Dirac Mobile App – Run Dirac from anywhere | Paseo",
+      "Run Dirac's hash-anchored parallel edits on your machine, drive it from your phone or desktop.",
+    metaTitle: "Dirac Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run the Dirac coding agent from your phone. Hash-anchored parallel edits, AST manipulation, ship from anywhere.",
+      "Open source mobile and desktop app for the Dirac coding agent. Hash-anchored parallel edits, AST manipulation, ship from anywhere.",
   },
   {
     slug: "factory-droid",
     name: "Factory Droid",
-    title: "Factory Droid from anywhere",
+    title: "Open source app for Factory Droid",
     subtitle:
-      "Drive Factory's coding agent from your phone. Kick it off, check in, ship from your pocket.",
-    metaTitle: "Factory Droid Mobile App – Run Droid from anywhere | Paseo",
+      "Run Factory's Droid coding agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Factory Droid Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Factory AI's Droid coding agent from your phone. Launch sessions on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for Factory AI's Droid coding agent. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "fast-agent",
     name: "fast-agent",
-    title: "fast-agent, mobile",
+    title: "Open source app for fast-agent",
     subtitle:
-      "Multi-provider agent on your machine, controlled from anywhere. Send work, get results.",
-    metaTitle: "fast-agent Mobile App – Run fast-agent from anywhere | Paseo",
+      "Run fast-agent, the multi-provider coding agent, on your machine. Drive it from your phone or desktop.",
+    metaTitle: "Fast-Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive fast-agent, the multi-provider coding agent, from your phone. Launch tasks on your machine, monitor from your pocket.",
+      "Open source mobile and desktop app for fast-agent, the multi-provider coding agent. Launch tasks on your machine, monitor from anywhere.",
   },
   {
     slug: "glm",
     name: "GLM Agent",
-    title: "GLM Agent from your phone",
+    title: "Open source app for the GLM agent",
     subtitle:
-      "Zhipu AI's GLM coding agent on your machine, driven from anywhere. Streaming, mid-session model switching, mobile.",
-    metaTitle: "GLM Agent Mobile App – Run GLM from anywhere | Paseo",
+      "Run Zhipu AI's GLM coding agent on your machine, drive it from your phone or desktop. Streaming, mid-session model switching.",
+    metaTitle: "GLM Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Zhipu AI's GLM coding agent from your phone. Launch sessions, monitor progress, and ship code from anywhere.",
+      "Open source mobile and desktop app for Zhipu AI's GLM coding agent. Launch sessions on your machine, monitor progress, ship code from anywhere.",
   },
   {
     slug: "goose",
     name: "goose",
-    title: "Run goose from your phone",
+    title: "Open source app for the goose coding agent",
     subtitle:
-      "Block's open-source agent on your laptop, driven from anywhere. Local, extensible, mobile.",
-    metaTitle: "goose Mobile App – Run goose from anywhere | Paseo",
+      "Run Block's goose on your machine, drive it from your phone or desktop. Local, extensible, open source.",
+    metaTitle: "Goose Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Block's goose, the local open-source AI agent, from your phone. Launch tasks on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for Block's goose, the local open-source AI agent. Launch tasks on your machine, ship from anywhere.",
   },
   {
     slug: "junie",
     name: "Junie",
-    title: "Junie, on your phone",
+    title: "Open source app for the Junie coding agent",
     subtitle:
-      "JetBrains' coding agent on your dev box, controlled from your pocket. Real work, no IDE required.",
-    metaTitle: "Junie Mobile App – Run Junie from anywhere | Paseo",
+      "Run JetBrains' Junie on your machine, drive it from your phone or desktop. Real work, no IDE required.",
+    metaTitle: "Junie Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive JetBrains' Junie coding agent from your phone. Launch sessions on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for JetBrains' Junie coding agent. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "kilo",
     name: "Kilo Code",
-    title: "Kilo Code from anywhere",
-    subtitle: "Kilo Code on your machine, driven from your phone. Send tasks, watch them ship.",
-    metaTitle: "Kilo Code Mobile App – Run Kilo Code from anywhere | Paseo",
+    title: "Open source app for Kilo Code",
+    subtitle:
+      "Run Kilo Code on your machine, drive it from your phone or desktop. Send tasks, watch them ship.",
+    metaTitle: "Kilo Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Kilo Code, the open-source coding agent, from your phone. Launch tasks on your machine via Kilo CLI, monitor progress, merge from anywhere.",
+      "Open source mobile and desktop app for Kilo Code. Launch tasks on your machine via Kilo CLI, monitor progress, merge from anywhere.",
   },
   {
     slug: "minion-code",
     name: "Minion Code",
-    title: "Minion Code, mobile",
+    title: "Open source app for Minion Code",
     subtitle:
-      "Minion-framework agent on your machine, controlled from your phone. Rich tooling, full freedom.",
-    metaTitle: "Minion Code Mobile App – Run Minion Code from anywhere | Paseo",
+      "Run Minion Code's framework agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Minion Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Minion Code, the Minion-framework coding agent, from your phone. Launch sessions on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for Minion Code, the Minion-framework coding agent. Launch sessions on your machine, ship from anywhere.",
   },
   {
     slug: "mistral-vibe",
     name: "Mistral Vibe",
-    title: "Mistral Vibe from your phone",
+    title: "Open source app for Mistral Vibe",
     subtitle:
-      "Mistral's open-source coding assistant, driven from anywhere. Your machine, your pocket.",
-    metaTitle: "Mistral Vibe Mobile App – Run Mistral Vibe from anywhere | Paseo",
+      "Run Mistral's open-source Vibe assistant on your machine, drive it from your phone or desktop.",
+    metaTitle: "Mistral Vibe Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Mistral's open-source Vibe coding assistant from your phone. Launch sessions on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for Mistral's Vibe coding assistant. Launch sessions on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "nova",
     name: "Nova",
-    title: "Nova, in your pocket",
-    subtitle:
-      "Compass AI's software engineer on your machine, controlled from your phone. Send work, ship code.",
-    metaTitle: "Nova Mobile App – Run Nova from anywhere | Paseo",
+    title: "Open source app for the Nova coding agent",
+    subtitle: "Run Compass AI's Nova on your machine, drive it from your phone or desktop.",
+    metaTitle: "Nova Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Compass AI's Nova coding agent from your phone. Launch sessions on your machine, monitor progress, merge from your pocket.",
+      "Open source mobile and desktop app for Compass AI's Nova coding agent. Launch sessions on your machine, monitor progress, merge from anywhere.",
   },
   {
     slug: "poolside",
     name: "Poolside",
-    title: "Poolside, mobile",
+    title: "Open source app for the Poolside coding agent",
     subtitle:
-      "Drive Poolside's coding agent from anywhere. Kick off the work, watch it land, merge on the move.",
-    metaTitle: "Poolside Mobile App – Run Poolside from anywhere | Paseo",
+      "Drive Poolside's coding agent from your phone or desktop. Kick off the work, watch it land.",
+    metaTitle: "Poolside Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Poolside's coding agent from your phone. Launch tasks on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for Poolside's coding agent. Launch tasks on your machine, monitor progress, ship from anywhere.",
   },
   {
     slug: "qoder",
     name: "Qoder CLI",
-    title: "Qoder from your phone",
+    title: "Open source app for Qoder CLI",
     subtitle:
-      "Agentic coding assistant on your machine, controlled from anywhere. No laptop required.",
-    metaTitle: "Qoder Mobile App – Run Qoder from anywhere | Paseo",
+      "Run the Qoder agentic coding assistant on your machine, drive it from your phone or desktop.",
+    metaTitle: "Qoder CLI Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Qoder, the agentic coding assistant, from your phone. Launch sessions on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for Qoder, the agentic coding assistant. Launch sessions on your machine, ship from anywhere.",
   },
   {
     slug: "sigit",
     name: "siGit Code",
-    title: "siGit Code, mobile",
+    title: "Open source app for siGit Code",
     subtitle:
-      "Local-first coding agent on your machine, driven from your phone. Optionally on-device LLM inference.",
-    metaTitle: "siGit Code Mobile App – Run siGit from anywhere | Paseo",
+      "Run siGit's local-first coding agent on your machine, drive it from your phone or desktop. Optional on-device LLM inference.",
+    metaTitle: "SiGit Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run siGit Code, the local-first coding agent, from your phone. Launch sessions on your machine, ship from anywhere.",
+      "Open source mobile and desktop app for siGit Code, the local-first coding agent. Launch sessions on your machine, ship from anywhere.",
   },
   {
     slug: "stakpak",
     name: "Stakpak",
-    title: "Stakpak DevOps from anywhere",
+    title: "Open source app for the Stakpak DevOps agent",
     subtitle:
-      "Open-source DevOps agent on your machine, controlled from your phone. Rust speed, enterprise security.",
-    metaTitle: "Stakpak Mobile App – Run Stakpak from anywhere | Paseo",
+      "Run Stakpak's Rust-based DevOps agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Stakpak DevOps Agent Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Stakpak, the Rust-based DevOps agent, from your phone. Launch tasks on your machine, monitor from your pocket.",
+      "Open source mobile and desktop app for Stakpak, the Rust-based DevOps agent. Launch tasks on your machine, monitor from anywhere.",
   },
   {
     slug: "vtcode",
     name: "VT Code",
-    title: "VT Code, mobile",
+    title: "Open source app for VT Code",
     subtitle:
-      "Multi-provider coding agent on your machine. Send tasks from anywhere, ship from your pocket.",
-    metaTitle: "VT Code Mobile App – Run VT Code from anywhere | Paseo",
+      "Run VT Code's multi-provider coding agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "VT Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run VT Code, the open-source multi-provider coding agent, from your phone. Launch sessions, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for VT Code, the multi-provider coding agent. Launch sessions on your machine, ship from anywhere.",
   },
   {
     slug: "agoragentic",
     name: "Agoragentic",
-    title: "Agoragentic from your phone",
-    subtitle: "174+ AI capabilities on your machine, driven from anywhere. Browse, invoke, ship.",
-    metaTitle: "Agoragentic Mobile App – Run Agoragentic from anywhere | Paseo",
+    title: "Open source app for Agoragentic",
+    subtitle:
+      "Run Agoragentic's 174+ AI capabilities on your machine, drive it from your phone or desktop.",
+    metaTitle: "Agoragentic Mobile and Desktop App, Open Source",
     metaDescription:
-      "Drive Agoragentic, the AI agent marketplace, from your phone. Launch sessions on your machine, ship from your pocket.",
+      "Open source mobile and desktop app for Agoragentic, the AI agent marketplace. Launch sessions on your machine, ship from anywhere.",
   },
   {
     slug: "autohand",
     name: "Autohand Code",
-    title: "Autohand Code, mobile",
+    title: "Open source app for Autohand Code",
     subtitle:
-      "Autohand's coding agent on your machine, controlled from your phone. Real work, no laptop.",
-    metaTitle: "Autohand Code Mobile App – Run Autohand from anywhere | Paseo",
+      "Run Autohand AI's coding agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Autohand Code Mobile and Desktop App, Open Source",
     metaDescription:
-      "Run Autohand AI's coding agent from your phone. Launch sessions on your machine, monitor progress, ship from anywhere.",
+      "Open source mobile and desktop app for Autohand AI's coding agent. Launch sessions on your machine, monitor progress, ship from anywhere.",
+  },
+  {
+    slug: "grok",
+    name: "Grok",
+    title: "Open source app for Grok",
+    subtitle:
+      "Run xAI's Grok Build coding agent on your machine, drive it from your phone or desktop.",
+    metaTitle: "Grok Mobile and Desktop App, Open Source",
+    metaDescription:
+      "Open source mobile and desktop app for xAI's Grok Build coding agent. Launch sessions on your machine, monitor progress, and ship from anywhere. Self-hosted.",
   },
 ] as const satisfies readonly AgentPage[];
 

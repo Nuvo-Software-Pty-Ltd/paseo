@@ -44,7 +44,7 @@ import {
   type WorkspaceTabSnapshot,
   type WorkspaceLayout,
 } from "@/stores/workspace-layout-actions";
-import { normalizeWorkspaceTabTarget } from "@/utils/workspace-tab-identity";
+import { normalizeWorkspaceTabTarget } from "@/workspace-tabs/identity";
 
 export { buildWorkspaceTabPersistenceKey };
 export {
@@ -76,6 +76,11 @@ interface WorkspaceLayoutStore {
   hiddenAgentIdsByWorkspace: Record<string, Set<string>>;
   focusRestorationByWorkspace: Record<string, WorkspaceFocusRestorationState>;
   openTabFocused: (workspaceKey: string, target: WorkspaceTabTarget) => string | null;
+  openChildTabFocused: (
+    workspaceKey: string,
+    target: WorkspaceTabTarget,
+    parentTabId: string,
+  ) => string | null;
   openTabInBackground: (workspaceKey: string, target: WorkspaceTabTarget) => string | null;
   closeTab: (workspaceKey: string, tabId: string) => void;
   focusTab: (workspaceKey: string, tabId: string) => void;
@@ -188,6 +193,31 @@ function withoutFocusRestoration(
   return { focusRestorationByWorkspace };
 }
 
+function attachParentTab(input: {
+  layout: WorkspaceLayout;
+  childTabId: string | null;
+  parentTabId: string | null;
+}): WorkspaceLayout {
+  const childTabId = trimNonEmpty(input.childTabId);
+  const parentTabId = trimNonEmpty(input.parentTabId);
+  if (!childTabId || !parentTabId || childTabId === parentTabId) {
+    return normalizeLayout(input.layout);
+  }
+
+  const openTabIds = new Set(collectAllTabs(input.layout.root).map((tab) => tab.tabId));
+  if (!openTabIds.has(childTabId) || !openTabIds.has(parentTabId)) {
+    return normalizeLayout(input.layout);
+  }
+
+  return normalizeLayout({
+    ...input.layout,
+    parentTabIdByTabId: {
+      ...input.layout.parentTabIdByTabId,
+      [childTabId]: parentTabId,
+    },
+  });
+}
+
 export function createWorkspaceLayoutStore(
   ids: WorkspaceLayoutIdSource = defaultWorkspaceLayoutIds,
 ) {
@@ -227,6 +257,45 @@ export function createWorkspaceLayoutStore(
               [normalizedWorkspaceKey]: result.layout,
             },
           }));
+
+          return result.tabId;
+        },
+        openChildTabFocused: (workspaceKey, target, parentTabId) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const normalizedParentTabId = trimNonEmpty(parentTabId);
+          const normalizedTarget = normalizeWorkspaceTabTarget(target);
+          if (!normalizedWorkspaceKey || !normalizedParentTabId || !normalizedTarget) {
+            return null;
+          }
+
+          const result = openTabInLayoutFocused({
+            layout: getWorkspaceLayout(get().layoutByWorkspace, normalizedWorkspaceKey),
+            target: normalizedTarget,
+            now: Date.now(),
+          });
+
+          set((state) => {
+            const layout = attachParentTab({
+              layout: result.layout,
+              childTabId: result.tabId,
+              parentTabId: normalizedParentTabId,
+            });
+            return {
+              ...withoutFocusRestoration(state, normalizedWorkspaceKey),
+              hiddenAgentIdsByWorkspace:
+                normalizedTarget.kind !== "agent"
+                  ? state.hiddenAgentIdsByWorkspace
+                  : removeAgentIdFromWorkspaceSet(
+                      state.hiddenAgentIdsByWorkspace,
+                      normalizedWorkspaceKey,
+                      normalizedTarget.agentId,
+                    ),
+              layoutByWorkspace: {
+                ...state.layoutByWorkspace,
+                [normalizedWorkspaceKey]: layout,
+              },
+            };
+          });
 
           return result.tabId;
         },

@@ -1,4 +1,6 @@
-import { getDesktopHost } from "@/desktop/host";
+import type { DesktopDialogBridge } from "@/desktop/host";
+import { RASTER_IMAGE_FILE_EXTENSIONS } from "@/attachments/file-types";
+import { i18n } from "@/i18n/i18next";
 import { isAbsolutePath } from "@/utils/path";
 
 export type PickedImageSource = { kind: "file_uri"; uri: string } | { kind: "blob"; blob: Blob };
@@ -15,20 +17,6 @@ export interface ExpoImagePickerAssetLike {
   fileName?: string | null;
   file?: File | null;
 }
-
-const IMAGE_FILE_EXTENSIONS = [
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "avif",
-  "heic",
-  "heif",
-  "tiff",
-  "bmp",
-  "svg",
-];
 
 function shouldTreatAsFileUri(uri: string): boolean {
   return uri.startsWith("file://") || isAbsolutePath(uri);
@@ -79,16 +67,22 @@ function normalizeDesktopDialogSelection(selection: string | string[] | null): s
   return Array.isArray(selection) ? selection : [selection];
 }
 
-export async function openImagePathsWithDesktopDialog(): Promise<string[]> {
-  const desktop = getDesktopHost();
+export async function openImagePathsWithDesktopDialog(
+  dialog: DesktopDialogBridge | null | undefined,
+): Promise<string[]> {
   const options = {
     directory: false,
     multiple: true,
-    filters: [{ name: "Images", extensions: IMAGE_FILE_EXTENSIONS }],
-    title: "Attach images",
+    filters: [
+      {
+        name: i18n.t("imageAttachmentPicker.dialogFilterName"),
+        extensions: RASTER_IMAGE_FILE_EXTENSIONS,
+      },
+    ],
+    title: i18n.t("imageAttachmentPicker.dialogTitle"),
   };
 
-  const dialogOpen = desktop?.dialog?.open;
+  const dialogOpen = dialog?.open;
   if (typeof dialogOpen !== "function") {
     throw new Error("Desktop dialog API is not available.");
   }

@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { useSessionStore } from "@/stores/session-store";
 import { agentHistoryQueryKey } from "./agent-history-query-key";
 
@@ -11,12 +12,7 @@ export interface ArchiveAgentInput {
   agentId: string;
 }
 
-export interface ArchivedAgentCloseResult {
-  agentId: string;
-  archivedAt: string;
-}
-
-type ArchiveAgentPendingState = Record<string, true>;
+export type ArchiveAgentPendingState = Record<string, true>;
 
 interface SetAgentArchivingInput extends ArchiveAgentInput {
   queryClient: QueryClient;
@@ -27,35 +23,24 @@ interface IsAgentArchivingInput extends ArchiveAgentInput {
   queryClient: QueryClient;
 }
 
-interface AgentsListQueryData {
+export interface AgentsListQueryData {
   entries?: Array<{ agent?: { id?: string | null } | null } | null>;
 }
 
-interface ArchivedAgentListCacheSnapshot {
-  sidebarAgentsList: AgentsListQueryData | undefined;
-  allAgents: AgentsListQueryData | undefined;
-  agentHistory: AgentHistoryQueryData | undefined;
-}
-
-interface ArchiveAgentMutationContext {
-  agent: ReturnType<typeof getStoredAgentSnapshot>;
-  lists: ArchivedAgentListCacheSnapshot;
-}
-
-interface AgentHistoryQueryAgent {
+export interface AgentHistoryQueryAgent {
   id?: string | null;
   archivedAt?: Date | null;
 }
 
-interface AgentHistoryQueryPage {
+export interface AgentHistoryQueryPage {
   agents?: AgentHistoryQueryAgent[];
 }
 
-interface AgentHistoryQueryData {
+export interface AgentHistoryQueryData {
   pages?: AgentHistoryQueryPage[];
 }
 
-function toArchiveKey(input: ArchiveAgentInput): string {
+export function toArchiveKey(input: ArchiveAgentInput): string {
   const serverId = input.serverId.trim();
   const agentId = input.agentId.trim();
   if (!serverId || !agentId) {
@@ -64,11 +49,11 @@ function toArchiveKey(input: ArchiveAgentInput): string {
   return `${serverId}:${agentId}`;
 }
 
-function readPendingState(queryClient: QueryClient): ArchiveAgentPendingState {
+export function readPendingState(queryClient: QueryClient): ArchiveAgentPendingState {
   return queryClient.getQueryData<ArchiveAgentPendingState>(ARCHIVE_AGENT_PENDING_QUERY_KEY) ?? {};
 }
 
-function selectPendingArchiveAgentIds(
+export function selectPendingArchiveAgentIds(
   pendingState: ArchiveAgentPendingState,
   serverId: string,
 ): ReadonlySet<string> {
@@ -97,7 +82,7 @@ function selectPendingArchiveAgentIds(
   return new Set(agentIds);
 }
 
-function setAgentArchiving(input: SetAgentArchivingInput): void {
+export function setAgentArchiving(input: SetAgentArchivingInput): void {
   const key = toArchiveKey(input);
   if (!key) {
     return;
@@ -125,7 +110,7 @@ function setAgentArchiving(input: SetAgentArchivingInput): void {
   );
 }
 
-function isAgentArchiving(input: IsAgentArchivingInput): boolean {
+export function isAgentArchiving(input: IsAgentArchivingInput): boolean {
   const key = toArchiveKey(input);
   if (!key) {
     return false;
@@ -133,7 +118,7 @@ function isAgentArchiving(input: IsAgentArchivingInput): boolean {
   return readPendingState(input.queryClient)[key] ?? false;
 }
 
-function removeAgentFromListPayload<T extends AgentsListQueryData | undefined>(
+export function removeAgentFromListPayload<T extends AgentsListQueryData | undefined>(
   payload: T,
   agentId: string,
 ): T {
@@ -150,7 +135,10 @@ function removeAgentFromListPayload<T extends AgentsListQueryData | undefined>(
   } as T;
 }
 
-function removeAgentFromCachedLists(queryClient: QueryClient, input: ArchiveAgentInput): void {
+export function removeAgentFromCachedLists(
+  queryClient: QueryClient,
+  input: ArchiveAgentInput,
+): void {
   const agentId = input.agentId.trim();
   if (!agentId) {
     return;
@@ -166,7 +154,7 @@ function removeAgentFromCachedLists(queryClient: QueryClient, input: ArchiveAgen
   );
 }
 
-function markAgentArchivedInHistoryPayload<T extends AgentHistoryQueryData | undefined>(
+export function markAgentArchivedInHistoryPayload<T extends AgentHistoryQueryData | undefined>(
   payload: T,
   input: ArchiveAgentInput & { archivedAt: string },
 ): T {
@@ -204,7 +192,7 @@ function markAgentArchivedInHistoryPayload<T extends AgentHistoryQueryData | und
   return changed ? ({ ...payload, pages } as T) : payload;
 }
 
-function markAgentArchivedInHistoryCache(
+export function markAgentArchivedInHistoryCache(
   queryClient: QueryClient,
   input: ArchiveAgentInput & { archivedAt: string },
 ): void {
@@ -212,6 +200,29 @@ function markAgentArchivedInHistoryCache(
     agentHistoryQueryKey(input.serverId),
     (current) => markAgentArchivedInHistoryPayload(current, input),
   );
+}
+
+export function clearArchiveAgentPending(input: IsAgentArchivingInput): void {
+  setAgentArchiving({
+    ...input,
+    isArchiving: false,
+  });
+}
+
+export interface ArchivedAgentCloseResult {
+  agentId: string;
+  archivedAt: string;
+}
+
+interface ArchivedAgentListCacheSnapshot {
+  sidebarAgentsList: AgentsListQueryData | undefined;
+  allAgents: AgentsListQueryData | undefined;
+  agentHistory: AgentHistoryQueryData | undefined;
+}
+
+interface ArchiveAgentMutationContext {
+  agent: ReturnType<typeof getStoredAgentSnapshot>;
+  lists: ArchivedAgentListCacheSnapshot;
 }
 
 function getStoredAgentSnapshot(input: ArchiveAgentInput) {
@@ -352,13 +363,6 @@ export function applyArchivedAgentCloseResults(input: ApplyArchivedAgentCloseRes
   }
 }
 
-export function clearArchiveAgentPending(input: IsAgentArchivingInput): void {
-  setAgentArchiving({
-    ...input,
-    isArchiving: false,
-  });
-}
-
 function useArchiveAgentPendingQuery() {
   return useQuery({
     queryKey: ARCHIVE_AGENT_PENDING_QUERY_KEY,
@@ -379,6 +383,7 @@ export function usePendingArchiveAgentIds(serverId: string): ReadonlySet<string>
 
 export function useArchiveAgent() {
   const queryClient = useQueryClient();
+  const { t } = useTranslation();
 
   const pendingQuery = useArchiveAgentPendingQuery();
 
@@ -386,7 +391,7 @@ export function useArchiveAgent() {
     mutationFn: async (input: ArchiveAgentInput): Promise<{ archivedAt: string }> => {
       const client = useSessionStore.getState().sessions[input.serverId]?.client ?? null;
       if (!client) {
-        throw new Error("Daemon client not available");
+        throw new Error(t("common.errors.daemonClientUnavailable"));
       }
       return await client.archiveAgent(input.agentId);
     },
@@ -472,13 +477,3 @@ export function useArchiveAgent() {
     isArchivingAgent,
   };
 }
-
-export const __private__ = {
-  toArchiveKey,
-  readPendingState,
-  selectPendingArchiveAgentIds,
-  setAgentArchiving,
-  isAgentArchiving,
-  removeAgentFromListPayload,
-  markAgentArchivedInHistoryPayload,
-};

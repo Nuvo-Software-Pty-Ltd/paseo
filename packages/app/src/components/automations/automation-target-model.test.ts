@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ScheduleTarget } from "@server/server/schedule/types";
+import type { ScheduleTarget } from "@getpaseo/protocol/schedule/types";
 import {
   type AutomationProjectOption,
   buildProjectOptions,

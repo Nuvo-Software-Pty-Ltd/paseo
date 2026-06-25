@@ -1,8 +1,9 @@
 import { useCallback, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { getIsElectronRuntime } from "@/constants/layout";
-import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
+import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
 import { Shortcut } from "@/components/ui/shortcut";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { getShortcutOs } from "@/utils/shortcut-platform";
@@ -11,6 +12,7 @@ import { buildKeyboardShortcutHelpSections } from "@/keyboard/keyboard-shortcuts
 const SNAP_POINTS: string[] = ["70%", "92%"];
 
 export function KeyboardShortcutsDialog() {
+  const { t } = useTranslation();
   const open = useKeyboardShortcutsStore((s) => s.shortcutsDialogOpen);
   const setOpen = useKeyboardShortcutsStore((s) => s.setShortcutsDialogOpen);
 
@@ -22,10 +24,11 @@ export function KeyboardShortcutsDialog() {
   );
 
   const handleClose = useCallback(() => setOpen(false), [setOpen]);
+  const header = useMemo<SheetHeader>(() => ({ title: t("settings.shortcuts.dialogTitle") }), [t]);
 
   return (
     <AdaptiveModalSheet
-      title="Shortcuts"
+      header={header}
       visible={open}
       onClose={handleClose}
       testID="keyboard-shortcuts-dialog"
@@ -34,13 +37,15 @@ export function KeyboardShortcutsDialog() {
       <View testID="keyboard-shortcuts-dialog-content" style={styles.content}>
         {sections.map((section) => (
           <View key={section.title} style={styles.section}>
-            <Text style={styles.sectionTitle}>{section.title}</Text>
+            <Text style={styles.sectionTitle}>{t(section.titleKey)}</Text>
             <View style={styles.rows}>
               {section.rows.map((row) => (
                 <View key={row.id} style={styles.row}>
                   <View style={styles.rowText}>
-                    <Text style={styles.rowLabel}>{row.label}</Text>
-                    {row.note ? <Text style={styles.rowNote}>{row.note}</Text> : null}
+                    <Text style={styles.rowLabel}>{t(row.labelKey)}</Text>
+                    {row.note ? (
+                      <Text style={styles.rowNote}>{row.noteKey ? t(row.noteKey) : row.note}</Text>
+                    ) : null}
                   </View>
                   <Shortcut keys={row.keys} style={styles.rowShortcut} />
                 </View>

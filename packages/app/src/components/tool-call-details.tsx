@@ -8,11 +8,18 @@ import {
 } from "react-native";
 import { ScrollView as GHScrollView } from "react-native-gesture-handler";
 import { StyleSheet } from "react-native-unistyles";
-import { Fonts } from "@/constants/theme";
-import type { ToolCallDetail } from "@server/server/agent/agent-sdk-types";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+import { AppearanceStyleBoundary } from "@/components/appearance-style-boundary";
+import type { ToolCallDetail } from "@getpaseo/protocol/agent-types";
 import { buildLineDiff, parseUnifiedDiff, type DiffLine } from "@/utils/tool-call-parsers";
+import { highlightDiffLines } from "@/utils/diff-highlight";
 import { hasMeaningfulToolCallDetail } from "@/utils/tool-call-detail-state";
 import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
+import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
+import { extensionFromPath, highlightToKeyedLines } from "@/utils/highlight-cache";
+import { HighlightedLines } from "./highlighted-content";
 import { DiffViewer } from "./diff-viewer";
 import { getCodeInsets } from "./code-insets";
 import { isWeb } from "@/constants/platform";
@@ -79,7 +86,7 @@ function useDetailStyles(
   const codeVerticalScrollStyle = useMemo(
     () => [
       styles.codeVerticalScroll,
-      resolvedMaxHeight !== undefined && { maxHeight: resolvedMaxHeight },
+      resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
       shouldFill && styles.fillHeight,
       webScrollbarStyle,
     ],
@@ -88,7 +95,7 @@ function useDetailStyles(
   const scrollAreaFillStyle = useMemo(
     () => [
       styles.scrollArea,
-      resolvedMaxHeight !== undefined && { maxHeight: resolvedMaxHeight },
+      resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
       shouldFill && styles.fillHeight,
       webScrollbarStyle,
     ],
@@ -97,7 +104,7 @@ function useDetailStyles(
   const scrollAreaStyle = useMemo(
     () => [
       styles.scrollArea,
-      resolvedMaxHeight !== undefined && { maxHeight: resolvedMaxHeight },
+      resolvedMaxHeight !== undefined && inlineUnistylesStyle({ maxHeight: resolvedMaxHeight }),
       webScrollbarStyle,
     ],
     [resolvedMaxHeight, webScrollbarStyle],
@@ -142,10 +149,10 @@ function useDetailStyles(
 function useDiffLines(detail: ToolCallDetail | undefined): DiffLine[] | undefined {
   return useMemo(() => {
     if (!detail || detail.type !== "edit") return undefined;
-    if (detail.unifiedDiff) {
-      return parseUnifiedDiff(detail.unifiedDiff);
-    }
-    return buildLineDiff(detail.oldString ?? "", detail.newString ?? "");
+    const diffLines = detail.unifiedDiff
+      ? parseUnifiedDiff(detail.unifiedDiff)
+      : buildLineDiff(detail.oldString ?? "", detail.newString ?? "");
+    return highlightDiffLines(diffLines, detail.filePath);
   }, [detail]);
 }
 
@@ -175,7 +182,7 @@ function ShellDetailSection({ command, output, ds }: ShellDetailProps) {
             style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
-            <View style={styles.codeLine}>
+            <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
               <Text selectable style={styles.scrollText}>
                 <Text style={styles.shellPrompt}>$ </Text>
                 {normalizedCommand}
@@ -220,7 +227,7 @@ function WorktreeSetupDetailSection({
             style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
-            <View style={styles.codeLine}>
+            <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
               <Text selectable style={styles.scrollText}>
                 {hasLog ? setupLog : `Preparing worktree ${branchName} at ${worktreePath}`}
               </Text>
@@ -235,11 +242,12 @@ function WorktreeSetupDetailSection({
 function resolveSubAgentFallbackHeader(
   subAgentType: string | null | undefined,
   description: string | null | undefined,
+  fallbackText: string,
 ): string {
   if (subAgentType && description) {
     return `${subAgentType}: ${description}`;
   }
-  return subAgentType ?? description ?? "Sub-agent activity";
+  return subAgentType ?? description ?? fallbackText;
 }
 
 interface SubAgentDetailProps {
@@ -360,8 +368,13 @@ function SubAgentDetailSection({
   description,
   ds,
 }: SubAgentDetailProps) {
+  const { t } = useTranslation();
   const { actions, remainingLog } = useMemo(() => parseSubAgentLog(log), [log]);
-  const fallbackHeader = resolveSubAgentFallbackHeader(subAgentType, description);
+  const fallbackHeader = resolveSubAgentFallbackHeader(
+    subAgentType,
+    description,
+    t("toolCallDetails.subAgentActivity"),
+  );
   const hasActions = actions.length > 0;
   return (
     <View style={ds.sectionFillStyle}>
@@ -379,7 +392,7 @@ function SubAgentDetailSection({
             style={ds.webScrollbarStyle}
             contentContainerStyle={styles.codeHorizontalContent}
           >
-            <View style={styles.codeLine}>
+            <View style={styles.codeLine} dataSet={CODE_SURFACE_DATASET}>
               {childSessionId ? (
                 <Text selectable style={styles.subAgentSessionText}>
                   session {childSessionId}
@@ -430,9 +443,22 @@ interface ScrollableContentProps {
   content: string;
   ds: DetailStyles;
   wrapInSectionFill?: boolean;
+  // Drives syntax highlighting (extension only) and, with startLine, a gutter.
+  filePath?: string | null;
+  startLine?: number;
 }
 
-function ScrollableTextSection({ content, ds, wrapInSectionFill = true }: ScrollableContentProps) {
+function ScrollableTextSection({
+  content,
+  ds,
+  wrapInSectionFill = true,
+  filePath,
+  startLine,
+}: ScrollableContentProps) {
+  const keyedLines = useMemo(
+    () => (filePath ? highlightToKeyedLines(content, extensionFromPath(filePath)) : null),
+    [content, filePath],
+  );
   const body = (
     <ScrollView
       style={ds.scrollAreaFillStyle}
@@ -446,9 +472,13 @@ function ScrollableTextSection({ content, ds, wrapInSectionFill = true }: Scroll
         showsHorizontalScrollIndicator={true}
         style={ds.webScrollbarStyle}
       >
-        <Text selectable style={styles.scrollText}>
-          {content}
-        </Text>
+        {keyedLines ? (
+          <HighlightedLines lines={keyedLines} startLine={startLine} />
+        ) : (
+          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
+            {content}
+          </Text>
+        )}
       </ScrollView>
     </ScrollView>
   );
@@ -477,7 +507,7 @@ function FetchDetailSection({ url, result, ds }: FetchDetailProps) {
           showsHorizontalScrollIndicator
           style={ds.webScrollbarStyle}
         >
-          <Text selectable style={styles.scrollText}>
+          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {result ? `${url}\n\n${result}` : url}
           </Text>
         </ScrollView>
@@ -521,7 +551,7 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
             showsHorizontalScrollIndicator
             style={ds.webScrollbarStyle}
           >
-            <Text selectable style={styles.scrollText}>
+            <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
               {detail.content}
             </Text>
           </ScrollView>
@@ -532,7 +562,7 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
   if (detail.filePaths && detail.filePaths.length > 0) {
     out.push(
       <View key="search-files" style={styles.section}>
-        <Text selectable style={styles.scrollText}>
+        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.filePaths.join("\n")}
         </Text>
       </View>,
@@ -541,7 +571,7 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
   if (detail.webResults && detail.webResults.length > 0) {
     out.push(
       <View key="search-web-results" style={styles.section}>
-        <Text selectable style={styles.scrollText}>
+        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.webResults.map((entry) => `${entry.title}\n${entry.url}`).join("\n\n")}
         </Text>
       </View>,
@@ -550,7 +580,7 @@ function buildSearchSections(detail: SearchDetail, ds: DetailStyles): ReactNode[
   if (detail.annotations && detail.annotations.length > 0) {
     out.push(
       <View key="search-annotations" style={styles.section}>
-        <Text selectable style={styles.scrollText}>
+        <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
           {detail.annotations.join("\n\n")}
         </Text>
       </View>,
@@ -572,7 +602,7 @@ interface UnknownDetail {
   output: unknown;
 }
 
-function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles): ReactNode[] {
+function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles, t: TFunction): ReactNode[] {
   const plainInputText =
     typeof detail.input === "string" && detail.output === null ? detail.input : null;
 
@@ -587,8 +617,8 @@ function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles): ReactNod
   }
 
   const sectionsFromTopLevel = [
-    { title: "Input", value: detail.input },
-    { title: "Output", value: detail.output },
+    { title: t("toolCallDetails.input"), value: detail.input },
+    { title: t("toolCallDetails.output"), value: detail.output },
   ].filter((entry) =>
     hasMeaningfulToolCallDetail({
       type: "unknown",
@@ -617,7 +647,7 @@ function buildUnknownSections(detail: UnknownDetail, ds: DetailStyles): ReactNod
           contentContainerStyle={styles.jsonContent}
           showsHorizontalScrollIndicator={true}
         >
-          <Text selectable style={styles.scrollText}>
+          <Text selectable style={styles.scrollText} dataSet={CODE_SURFACE_DATASET}>
             {value}
           </Text>
         </ScrollView>
@@ -631,6 +661,7 @@ function buildDetailSections(
   detail: ToolCallDetail | undefined,
   diffLines: DiffLine[] | undefined,
   ds: DetailStyles,
+  t: TFunction,
 ): ReactNode[] {
   if (!detail) return [];
   if (detail.type === "shell") {
@@ -668,14 +699,27 @@ function buildDetailSections(
     return [
       <View key="write" style={ds.sectionFillStyle}>
         {detail.content ? (
-          <ScrollableTextSection content={detail.content} ds={ds} wrapInSectionFill={false} />
+          <ScrollableTextSection
+            content={detail.content}
+            ds={ds}
+            wrapInSectionFill={false}
+            filePath={detail.filePath}
+          />
         ) : null}
       </View>,
     ];
   }
   if (detail.type === "read") {
     if (!detail.content) return [];
-    return [<ScrollableTextSection key="read" content={detail.content} ds={ds} />];
+    return [
+      <ScrollableTextSection
+        key="read"
+        content={detail.content}
+        ds={ds}
+        filePath={detail.filePath}
+        startLine={detail.offset ?? 1}
+      />,
+    ];
   }
   if (detail.type === "search") {
     return buildSearchSections(detail, ds);
@@ -688,15 +732,16 @@ function buildDetailSections(
     return [<PlainTextSection key="plain-text" text={detail.text} />];
   }
   if (detail.type === "unknown") {
-    return buildUnknownSections(detail, ds);
+    return buildUnknownSections(detail, ds, t);
   }
   return [];
 }
 
 function ErrorSection({ errorText, ds }: { errorText: string; ds: DetailStyles }) {
+  const { t } = useTranslation();
   return (
     <View style={styles.section}>
-      <Text style={SECTION_TITLE_ERROR_STYLE}>Error</Text>
+      <Text style={SECTION_TITLE_ERROR_STYLE}>{t("toolCallDetails.error")}</Text>
       <ScrollView
         horizontal
         nestedScrollEnabled
@@ -704,7 +749,7 @@ function ErrorSection({ errorText, ds }: { errorText: string; ds: DetailStyles }
         contentContainerStyle={styles.jsonContent}
         showsHorizontalScrollIndicator={true}
       >
-        <Text selectable style={SCROLL_TEXT_ERROR_STYLE}>
+        <Text selectable style={SCROLL_TEXT_ERROR_STYLE} dataSet={CODE_SURFACE_DATASET}>
           {errorText}
         </Text>
       </ScrollView>
@@ -722,18 +767,27 @@ function LoadingSkeleton({ containerStyle }: { containerStyle: StyleProp<ViewSty
   );
 }
 
-export function ToolCallDetailsContent({
+export function ToolCallDetailsContent({ ...props }: ToolCallDetailsContentProps) {
+  return (
+    <AppearanceStyleBoundary>
+      <ToolCallDetailsContentInner {...props} />
+    </AppearanceStyleBoundary>
+  );
+}
+
+function ToolCallDetailsContentInner({
   detail,
   errorText,
   maxHeight,
   fillAvailableHeight = false,
   showLoadingSkeleton = false,
 }: ToolCallDetailsContentProps) {
+  const { t } = useTranslation();
   const resolvedMaxHeight = fillAvailableHeight ? undefined : (maxHeight ?? 300);
   const ds = useDetailStyles(detail, resolvedMaxHeight, fillAvailableHeight);
   const diffLines = useDiffLines(detail);
 
-  const sections: ReactNode[] = buildDetailSections(detail, diffLines, ds);
+  const sections: ReactNode[] = buildDetailSections(detail, diffLines, ds, t);
 
   if (errorText) {
     sections.push(<ErrorSection key="error" errorText={errorText} ds={ds} />);
@@ -743,7 +797,7 @@ export function ToolCallDetailsContent({
     if (showLoadingSkeleton) {
       return <LoadingSkeleton containerStyle={ds.loadingContainerStyle} />;
     }
-    return <Text style={styles.emptyStateText}>No additional details available</Text>;
+    return <Text style={styles.emptyStateText}>{t("toolCallDetails.empty")}</Text>;
   }
 
   return <View style={ds.fullBleedContainerStyle}>{sections}</View>;
@@ -789,7 +843,7 @@ const styles = StyleSheet.create((theme) => {
       padding: theme.spacing[3],
     },
     plainText: {
-      fontFamily: Fonts.sans,
+      fontFamily: theme.fontFamily.ui,
       fontSize: theme.fontSize.base,
       color: theme.colors.foreground,
       lineHeight: 22,
@@ -842,8 +896,8 @@ const styles = StyleSheet.create((theme) => {
       padding: insets.padding,
     },
     scrollText: {
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.xs,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       color: theme.colors.foreground,
       lineHeight: 18,
       ...(isWeb
@@ -857,8 +911,8 @@ const styles = StyleSheet.create((theme) => {
       color: theme.colors.foregroundMuted,
     },
     subAgentSessionText: {
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.xs,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       color: theme.colors.foregroundMuted,
       lineHeight: 18,
       marginBottom: theme.spacing[2],
@@ -873,14 +927,14 @@ const styles = StyleSheet.create((theme) => {
       gap: theme.spacing[2],
     },
     subAgentActionTool: {
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.xs,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       color: theme.colors.foregroundMuted,
       lineHeight: 18,
     },
     subAgentActionSummary: {
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.xs,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       color: theme.colors.foreground,
       lineHeight: 18,
     },

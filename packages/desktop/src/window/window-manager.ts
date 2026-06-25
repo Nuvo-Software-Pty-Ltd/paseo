@@ -10,6 +10,10 @@ import {
   shell,
 } from "electron";
 
+import type { WindowState, WindowStateStore } from "../settings/window-state.js";
+
+const WINDOW_STATE_SAVE_DEBOUNCE_MS = 400;
+
 export function readBadgeCount(input: unknown): number {
   if (typeof input !== "number" || !Number.isSafeInteger(input) || input < 0) {
     return 0;
@@ -85,6 +89,26 @@ export function getMainWindowChromeOptions(input: {
     titleBarOverlay: getTitleBarOverlayOptions(input.theme),
     autoHideMenuBar: true,
   };
+}
+
+export const DEFAULT_WINDOW_WIDTH = 1200;
+export const DEFAULT_WINDOW_HEIGHT = 800;
+
+/**
+ * Window size/position options for the BrowserWindow constructor, derived from
+ * a restored state when available. Falls back to the default size, and only
+ * sets x/y when a full position was persisted (a partial state lets the OS
+ * place the window).
+ */
+export function resolveWindowBounds(
+  state: WindowState | null,
+): Pick<Electron.BrowserWindowConstructorOptions, "width" | "height" | "x" | "y"> {
+  const width = state?.width ?? DEFAULT_WINDOW_WIDTH;
+  const height = state?.height ?? DEFAULT_WINDOW_HEIGHT;
+  if (state?.x !== undefined && state?.y !== undefined) {
+    return { width, height, x: state.x, y: state.y };
+  }
+  return { width, height };
 }
 
 function readFiniteOverlayHeight(input: unknown): number | null {
@@ -216,69 +240,108 @@ export function registerWindowManager(): void {
 }
 
 export function setupWindowResizeEvents(win: BrowserWindow): void {
-  win.on("resize", () => {
-    win.webContents.send("paseo:window:resized", {});
-  });
-
-  win.on("enter-full-screen", () => {
-    win.webContents.send("paseo:window:resized", {});
-  });
-
-  win.on("leave-full-screen", () => {
-    win.webContents.send("paseo:window:resized", {});
-  });
-}
-
-function refreshChromiumSurface(win: BrowserWindow): void {
-  if (win.isDestroyed()) {
-    return;
-  }
-
-  win.webContents.invalidate();
-  if (win.isMaximized() || win.isFullScreen()) {
-    return;
-  }
-
-  const [width, height] = win.getSize();
-  win.setSize(width + 1, height);
-  setTimeout(() => {
-    if (!win.isDestroyed()) {
-      win.setSize(width, height);
-    }
-  }, 32);
-}
-
-export function setupDarwinPaintRefresh(win: BrowserWindow): void {
-  if (process.platform !== "darwin") {
-    return;
-  }
-
-  win.webContents.setBackgroundThrottling(false);
-
-  const requestSurfaceRefresh = () => {
-    if (!win.isDestroyed()) {
-      win.webContents.invalidate();
-    }
-  };
-  const handleChildProcessGone = (
-    _event: Electron.Event,
-    details: { type?: string; reason?: string },
-  ) => {
-    if (details.type !== "GPU") {
+  // A resize/fullscreen event can fire while the window is tearing down; sending
+  // to a destroyed webContents throws. Guard so multi-window close doesn't surface
+  // "Object has been destroyed" exceptions.
+  const notifyResized = () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
       return;
     }
-
-    console.warn("[window] GPU process gone:", details.reason);
-    refreshChromiumSurface(win);
+    win.webContents.send("paseo:window:resized", {});
   };
 
-  win.on("restore", requestSurfaceRefresh);
-  win.on("show", requestSurfaceRefresh);
-  app.on("child-process-gone", handleChildProcessGone);
-  win.once("closed", () => {
-    win.off("restore", requestSurfaceRefresh);
-    win.off("show", requestSurfaceRefresh);
-    app.off("child-process-gone", handleChildProcessGone);
+  win.on("resize", notifyResized);
+  win.on("enter-full-screen", notifyResized);
+  win.on("leave-full-screen", notifyResized);
+}
+
+/**
+ * Persist the window's size/position/maximized state so it can be restored on
+ * the next launch. Debounces disk writes on resize/move, writes immediately on
+ * maximize/unmaximize, and flushes synchronously on close so the final state
+ * survives quit/reboot. The latest geometry is captured into memory on every
+ * event so a queued async write can never overwrite the close-time snapshot.
+ */
+export function setupWindowStatePersistence(win: BrowserWindow, store: WindowStateStore): void {
+  let latestState: WindowState | null = null;
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let flushed = false;
+
+  function clearTimer(): void {
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+  }
+
+  function captureState(): void {
+    // Skip transient geometry: maximized/fullscreen bounds aren't the size we
+    // want to restore to, and a minimized window reports misleading bounds.
+    if (win.isMinimized() || win.isFullScreen()) {
+      return;
+    }
+    const bounds = win.getNormalBounds();
+    latestState = {
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      isMaximized: win.isMaximized(),
+    };
+  }
+
+  function persist(): void {
+    if (latestState) {
+      void store.save(latestState).catch((error) => {
+        console.warn("[window-manager] Failed to persist window state", error);
+      });
+    }
+  }
+
+  function scheduleSave(): void {
+    captureState();
+    clearTimer();
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      persist();
+    }, WINDOW_STATE_SAVE_DEBOUNCE_MS);
+  }
+
+  function saveNow(): void {
+    captureState();
+    clearTimer();
+    persist();
+  }
+
+  // Final synchronous flush. Runs on window close AND on app quit: the app's
+  // before-quit handler calls app.exit(0), which bypasses the window close
+  // event (see daemon/quit-lifecycle.ts), so close alone would miss Cmd+Q.
+  function flushFinal(): void {
+    if (flushed) {
+      return;
+    }
+    flushed = true;
+    clearTimer();
+    captureState();
+    if (latestState) {
+      try {
+        store.saveSync(latestState);
+      } catch (error) {
+        console.warn("[window-manager] Failed to persist window state on exit", error);
+      }
+    }
+  }
+
+  win.on("resize", scheduleSave);
+  win.on("move", scheduleSave);
+  win.on("maximize", saveNow);
+  win.on("unmaximize", saveNow);
+  win.on("close", flushFinal);
+  app.on("before-quit", flushFinal);
+
+  win.on("closed", () => {
+    clearTimer();
+    app.removeListener("before-quit", flushFinal);
   });
 }
 

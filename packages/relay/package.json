@@ -1,9 +1,10 @@
 {
   "name": "@getpaseo/relay",
-  "version": "0.1.73",
+  "version": "0.1.99",
   "description": "Paseo relay for bridging daemon and client connections",
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.map"
   ],
   "type": "module",
   "types": "./dist/index.d.ts",
@@ -31,8 +32,10 @@
     "access": "public"
   },
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true })\" && tsc -p tsconfig.json --incremental false",
-    "prepack": "npm run build",
+    "clean": "node ../../scripts/clean-package-dist.mjs",
+    "build": "tsc -p tsconfig.json --incremental false",
+    "build:clean": "npm run clean && npm run build",
+    "prepack": "npm run build:clean",
     "typecheck": "tsgo --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -46,6 +49,6 @@
     "@types/node": "^20.9.0",
     "@types/ws": "^8.5.8",
     "typescript": "^5.2.2",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.6"
   }
 }

@@ -48,6 +48,14 @@ const PersistedProjectRecordSchema = z.object({
   rootPath: z.string(),
   kind: z.enum(["git", "non_git"]),
   displayName: z.string(),
+  // User-set override layered over the derived displayName. Mirrors the
+  // file-backed PersistedProjectRecordSchema (workspace-registry.ts). Null
+  // means "use the derived name". Old rows without the field still parse.
+  customName: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),

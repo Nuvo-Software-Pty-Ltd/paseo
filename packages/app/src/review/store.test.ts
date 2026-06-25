@@ -1,15 +1,47 @@
-import "@/test/window-local-storage";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { describe, expect, it } from "vitest";
 import type { ParsedDiffFile } from "@/git/use-diff-query";
 import {
   buildReviewAttachmentSnapshot,
   buildReviewDraftKey,
   buildReviewDraftScopeKey,
-  useReviewDraftStore,
 } from "./store";
+import {
+  addCommentToState,
+  clearReviewInState,
+  deleteCommentFromState,
+  type DiffModeOverride,
+  expireStaleDiffModeOverridesInState,
+  normalizePersistedState,
+  resolveDiffMode,
+  type ReviewDraftComment,
+  type ReviewDraftStoreState,
+  serializeReviewDraftState,
+  setDiffModeOverrideInState,
+  updateCommentInState,
+} from "./state";
 
-const STORE_STORAGE_KEY = "@paseo:review-draft-store";
+function emptyState(): ReviewDraftStoreState {
+  return { drafts: {}, diffModeOverrides: {} };
+}
+
+function makeOverride(
+  input: Pick<DiffModeOverride, "mode" | "isDirtyAtSelection">,
+): DiffModeOverride {
+  return { serverId: "server-1", cwd: "/repo", ...input };
+}
+
+function makeComment(overrides: Partial<ReviewDraftComment> = {}): ReviewDraftComment {
+  return {
+    id: "comment-1",
+    filePath: "src/example.ts",
+    side: "new",
+    lineNumber: 41,
+    body: "Please simplify this.",
+    createdAt: "2026-04-21T00:00:00.000Z",
+    updatedAt: "2026-04-21T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 function makeFile(): ParsedDiffFile {
   return {
@@ -73,7 +105,7 @@ describe("buildReviewDraftKey", () => {
     ).toBe("review:server=local:cwd=%2Frepo:mode=base:base=main:ignoreWhitespace=false");
   });
 
-  it("builds a mode-free scope key for active review mode sharing", () => {
+  it("builds a mode-free scope key for diff mode override sharing", () => {
     const scope = buildReviewDraftScopeKey({
       serverId: "local",
       workspaceId: "workspace-1",
@@ -89,44 +121,32 @@ describe("buildReviewDraftKey", () => {
   });
 });
 
-describe("review draft store", () => {
-  it("normalizes persisted active review modes with draft comments", async () => {
-    await AsyncStorage.setItem(
-      STORE_STORAGE_KEY,
-      JSON.stringify({
-        version: 0,
-        state: {
-          drafts: {
-            "review:key": [
-              {
-                id: "comment-1",
-                filePath: "src/example.ts",
-                side: "new",
-                lineNumber: 41,
-                body: "Keep me.",
-                createdAt: "2026-04-21T00:00:00.000Z",
-                updatedAt: "2026-04-21T00:00:00.000Z",
-              },
-              { id: "bad", filePath: "src/example.ts" },
-            ],
+describe("normalizePersistedState", () => {
+  it("filters invalid draft comments and ignores activeModesByScope from old persisted JSON", () => {
+    const normalized = normalizePersistedState({
+      drafts: {
+        "review:key": [
+          {
+            id: "comment-1",
+            filePath: "src/example.ts",
+            side: "new",
+            lineNumber: 41,
+            body: "Keep me.",
+            createdAt: "2026-04-21T00:00:00.000Z",
+            updatedAt: "2026-04-21T00:00:00.000Z",
           },
-          activeModesByScope: {
-            "review:scope:base": "base",
-            "review:scope:dirty": "uncommitted",
-            "review:scope:bad": "other",
-          },
-        },
-      }),
-    );
-
-    await useReviewDraftStore.persist.rehydrate();
-
-    const state = useReviewDraftStore.getState();
-    expect(state.activeModesByScope).toEqual({
-      "review:scope:base": "base",
-      "review:scope:dirty": "uncommitted",
+          { id: "bad", filePath: "src/example.ts" },
+        ],
+      },
+      // Old persisted field — must be tolerated and ignored, not migrated.
+      activeModesByScope: {
+        "review:scope:base": "base",
+        "review:scope:dirty": "uncommitted",
+      },
     });
-    expect(state.drafts["review:key"]).toEqual([
+
+    expect(normalized.diffModeOverrides).toEqual({});
+    expect(normalized.drafts["review:key"]).toEqual([
       {
         id: "comment-1",
         filePath: "src/example.ts",
@@ -139,54 +159,185 @@ describe("review draft store", () => {
     ]);
   });
 
-  it("persists compact draft comments separately from workspace attachment wire context", () => {
-    const key = buildReviewDraftKey({
-      serverId: "local",
-      workspaceId: "workspace-1",
-      cwd: "/repo",
-      mode: "uncommitted",
-      baseRef: null,
-      ignoreWhitespace: false,
+  it("returns empty state for null, non-object, or malformed inputs", () => {
+    expect(normalizePersistedState(null)).toEqual({ drafts: {}, diffModeOverrides: {} });
+    expect(normalizePersistedState("nope")).toEqual({ drafts: {}, diffModeOverrides: {} });
+    expect(normalizePersistedState({ drafts: [] })).toEqual({
+      drafts: {},
+      diffModeOverrides: {},
     });
+  });
+});
 
-    useReviewDraftStore.getState().clearReview({ key });
-    useReviewDraftStore.getState().addComment({
-      key,
-      comment: {
-        id: "comment-1",
-        filePath: "src/example.ts",
-        side: "new",
-        lineNumber: 41,
-        body: "Please simplify this.",
-        createdAt: "2026-04-21T00:00:00.000Z",
-        updatedAt: "2026-04-21T00:00:00.000Z",
-      },
-    });
-
-    expect(useReviewDraftStore.getState().drafts[key]).toEqual([
+describe("serializeReviewDraftState", () => {
+  it("serialized output does not contain activeModesByScope or diffModeOverrides", () => {
+    const state = setDiffModeOverrideInState(
+      addCommentToState(emptyState(), { key: "review:key", comment: makeComment() }),
       {
-        id: "comment-1",
-        filePath: "src/example.ts",
-        side: "new",
-        lineNumber: 41,
-        body: "Please simplify this.",
-        createdAt: "2026-04-21T00:00:00.000Z",
-        updatedAt: "2026-04-21T00:00:00.000Z",
+        scopeKey: "review:scope",
+        override: makeOverride({ mode: "uncommitted", isDirtyAtSelection: true }),
       },
-    ]);
+    );
 
-    useReviewDraftStore.getState().updateComment({
-      key,
-      id: "comment-1",
+    const serialized = serializeReviewDraftState(state);
+
+    expect(Object.keys(serialized)).toEqual(["drafts"]);
+    expect("activeModesByScope" in serialized).toBe(false);
+    expect("diffModeOverrides" in serialized).toBe(false);
+    expect(serialized.drafts["review:key"]).toHaveLength(1);
+  });
+});
+
+describe("diff mode override", () => {
+  it("resolves to auto mode from the dirty state when no override exists", () => {
+    expect(resolveDiffMode({ override: undefined, hasUncommittedChanges: true })).toBe(
+      "uncommitted",
+    );
+    expect(resolveDiffMode({ override: undefined, hasUncommittedChanges: false })).toBe("base");
+  });
+
+  it("honors the override while isDirty matches the value at selection, across remounts", () => {
+    const state = setDiffModeOverrideInState(emptyState(), {
+      scopeKey: "review:scope",
+      override: makeOverride({ mode: "base", isDirtyAtSelection: true }),
+    });
+
+    // Resolution is a plain store read, so it gives the same answer on every (re)mount.
+    const override = state.diffModeOverrides["review:scope"];
+    expect(resolveDiffMode({ override, hasUncommittedChanges: true })).toBe("base");
+  });
+
+  it("masks a stale override before its expiry lands", () => {
+    const state = setDiffModeOverrideInState(emptyState(), {
+      scopeKey: "review:scope",
+      override: makeOverride({ mode: "uncommitted", isDirtyAtSelection: true }),
+    });
+
+    const override = state.diffModeOverrides["review:scope"];
+    expect(resolveDiffMode({ override, hasUncommittedChanges: false })).toBe("base");
+  });
+
+  it("expires overrides for the checkout whose dirty state flipped, keeping the rest", () => {
+    let state = setDiffModeOverrideInState(emptyState(), {
+      scopeKey: "review:scope-a",
+      override: makeOverride({ mode: "base", isDirtyAtSelection: true }),
+    });
+    state = setDiffModeOverrideInState(state, {
+      scopeKey: "review:scope-b",
+      override: makeOverride({ mode: "uncommitted", isDirtyAtSelection: false }),
+    });
+    state = setDiffModeOverrideInState(state, {
+      scopeKey: "review:scope-other",
+      override: {
+        serverId: "server-2",
+        cwd: "/other",
+        mode: "base",
+        isDirtyAtSelection: true,
+      },
+    });
+
+    const next = expireStaleDiffModeOverridesInState(state, {
+      serverId: "server-1",
+      cwd: "/repo",
+      isDirty: false,
+    });
+
+    expect(next.diffModeOverrides["review:scope-a"]).toBeUndefined();
+    expect(next.diffModeOverrides["review:scope-b"]).toBeDefined();
+    expect(next.diffModeOverrides["review:scope-other"]).toBeDefined();
+  });
+
+  it("does not resurrect an expired override when the dirty state flips back", () => {
+    let state = setDiffModeOverrideInState(emptyState(), {
+      scopeKey: "review:scope",
+      override: makeOverride({ mode: "base", isDirtyAtSelection: true }),
+    });
+
+    // The checkout goes clean (e.g. agent commits): the override expires at the boundary.
+    state = expireStaleDiffModeOverridesInState(state, {
+      serverId: "server-1",
+      cwd: "/repo",
+      isDirty: false,
+    });
+    // The checkout goes dirty again: nothing to expire, and nothing comes back.
+    state = expireStaleDiffModeOverridesInState(state, {
+      serverId: "server-1",
+      cwd: "/repo",
+      isDirty: true,
+    });
+
+    expect(state.diffModeOverrides["review:scope"]).toBeUndefined();
+    expect(
+      resolveDiffMode({
+        override: state.diffModeOverrides["review:scope"],
+        hasUncommittedChanges: true,
+      }),
+    ).toBe("uncommitted");
+  });
+
+  it("keeps state identity when no override is stale", () => {
+    const state = setDiffModeOverrideInState(emptyState(), {
+      scopeKey: "review:scope",
+      override: makeOverride({ mode: "base", isDirtyAtSelection: true }),
+    });
+
+    expect(
+      expireStaleDiffModeOverridesInState(state, {
+        serverId: "server-1",
+        cwd: "/repo",
+        isDirty: true,
+      }),
+    ).toBe(state);
+    expect(
+      expireStaleDiffModeOverridesInState(emptyState(), {
+        serverId: "server-1",
+        cwd: "/repo",
+        isDirty: false,
+      }),
+    ).toEqual(emptyState());
+  });
+});
+
+describe("review draft reducers", () => {
+  it("adds, updates, and deletes draft comments by key", () => {
+    let state = emptyState();
+    const comment = makeComment();
+
+    state = addCommentToState(state, { key: "review:key", comment });
+    expect(state.drafts["review:key"]).toEqual([comment]);
+
+    state = updateCommentInState(state, {
+      key: "review:key",
+      id: comment.id,
       updates: { body: "Please simplify this condition." },
       updatedAt: "2026-04-21T00:01:00.000Z",
     });
-    expect(useReviewDraftStore.getState().drafts[key]?.[0]?.body).toBe(
-      "Please simplify this condition.",
-    );
+    expect(state.drafts["review:key"]?.[0]).toEqual({
+      ...comment,
+      body: "Please simplify this condition.",
+      updatedAt: "2026-04-21T00:01:00.000Z",
+    });
 
-    useReviewDraftStore.getState().deleteComment({ key, id: "comment-1" });
-    expect(useReviewDraftStore.getState().drafts[key]).toEqual([]);
+    state = deleteCommentFromState(state, { key: "review:key", id: comment.id });
+    expect(state.drafts["review:key"]).toEqual([]);
+  });
+
+  it("keeps state identity on no-op updates, deletes, and clears", () => {
+    const state = addCommentToState(emptyState(), {
+      key: "review:key",
+      comment: makeComment(),
+    });
+
+    expect(
+      updateCommentInState(state, {
+        key: "review:key",
+        id: "missing",
+        updates: { body: "x" },
+        updatedAt: "2026-04-21T00:01:00.000Z",
+      }),
+    ).toBe(state);
+    expect(deleteCommentFromState(state, { key: "review:key", id: "missing" })).toBe(state);
+    expect(clearReviewInState(state, { key: "other-key" })).toBe(state);
   });
 });
 

@@ -353,6 +353,39 @@ describe("workspace-layout-store actions", () => {
     ]);
   });
 
+  it("updates an existing file tab when opening the same path at a new line range", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+
+    const firstTabId = store.openTabFocused(workspaceKey, {
+      kind: "file",
+      path: "/repo/worktree/a.ts",
+      lineStart: 5,
+    });
+    const secondTabId = store.openTabFocused(workspaceKey, {
+      kind: "file",
+      path: "/repo/worktree/a.ts",
+      lineStart: 10,
+      lineEnd: 12,
+    });
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+
+    expect(firstTabId).toBe("file_/repo/worktree/a.ts");
+    expect(secondTabId).toBe(firstTabId);
+    expect(collectAllTabs(layout.root)).toEqual([
+      {
+        tabId: "file_/repo/worktree/a.ts",
+        target: {
+          kind: "file",
+          path: "/repo/worktree/a.ts",
+          lineStart: 10,
+          lineEnd: 12,
+        },
+        createdAt: expect.any(Number),
+      },
+    ]);
+  });
+
   it("openTabInBackground inserts a tab without stealing focus", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();
@@ -394,6 +427,90 @@ describe("workspace-layout-store actions", () => {
     expect(duplicateTabId).toBe(firstTabId);
     expect(pane.tabIds).toEqual([firstTabId, secondTabId]);
     expect(pane.focusedTabId).toBe(secondTabId);
+  });
+
+  it("closing a focused middle tab selects the tab to its right", () => {
+    const workspaceKey = createWorkspaceKey();
+    const firstTabId = "draft-1";
+    const closedTabId = "draft-2";
+    const rightTabId = "draft-3";
+
+    workspaceLayoutStore.setState((state) => ({
+      ...state,
+      layoutByWorkspace: {
+        ...state.layoutByWorkspace,
+        [workspaceKey]: {
+          root: createPane({
+            id: "main",
+            tabIds: [firstTabId, closedTabId, rightTabId],
+            focusedTabId: closedTabId,
+          }),
+          focusedPaneId: "main",
+        },
+      },
+    }));
+
+    workspaceLayoutStore.getState().closeTab(workspaceKey, closedTabId);
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const pane = findPaneById(layout.root, "main")!;
+
+    expect(pane.tabIds).toEqual([firstTabId, rightTabId]);
+    expect(pane.focusedTabId).toBe(rightTabId);
+  });
+
+  it("closing a focused child tab returns to its parent before using tab-strip order", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+
+    const parentTabId = store.openTabFocused(workspaceKey, {
+      kind: "draft",
+      draftId: "draft-parent",
+    });
+    const childTabId = store.openChildTabFocused(
+      workspaceKey,
+      { kind: "draft", draftId: "draft-child" },
+      parentTabId!,
+    );
+    const rightTabId = store.openTabFocused(workspaceKey, {
+      kind: "draft",
+      draftId: "draft-right",
+    });
+    store.focusTab(workspaceKey, childTabId!);
+
+    workspaceLayoutStore.getState().closeTab(workspaceKey, childTabId!);
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const pane = findPaneById(layout.root, "main")!;
+
+    expect(pane.tabIds).toEqual([parentTabId, rightTabId]);
+    expect(pane.focusedTabId).toBe(parentTabId);
+  });
+
+  it("closing a focused last tab selects the tab to its left", () => {
+    const workspaceKey = createWorkspaceKey();
+    const leftTabId = "draft-1";
+    const closedTabId = "draft-2";
+
+    workspaceLayoutStore.setState((state) => ({
+      ...state,
+      layoutByWorkspace: {
+        ...state.layoutByWorkspace,
+        [workspaceKey]: {
+          root: createPane({
+            id: "main",
+            tabIds: [leftTabId, closedTabId],
+            focusedTabId: closedTabId,
+          }),
+          focusedPaneId: "main",
+        },
+      },
+    }));
+
+    workspaceLayoutStore.getState().closeTab(workspaceKey, closedTabId);
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+    const pane = findPaneById(layout.root, "main")!;
+
+    expect(pane.tabIds).toEqual([leftTabId]);
+    expect(pane.focusedTabId).toBe(leftTabId);
   });
 
   it("unfocuses and restores the previous focused pane", () => {
@@ -584,6 +701,32 @@ describe("workspace-layout-store actions", () => {
       {
         tabId: draftTabId!,
         target: { kind: "file", path: "/repo/worktree/retargeted.ts" },
+        createdAt: expect.any(Number),
+      },
+    ]);
+  });
+
+  it("retargetTab gives a non-draft tab the new target identity", () => {
+    const workspaceKey = createWorkspaceKey();
+    const store = workspaceLayoutStore.getState();
+
+    const agentTabId = store.openTabFocused(workspaceKey, {
+      kind: "agent",
+      agentId: "agent-retarget",
+    });
+    const nextTabId = store.retargetTab(workspaceKey, agentTabId!, {
+      kind: "draft",
+      draftId: "draft-from-agent",
+    });
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+
+    expect(agentTabId).toBe("agent_agent-retarget");
+    expect(nextTabId).toBe("draft-from-agent");
+    expect(findPaneById(layout.root, "main")?.tabIds).toEqual(["draft-from-agent"]);
+    expect(collectAllTabs(layout.root)).toEqual([
+      {
+        tabId: "draft-from-agent",
+        target: { kind: "draft", draftId: "draft-from-agent" },
         createdAt: expect.any(Number),
       },
     ]);
@@ -1209,6 +1352,56 @@ describe("workspace-layout-store actions", () => {
     });
     expect(layout.focusedPaneId).toBe("main");
     expect(findPaneById(layout.root, "main")?.focusedTabId).toBe("agent_agent-1");
+  });
+
+  it("reconcileTabs preserves a draft-origin agent tab id when there is no duplicate", () => {
+    const workspaceKey = createWorkspaceKey();
+
+    workspaceLayoutStore.setState((state) => ({
+      ...state,
+      layoutByWorkspace: {
+        ...state.layoutByWorkspace,
+        [workspaceKey]: {
+          root: {
+            kind: "pane",
+            pane: {
+              id: "main",
+              tabIds: ["draft-agent"],
+              focusedTabId: "draft-agent",
+              tabs: [
+                {
+                  tabId: "draft-agent",
+                  target: { kind: "agent", agentId: "agent-1" },
+                  createdAt: 1,
+                },
+              ],
+            } as SplitPane,
+          },
+          focusedPaneId: "main",
+        },
+      },
+    }));
+
+    workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+      agentsHydrated: true,
+      terminalsHydrated: true,
+      activeAgentIds: ["agent-1"],
+      autoOpenAgentIds: ["agent-1"],
+      knownAgentIds: ["agent-1"],
+      standaloneTerminalIds: [],
+      hasActivePendingDraftCreate: false,
+    });
+
+    const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+
+    expect(collectAllTabs(layout.root)).toEqual([
+      {
+        tabId: "draft-agent",
+        target: { kind: "agent", agentId: "agent-1" },
+        createdAt: 1,
+      },
+    ]);
+    expect(findPaneById(layout.root, "main")?.focusedTabId).toBe("draft-agent");
   });
 
   it("reconcileTabs does not re-add locally hidden agent tabs", () => {

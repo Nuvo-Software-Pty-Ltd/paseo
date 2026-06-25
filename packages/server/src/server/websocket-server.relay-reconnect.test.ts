@@ -10,13 +10,14 @@ import type { LoopService } from "./loop-service.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
+import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import {
   asUint8Array,
   decodeTerminalStreamFrame,
   encodeTerminalStreamFrame,
   TerminalStreamOpcode,
-} from "../shared/terminal-stream-protocol.js";
-import { CLIENT_CAPS } from "../shared/client-capabilities.js";
+} from "@getpaseo/protocol/terminal-stream-protocol";
+import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 
 type SocketListener = (...args: unknown[]) => void;
 
@@ -104,6 +105,7 @@ import type { SpeechReadinessSnapshot } from "./speech/speech-runtime.js";
 
 interface WebSocketServerInternals {
   attachSocket(ws: unknown, req: unknown): Promise<void>;
+  socketMessageQueues: Map<unknown, Promise<void>>;
 }
 
 const TEST_DAEMON_VERSION = "1.2.3-test";
@@ -123,10 +125,37 @@ function parseSentEnvelope(data: unknown): z.infer<typeof WireEnvelopeSchema> {
   return WireEnvelopeSchema.parse(JSON.parse(data));
 }
 
+function sentEnvelopes(socket: MockSocket): z.infer<typeof WireEnvelopeSchema>[] {
+  return socket.sent.filter((data) => typeof data === "string").map(parseSentEnvelope);
+}
+
+function sentServerInfoEnvelopes(socket: MockSocket): z.infer<typeof WireEnvelopeSchema>[] {
+  return sentEnvelopes(socket).filter(
+    (envelope) => parseServerInfoStatusPayload(envelope.message?.payload) !== null,
+  );
+}
+
+function sentBinaryFrames(socket: MockSocket): Uint8Array[] {
+  return socket.sent.map(asUint8Array).filter((frame): frame is Uint8Array => frame !== null);
+}
+
+function sentTerminalFrames(
+  socket: MockSocket,
+): NonNullable<ReturnType<typeof decodeTerminalStreamFrame>>[] {
+  return sentBinaryFrames(socket)
+    .map(decodeTerminalStreamFrame)
+    .filter(
+      (frame): frame is NonNullable<ReturnType<typeof decodeTerminalStreamFrame>> => frame !== null,
+    );
+}
+
 const BinaryFrameSchema = z.object({
-  opcode: z.number(),
-  slot: z.number(),
-  payload: z.instanceof(Uint8Array),
+  kind: z.literal("terminal"),
+  frame: z.object({
+    opcode: z.number(),
+    slot: z.number(),
+    payload: z.instanceof(Uint8Array),
+  }),
 });
 
 class MockSocket {
@@ -196,6 +225,7 @@ function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | nu
     createStub<pino.Logger>(createLogger()),
     "srv_test",
     createStub<AgentManager>({
+      subscribe: vi.fn(() => () => {}),
       setAgentAttentionCallback: vi.fn(),
       getAgent: vi.fn(() => null),
       getMetricsSnapshot: vi.fn(() => ({
@@ -215,15 +245,21 @@ function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | nu
     undefined,
     speechReadiness
       ? {
+          resolveStt: () => null,
+          resolveSttLanguage: () => "en",
+          resolveTts: () => null,
+          resolveTurnDetection: () => null,
+          resolveDictationStt: () => null,
+          resolveDictationSttLanguage: () => "en",
           getReadiness: () => speechReadiness,
           onReadinessChange: vi.fn(() => () => {}),
+          start: vi.fn(),
+          stop: vi.fn(),
+          ready: Promise.resolve(),
         }
       : undefined,
     undefined,
     undefined,
-    undefined,
-    undefined,
-    false,
     TEST_DAEMON_VERSION,
     undefined,
     undefined,
@@ -242,6 +278,16 @@ function createServer(options?: { speechReadiness?: SpeechReadinessSnapshot | nu
       })),
       dispose: vi.fn(),
     }),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    createProviderSnapshotManagerStub().manager,
   );
 }
 
@@ -284,8 +330,8 @@ function createReadySpeechReadinessSnapshot(): SpeechReadinessSnapshot {
 function createDownloadInProgressSpeechReadinessSnapshot(): SpeechReadinessSnapshot {
   return {
     generatedAt: "2026-02-14T00:00:00.000Z",
-    requiredLocalModelIds: ["sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"],
-    missingLocalModelIds: ["sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"],
+    requiredLocalModelIds: ["parakeet-tdt-0.6b-v2-int8"],
+    missingLocalModelIds: ["parakeet-tdt-0.6b-v2-int8"],
     download: {
       inProgress: true,
       error: null,
@@ -311,9 +357,9 @@ function createDownloadInProgressSpeechReadinessSnapshot(): SpeechReadinessSnaps
       available: false,
       reasonCode: "model_download_in_progress",
       message:
-        "Voice features are unavailable while models download in the background (sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20).",
+        "Voice features are unavailable while models download in the background (parakeet-tdt-0.6b-v2-int8).",
       retryable: true,
-      missingModelIds: ["sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20"],
+      missingModelIds: ["parakeet-tdt-0.6b-v2-int8"],
     },
   };
 }
@@ -352,7 +398,7 @@ async function attachRelayAndHello(params: {
 }) {
   await params.server.attachExternalSocket(params.socket, { transport: "relay" });
   params.socket.emit("message", JSON.stringify(createHelloMessage(params.clientId)));
-  await Promise.resolve();
+  await waitForSocketMessages(params.server, params.socket);
   expect(params.socket.sent.length).toBeGreaterThan(0);
   const envelope = parseSentEnvelope(params.socket.sent[0]);
   expect(envelope.type).toBe("session");
@@ -372,7 +418,7 @@ async function attachDirectAndHello(params: {
     createDirectRequest(),
   );
   params.socket.emit("message", JSON.stringify(createHelloMessage(params.clientId)));
-  await Promise.resolve();
+  await waitForSocketMessages(params.server, params.socket);
   expect(params.socket.sent.length).toBeGreaterThan(0);
   const envelope = parseSentEnvelope(params.socket.sent[0]);
   expect(envelope.type).toBe("session");
@@ -380,6 +426,13 @@ async function attachDirectAndHello(params: {
   expect(envelope.message?.type).toBe("status");
   expect(serverInfo).not.toBeNull();
   return serverInfo!;
+}
+
+async function waitForSocketMessages(
+  server: VoiceAssistantWebSocketServer,
+  socket: MockSocket,
+): Promise<void> {
+  await asInternals<WebSocketServerInternals>(server).socketMessageQueues.get(socket);
 }
 
 describe("relay external socket reconnect behavior", () => {
@@ -436,7 +489,7 @@ describe("relay external socket reconnect behavior", () => {
         }),
       ),
     );
-    await Promise.resolve();
+    await waitForSocketMessages(server, socket);
 
     expect(sessionMock.instances).toHaveLength(1);
     const session = sessionMock.instances[0];
@@ -533,7 +586,7 @@ describe("relay external socket reconnect behavior", () => {
         },
       }),
     );
-    await Promise.resolve();
+    await waitForSocketMessages(server, socket);
 
     expect(closeCode).toBe(4002);
     expect(["Invalid hello", "Session message before hello"]).toContain(closeReason);
@@ -677,20 +730,20 @@ describe("relay external socket reconnect behavior", () => {
       socket,
       clientId: "cid-server-info-broadcast",
     });
-    expect(socket.sent).toHaveLength(1);
+    expect(sentServerInfoEnvelopes(socket)).toHaveLength(1);
 
     const speechReadiness = createReadySpeechReadinessSnapshot();
     server.publishSpeechReadiness(speechReadiness);
-    expect(socket.sent).toHaveLength(2);
+    expect(sentServerInfoEnvelopes(socket)).toHaveLength(2);
 
-    const secondEnvelope = parseSentEnvelope(socket.sent[1]);
+    const secondEnvelope = sentServerInfoEnvelopes(socket)[1];
     const secondPayload = parseServerInfoStatusPayload(secondEnvelope.message?.payload);
     expect(secondPayload?.capabilities?.voice?.dictation.enabled).toBe(true);
     expect(secondPayload?.capabilities?.voice?.voice.enabled).toBe(true);
 
     // Same readiness should not produce another server_info broadcast.
     server.publishSpeechReadiness(speechReadiness);
-    expect(socket.sent).toHaveLength(2);
+    expect(sentServerInfoEnvelopes(socket)).toHaveLength(2);
 
     await server.close();
   });
@@ -703,12 +756,12 @@ describe("relay external socket reconnect behavior", () => {
       socket,
       clientId: "cid-server-info-download-guidance",
     });
-    expect(socket.sent).toHaveLength(1);
+    expect(sentServerInfoEnvelopes(socket)).toHaveLength(1);
 
     server.publishSpeechReadiness(createDownloadInProgressSpeechReadinessSnapshot());
-    expect(socket.sent).toHaveLength(2);
+    expect(sentServerInfoEnvelopes(socket)).toHaveLength(2);
 
-    const envelope = parseSentEnvelope(socket.sent[1]);
+    const envelope = sentServerInfoEnvelopes(socket)[1];
     const payload = parseServerInfoStatusPayload(envelope.message?.payload);
     expect(payload?.capabilities?.voice?.dictation.enabled).toBe(true);
     expect(payload?.capabilities?.voice?.voice.enabled).toBe(true);
@@ -740,10 +793,10 @@ describe("relay external socket reconnect behavior", () => {
         }),
       ),
     );
-    await Promise.resolve();
+    await waitForSocketMessages(server, socket);
 
     expect(session.handleBinaryFrame).toHaveBeenCalledTimes(1);
-    const frame = BinaryFrameSchema.parse(session.handleBinaryFrame.mock.calls[0]?.[0]);
+    const { frame } = BinaryFrameSchema.parse(session.handleBinaryFrame.mock.calls[0]?.[0]);
     expect(frame.opcode).toBe(TerminalStreamOpcode.Input);
     expect(frame.slot).toBe(9);
     expect(new TextDecoder().decode(frame.payload)).toBe("ls\r");
@@ -769,14 +822,12 @@ describe("relay external socket reconnect behavior", () => {
       onBinaryMessage(new Uint8Array([TerminalStreamOpcode.Output, 12, 0x6f, 0x6b]));
     }
 
-    expect(socket.sent).toHaveLength(2);
-    const binaryPayload = asUint8Array(socket.sent[1]);
-    expect(binaryPayload).not.toBeNull();
-    const frame = decodeTerminalStreamFrame(binaryPayload!);
-    expect(frame).not.toBeNull();
-    expect(frame!.opcode).toBe(TerminalStreamOpcode.Output);
-    expect(frame!.slot).toBe(12);
-    expect(new TextDecoder().decode(frame!.payload ?? new Uint8Array())).toBe("ok");
+    const terminalFrames = sentTerminalFrames(socket);
+    expect(terminalFrames).toHaveLength(1);
+    const frame = terminalFrames[0];
+    expect(frame.opcode).toBe(TerminalStreamOpcode.Output);
+    expect(frame.slot).toBe(12);
+    expect(new TextDecoder().decode(frame.payload ?? new Uint8Array())).toBe("ok");
 
     await server.close();
   });

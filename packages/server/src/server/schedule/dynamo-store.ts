@@ -4,7 +4,11 @@ import type { Logger } from "pino";
 import { cloudHmacFetch } from "../cloud-hmac-fetch.js";
 import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
-import { StoredScheduleSchema, type StoredSchedule, type ScheduleRun } from "./types.js";
+import {
+  StoredScheduleSchema,
+  type StoredSchedule,
+  type ScheduleRun,
+} from "@getpaseo/protocol/schedule/types";
 import type { ScheduleStore } from "./store.js";
 
 // T-2 (D-3, synthesis C1) — DynamoDB-backed ScheduleStore for cloud mode.

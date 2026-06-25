@@ -2,7 +2,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { existsSync, mkdirSync, realpathSync, rmSync, statSync } from "fs";
 import { copyFile, rm, stat } from "fs/promises";
-import { join, basename, dirname, resolve, sep } from "path";
+import { join, basename, dirname, isAbsolute, resolve, sep } from "path";
 import net from "node:net";
 import { createHash } from "node:crypto";
 import stripAnsi from "strip-ansi";
@@ -16,8 +16,8 @@ export {
   PaseoConfigSchema,
   type PaseoConfig,
   type PaseoConfigRaw,
-} from "./paseo-config-schema.js";
-import { PaseoConfigSchema, type PaseoConfig } from "./paseo-config-schema.js";
+} from "@getpaseo/protocol/paseo-config-schema";
+import { PaseoConfigSchema, type PaseoConfig } from "@getpaseo/protocol/paseo-config-schema";
 import {
   normalizeBaseRefName,
   readPaseoWorktreeMetadata,
@@ -30,6 +30,10 @@ import { spawnProcess } from "./spawn.js";
 import { resolvePaseoHome } from "../server/paseo-home.js";
 import { buildToolchainEnvDefaults, createExternalProcessEnv } from "../server/paseo-env.js";
 import { parseGitRevParsePath, resolveGitRevParsePath } from "./git-rev-parse-path.js";
+import { validateBranchSlug } from "@getpaseo/protocol/branch-slug";
+import { expandTilde } from "./path.js";
+
+export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
 
 const execFileAsync = promisify(execFile);
 const READ_ONLY_GIT_ENV = {
@@ -147,6 +151,11 @@ export interface PaseoWorktreeOwnership {
   worktreePath?: string;
 }
 
+export interface WorktreeRootOptions {
+  paseoHome?: string;
+  worktreesRoot?: string;
+}
+
 export type WorktreeSource =
   | { kind: "branch-off"; baseBranch: string; branchName: string }
   | { kind: "checkout-branch"; branchName: string }
@@ -165,12 +174,14 @@ export interface CreateWorktreeOptions {
   source: WorktreeSource;
   runSetup: boolean;
   paseoHome?: string;
+  worktreesRoot?: string;
 }
 
 interface ResolveExistingWorktreeForSlugOptions {
   slug: string;
   repoRoot: string;
   paseoHome?: string;
+  worktreesRoot?: string;
 }
 
 export class BranchAlreadyCheckedOutError extends Error {
@@ -192,6 +203,16 @@ export class UnknownBranchError extends Error {
     this.name = "UnknownBranchError";
     this.branchName = params.branchName;
     this.cwd = params.cwd;
+  }
+}
+
+export class InvalidGitBranchNameError extends Error {
+  readonly branchName: string;
+
+  constructor(branchName: string) {
+    super(`Invalid branch name: Git rejected ref name '${branchName}'`);
+    this.name = "InvalidGitBranchNameError";
+    this.branchName = branchName;
   }
 }
 
@@ -747,72 +768,6 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
   return commonDir;
 }
 
-/**
- * Validate that a string is a valid git branch name slug
- * Must be lowercase, alphanumeric, hyphens only
- */
-export function validateBranchSlug(slug: string): {
-  valid: boolean;
-  error?: string;
-} {
-  if (!slug || slug.length === 0) {
-    return { valid: false, error: "Branch name cannot be empty" };
-  }
-
-  if (slug.length > 100) {
-    return { valid: false, error: "Branch name too long (max 100 characters)" };
-  }
-
-  // Check for valid characters: lowercase letters, numbers, hyphens, forward slashes
-  const validPattern = /^[a-z0-9-/]+$/;
-  if (!validPattern.test(slug)) {
-    return {
-      valid: false,
-      error:
-        "Branch name must contain only lowercase letters, numbers, hyphens, and forward slashes",
-    };
-  }
-
-  // Cannot start or end with hyphen
-  if (slug.startsWith("-") || slug.endsWith("-")) {
-    return {
-      valid: false,
-      error: "Branch name cannot start or end with a hyphen",
-    };
-  }
-
-  // Cannot have consecutive hyphens
-  if (slug.includes("--")) {
-    return { valid: false, error: "Branch name cannot have consecutive hyphens" };
-  }
-
-  return { valid: true };
-}
-
-const MAX_SLUG_LENGTH = 50;
-
-/**
- * Convert string to kebab-case for branch names
- */
-export function slugify(input: string): string {
-  const slug = input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-  if (slug.length <= MAX_SLUG_LENGTH) {
-    return slug;
-  }
-
-  // Truncate at word boundary (hyphen) if possible
-  const truncated = slug.slice(0, MAX_SLUG_LENGTH);
-  const lastHyphen = truncated.lastIndexOf("-");
-  if (lastHyphen > MAX_SLUG_LENGTH / 2) {
-    return truncated.slice(0, lastHyphen);
-  }
-  return truncated.replace(/-+$/, "");
-}
-
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
 function deriveShortAlphanumericHash(value: string): string {
@@ -836,19 +791,38 @@ export async function deriveWorktreeProjectHash(cwd: string): Promise<string> {
   }
 }
 
-export async function getPaseoWorktreesRoot(cwd: string, paseoHome?: string): Promise<string> {
-  const home = paseoHome ? resolve(paseoHome) : resolvePaseoHome();
+export function resolvePaseoWorktreesBaseRoot(options?: WorktreeRootOptions): string {
+  if (options?.worktreesRoot) {
+    const expandedRoot = expandTilde(options.worktreesRoot);
+    if (isAbsolute(expandedRoot)) {
+      return resolve(expandedRoot);
+    }
+    const home = options.paseoHome ? resolve(options.paseoHome) : resolvePaseoHome();
+    return resolve(home, expandedRoot);
+  }
+
+  const home = options?.paseoHome ? resolve(options.paseoHome) : resolvePaseoHome();
+  return join(home, "worktrees");
+}
+
+export async function getPaseoWorktreesRoot(
+  cwd: string,
+  paseoHome?: string,
+  worktreesRoot?: string,
+): Promise<string> {
+  const baseRoot = resolvePaseoWorktreesBaseRoot({ paseoHome, worktreesRoot });
   const projectHash = await deriveWorktreeProjectHash(cwd);
-  return join(home, "worktrees", projectHash);
+  return join(baseRoot, projectHash);
 }
 
 export async function computeWorktreePath(
   cwd: string,
   slug: string,
   paseoHome?: string,
+  worktreesRoot?: string,
 ): Promise<string> {
-  const worktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome);
-  return join(worktreesRoot, slug);
+  const projectWorktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome, worktreesRoot);
+  return join(projectWorktreesRoot, slug);
 }
 
 function normalizePathForOwnership(input: string): string {
@@ -868,7 +842,7 @@ function resolveRepoRootFromGitCommonDir(commonDir: string): string {
 
 export async function isPaseoOwnedWorktreeCwd(
   cwd: string,
-  options?: { paseoHome?: string },
+  options?: WorktreeRootOptions,
 ): Promise<PaseoWorktreeOwnership> {
   const resolvedCwd = normalizePathForOwnership(cwd);
 
@@ -883,10 +857,10 @@ export async function isPaseoOwnedWorktreeCwd(
     // ignore
   }
 
-  const paseoHome = options?.paseoHome ? resolve(options.paseoHome) : resolvePaseoHome();
-  const paseoWorktreesPrefix = normalizePathForOwnership(join(paseoHome, "worktrees")) + sep;
+  const worktreesBaseRoot = resolvePaseoWorktreesBaseRoot(options);
+  const paseoWorktreesPrefix = normalizePathForOwnership(worktreesBaseRoot) + sep;
 
-  // Ownership is defined by the path living under $PASEO_HOME/worktrees/<hash>/<slug>[/...].
+  // Ownership is defined by the path living under <worktrees-root>/<hash>/<slug>[/...].
   // The <hash>/<slug> prefix is Paseo-private — nothing else writes there — so the
   // path shape alone is sufficient proof of ownership, even when git has already
   // forgotten about the worktree.
@@ -908,7 +882,7 @@ export async function isPaseoOwnedWorktreeCwd(
     };
   }
 
-  const worktreesRoot = join(paseoHome, "worktrees", parts[0]);
+  const worktreesRoot = join(worktreesBaseRoot, parts[0]);
   return {
     allowed: true,
     ...(repoRoot !== undefined ? { repoRoot } : {}),
@@ -971,17 +945,19 @@ function resolveWorktreeCreatedAtIso(worktreePath: string): string {
 export async function listPaseoWorktrees({
   cwd,
   paseoHome,
+  worktreesRoot,
 }: {
   cwd: string;
   paseoHome?: string;
+  worktreesRoot?: string;
 }): Promise<PaseoWorktreeInfo[]> {
-  const worktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome);
+  const projectWorktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome, worktreesRoot);
   const { stdout } = await runGitCommand(["worktree", "list", "--porcelain"], {
     cwd,
     envOverlay: READ_ONLY_GIT_ENV,
   });
 
-  const rootPrefix = normalizePathForOwnership(worktreesRoot) + sep;
+  const rootPrefix = normalizePathForOwnership(projectWorktreesRoot) + sep;
   return parseWorktreeList(stdout)
     .map((entry) => Object.assign({}, entry, { path: normalizePathForOwnership(entry.path) }))
     .filter((entry) => entry.path.startsWith(rootPrefix))
@@ -994,10 +970,12 @@ export async function resolveExistingWorktreeForSlug({
   slug,
   repoRoot,
   paseoHome,
+  worktreesRoot,
 }: ResolveExistingWorktreeForSlugOptions): Promise<WorktreeConfig | null> {
   const worktrees = await listPaseoWorktrees({
     cwd: repoRoot,
     paseoHome,
+    worktreesRoot,
   });
   const slugSuffix = `${sep}${slug}`;
   const existingWorktree = worktrees.find((worktree) => worktree.path.endsWith(slugSuffix));
@@ -1022,7 +1000,7 @@ export async function resolveExistingWorktreeForSlug({
 
 export async function resolvePaseoWorktreeRootForCwd(
   cwd: string,
-  options?: { paseoHome?: string },
+  options?: WorktreeRootOptions,
 ): Promise<{ repoRoot: string; worktreeRoot: string; worktreePath: string } | null> {
   let gitCommonDir: string;
   try {
@@ -1031,7 +1009,11 @@ export async function resolvePaseoWorktreeRootForCwd(
     return null;
   }
 
-  const worktreesRoot = await getPaseoWorktreesRoot(cwd, options?.paseoHome);
+  const worktreesRoot = await getPaseoWorktreesRoot(
+    cwd,
+    options?.paseoHome,
+    options?.worktreesRoot,
+  );
   const resolvedRoot = normalizePathForOwnership(worktreesRoot) + sep;
 
   let worktreeRoot: string | null = null;
@@ -1057,6 +1039,7 @@ export async function resolvePaseoWorktreeRootForCwd(
   const knownWorktrees = await listPaseoWorktrees({
     cwd,
     paseoHome: options?.paseoHome,
+    worktreesRoot: options?.worktreesRoot,
   });
   const match = knownWorktrees.find((entry) => entry.path === resolvedWorktreeRoot);
   if (!match) {
@@ -1076,12 +1059,14 @@ export async function deletePaseoWorktree({
   worktreeSlug,
   worktreesRoot,
   paseoHome,
+  worktreesBaseRoot,
 }: {
   cwd: string | null;
   worktreePath?: string;
   worktreeSlug?: string;
   worktreesRoot?: string;
   paseoHome?: string;
+  worktreesBaseRoot?: string;
 }): Promise<void> {
   if (!worktreePath && !worktreeSlug) {
     throw new Error("worktreePath or worktreeSlug is required");
@@ -1094,7 +1079,7 @@ export async function deletePaseoWorktree({
   if (worktreesRoot) {
     resolvedWorktreesRoot = worktreesRoot;
   } else if (cwd) {
-    resolvedWorktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome);
+    resolvedWorktreesRoot = await getPaseoWorktreesRoot(cwd, paseoHome, worktreesBaseRoot);
   } else {
     throw new Error("cwd or worktreesRoot is required to delete a Paseo worktree");
   }
@@ -1103,8 +1088,12 @@ export async function deletePaseoWorktree({
   const requestedPath = worktreePath ?? join(resolvedWorktreesRoot, worktreeSlug!);
   const resolvedRequested = normalizePathForOwnership(requestedPath);
   const resolvedWorktree =
-    (await resolvePaseoWorktreeRootForCwd(requestedPath, { paseoHome }))?.worktreePath ??
-    resolvedRequested;
+    (
+      await resolvePaseoWorktreeRootForCwd(requestedPath, {
+        paseoHome,
+        worktreesRoot: worktreesBaseRoot,
+      })
+    )?.worktreePath ?? resolvedRequested;
 
   if (!resolvedWorktree.startsWith(resolvedRoot)) {
     throw new Error("Refusing to delete non-Paseo worktree");
@@ -1191,9 +1180,10 @@ export const createWorktree = async ({
   worktreeSlug,
   runSetup,
   paseoHome,
+  worktreesRoot,
 }: CreateWorktreeOptions): Promise<WorktreeConfig> => {
   const sourcePlan = await resolveWorktreeSourcePlan({ cwd, source, desiredSlug: worktreeSlug });
-  let worktreePath = join(await getPaseoWorktreesRoot(cwd, paseoHome), worktreeSlug);
+  let worktreePath = join(await getPaseoWorktreesRoot(cwd, paseoHome, worktreesRoot), worktreeSlug);
   mkdirSync(dirname(worktreePath), { recursive: true });
 
   // Also handle worktree path collision
@@ -1284,11 +1274,11 @@ async function resolveWorktreeSourcePlan({
       return {
         branchName: newBranchName,
         metadataBaseRefName: normalizedBaseBranch,
-        addArguments: ["-b", newBranchName, base],
+        addArguments: ["-b", newBranchName, "--no-track", base],
       };
     }
     case "checkout-branch": {
-      validateWorktreeBranchName(source.branchName);
+      await validateExistingWorktreeBranchName(cwd, source.branchName);
       if (!(await localBranchExists(cwd, source.branchName))) {
         try {
           await runGitCommand(["fetch", "origin", `${source.branchName}:${source.branchName}`], {
@@ -1311,7 +1301,7 @@ async function resolveWorktreeSourcePlan({
     }
     case "checkout-github-pr": {
       const localBranchCandidate = source.localBranchName ?? source.headRef;
-      validateWorktreeBranchName(localBranchCandidate);
+      await validateExistingWorktreeBranchName(cwd, localBranchCandidate);
       const localBranchName = await resolveUniqueLocalBranchName(cwd, localBranchCandidate);
       const normalizedBaseRefName = normalizeRequiredBaseBranch(source.baseRefName);
       await runGitCommand(
@@ -1374,6 +1364,17 @@ function validateWorktreeBranchName(branchName: string): void {
   const validation = validateBranchSlug(branchName);
   if (!validation.valid) {
     throw new Error(`Invalid branch name: ${validation.error}`);
+  }
+}
+
+async function validateExistingWorktreeBranchName(cwd: string, branchName: string): Promise<void> {
+  const result = await runGitCommand(["check-ref-format", "--branch", branchName], {
+    cwd,
+    timeout: 30_000,
+    acceptExitCodes: [0, 1, 128],
+  });
+  if (result.exitCode !== 0) {
+    throw new InvalidGitBranchNameError(branchName);
   }
 }
 

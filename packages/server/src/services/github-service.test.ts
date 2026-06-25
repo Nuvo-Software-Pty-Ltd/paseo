@@ -13,13 +13,15 @@ import {
   type GitHubCommandRunner,
   type GitHubCommandRunnerOptions,
   type GitHubCurrentPullRequestStatus,
-  type GitHubReadOptions,
 } from "./github-service.js";
-import { CheckoutPrStatusResponseSchema } from "../shared/messages.js";
+import { CheckoutPrStatusResponseSchema } from "@getpaseo/protocol/messages";
 
 const EXPECTED_GITHUB_FAST_POLL_MS = 20_000;
 const EXPECTED_GITHUB_SLOW_POLL_MS = 120_000;
 const EXPECTED_GITHUB_ERROR_BACKOFF_CAP_MS = 300_000;
+const CURRENT_PR_STATUS_BASE_FIELDS =
+  "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,reviewDecision,mergeable,headRepositoryOwner";
+const CURRENT_PR_STATUS_FIELDS = `${CURRENT_PR_STATUS_BASE_FIELDS},statusCheckRollup`;
 
 interface RunnerCall {
   args: string[];
@@ -112,6 +114,31 @@ function currentPullRequestJson(overrides: Record<string, unknown> = {}): string
   });
 }
 
+function currentPullRequestGithubFactsJson(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    data: {
+      repository: {
+        autoMergeAllowed: true,
+        mergeCommitAllowed: false,
+        squashMergeAllowed: true,
+        rebaseMergeAllowed: false,
+        viewerDefaultMergeMethod: "SQUASH",
+        pullRequest: {
+          mergeStateStatus: "BLOCKED",
+          autoMergeRequest: null,
+          viewerCanEnableAutoMerge: true,
+          viewerCanDisableAutoMerge: false,
+          viewerCanMergeAsAdmin: false,
+          viewerCanUpdateBranch: true,
+          isMergeQueueEnabled: false,
+          isInMergeQueue: false,
+        },
+        ...overrides,
+      },
+    },
+  });
+}
+
 function createCurrentPullRequestStatus(
   overrides: Partial<GitHubCurrentPullRequestStatus> = {},
 ): GitHubCurrentPullRequestStatus {
@@ -134,8 +161,31 @@ function createCurrentPullRequestStatus(
   };
 }
 
+function githubStatusFacts(
+  overrides: Partial<NonNullable<GitHubCurrentPullRequestStatus["github"]>> = {},
+): NonNullable<GitHubCurrentPullRequestStatus["github"]> {
+  return {
+    mergeStateStatus: "CLEAN",
+    autoMergeRequest: null,
+    viewerCanEnableAutoMerge: false,
+    viewerCanDisableAutoMerge: false,
+    viewerCanMergeAsAdmin: false,
+    viewerCanUpdateBranch: false,
+    repository: {
+      autoMergeAllowed: true,
+      mergeCommitAllowed: true,
+      squashMergeAllowed: true,
+      rebaseMergeAllowed: true,
+      viewerDefaultMergeMethod: "SQUASH",
+    },
+    isMergeQueueEnabled: false,
+    isInMergeQueue: false,
+    ...overrides,
+  };
+}
+
 function recordCurrentPullRequestStatusReads(service: ReturnType<typeof createGitHubService>) {
-  const reads: GitHubReadOptions[] = [];
+  const reads: Parameters<typeof service.getCurrentPullRequestStatus>[0][] = [];
   const getCurrentPullRequestStatus = service.getCurrentPullRequestStatus.bind(service);
   service.getCurrentPullRequestStatus = vi.fn(async (options) => {
     reads.push(options);
@@ -144,12 +194,28 @@ function recordCurrentPullRequestStatusReads(service: ReturnType<typeof createGi
   return reads;
 }
 
+function currentPullRequestStatusCalls(calls: RunnerCall[]): RunnerCall[] {
+  return calls.filter(
+    (call) => call.args[0] === "pr" && (call.args[1] === "view" || call.args[1] === "list"),
+  );
+}
+
 function noPullRequestError(args: string[] = ["pr", "view"]): GitHubCommandError {
   return new GitHubCommandError({
     args,
     cwd: "/repo",
     exitCode: 1,
     stderr: "no pull requests found for branch",
+  });
+}
+
+function statusCheckRollupPermissionError(args: string[]): GitHubCommandError {
+  return new GitHubCommandError({
+    args,
+    cwd: "/repo",
+    exitCode: 1,
+    stderr:
+      "GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup)",
   });
 }
 
@@ -237,17 +303,20 @@ function pullRequestTimelineJson(overrides: Record<string, unknown> = {}): strin
                 id: "PRR_approved",
                 state: "APPROVED",
                 body: "Looks good to me.",
+                bodyHTML: "<p>Looks good to me.</p>",
                 url: "https://github.com/parentOwner/parentRepo/pull/42#pullrequestreview-1",
                 submittedAt: "2026-04-02T13:52:14Z",
                 author: {
                   login: "reviewer",
                   url: "https://github.com/reviewer",
+                  avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
                 },
               },
               {
                 id: "PRR_empty_commented",
                 state: "COMMENTED",
                 body: "",
+                bodyHTML: "",
                 url: "https://github.com/parentOwner/parentRepo/pull/42#pullrequestreview-2",
                 submittedAt: "2026-04-02T13:50:00Z",
                 author: null,
@@ -260,11 +329,13 @@ function pullRequestTimelineJson(overrides: Record<string, unknown> = {}): strin
               {
                 id: "IC_later",
                 body: "Can we add a regression test?",
+                bodyHTML: "<p>Can we add a regression test?</p>",
                 url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-3",
                 createdAt: "2026-04-02T13:55:00Z",
                 author: {
                   login: "commenter",
                   url: "https://github.com/commenter",
+                  avatarUrl: "https://avatars.githubusercontent.com/u/2?v=4",
                 },
               },
             ],
@@ -301,12 +372,205 @@ describe("GitHubService", () => {
         cwd: "/tmp/repo",
         prNumber: 42,
         mergeMethod,
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts(),
+        }),
       }),
     ).resolves.toEqual({ success: true });
 
     expect(runner.calls).toEqual([
       {
         args: expectedArgs,
+        cwd: "/tmp/repo",
+        envOverlay: { GH_PROMPT_DISABLED: "1" },
+      },
+    ]);
+  });
+
+  it("rejects direct merge when GitHub facts are unavailable", async () => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.mergePullRequest({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        mergeMethod: "squash",
+        status: createCurrentPullRequestStatus(),
+      }),
+    ).rejects.toThrow("GitHub merge facts are unavailable");
+
+    expect(runner.calls).toEqual([]);
+  });
+
+  it.each(["BLOCKED", "DIRTY", null] as const)(
+    "rejects direct merge when GitHub mergeStateStatus is %s",
+    async (mergeStateStatus) => {
+      const runner = createRunner([""]);
+      const service = createGitHubService({
+        runner: runner.runner,
+      });
+
+      await expect(
+        service.mergePullRequest({
+          cwd: "/tmp/repo",
+          prNumber: 42,
+          mergeMethod: "squash",
+          status: createCurrentPullRequestStatus({
+            github: githubStatusFacts({ mergeStateStatus }),
+          }),
+        }),
+      ).rejects.toThrow("ready for direct merge");
+
+      expect(runner.calls).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["merge queue enabled", { isMergeQueueEnabled: true }],
+    ["PR already in merge queue", { isInMergeQueue: true }],
+  ] as const)("rejects direct merge when %s", async (_name, overrides) => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.mergePullRequest({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        mergeMethod: "squash",
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts(overrides),
+        }),
+      }),
+    ).rejects.toThrow("merge queue");
+
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("rejects direct merge when auto-merge is already enabled", async () => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.mergePullRequest({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        mergeMethod: "squash",
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts({
+            autoMergeRequest: {
+              enabledAt: "2026-05-13T12:00:00Z",
+              mergeMethod: "SQUASH",
+              enabledBy: "octocat",
+            },
+          }),
+        }),
+      }),
+    ).rejects.toThrow("auto-merge is already enabled");
+
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("rejects direct merge when the requested method is disabled by repository policy", async () => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.mergePullRequest({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        mergeMethod: "squash",
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts({
+            repository: {
+              autoMergeAllowed: true,
+              mergeCommitAllowed: true,
+              squashMergeAllowed: false,
+              rebaseMergeAllowed: true,
+              viewerDefaultMergeMethod: "MERGE",
+            },
+          }),
+        }),
+      }),
+    ).rejects.toThrow("squash is disabled");
+
+    expect(runner.calls).toEqual([]);
+  });
+
+  it.each([
+    ["merge", ["pr", "merge", "42", "--auto", "--merge"]],
+    ["squash", ["pr", "merge", "42", "--auto", "--squash"]],
+    ["rebase", ["pr", "merge", "42", "--auto", "--rebase"]],
+  ] as const)("enables auto-merge with gh using %s", async (mergeMethod, expectedArgs) => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.enablePullRequestAutoMerge({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        mergeMethod,
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts({
+            mergeStateStatus: "BLOCKED",
+            viewerCanEnableAutoMerge: true,
+            repository: {
+              autoMergeAllowed: true,
+              mergeCommitAllowed: true,
+              squashMergeAllowed: true,
+              rebaseMergeAllowed: true,
+              viewerDefaultMergeMethod: "SQUASH",
+            },
+          }),
+        }),
+      }),
+    ).resolves.toEqual({ success: true });
+
+    expect(runner.calls).toEqual([
+      {
+        args: expectedArgs,
+        cwd: "/tmp/repo",
+        envOverlay: { GH_PROMPT_DISABLED: "1" },
+      },
+    ]);
+  });
+
+  it("disables auto-merge with gh", async () => {
+    const runner = createRunner([""]);
+    const service = createGitHubService({
+      runner: runner.runner,
+    });
+
+    await expect(
+      service.disablePullRequestAutoMerge({
+        cwd: "/tmp/repo",
+        prNumber: 42,
+        status: createCurrentPullRequestStatus({
+          github: githubStatusFacts({
+            autoMergeRequest: {
+              enabledAt: "2026-05-13T12:00:00Z",
+              mergeMethod: "SQUASH",
+              enabledBy: "octocat",
+            },
+            viewerCanDisableAutoMerge: true,
+          }),
+        }),
+      }),
+    ).resolves.toEqual({ success: true });
+
+    expect(runner.calls).toEqual([
+      {
+        args: ["pr", "merge", "42", "--disable-auto"],
         cwd: "/tmp/repo",
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       },
@@ -395,8 +659,43 @@ describe("GitHubService", () => {
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
 
-    expect(runner.calls).toHaveLength(2);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
     expect(reads.map((read) => read.reason)).toEqual([undefined, "self-heal-github"]);
+
+    subscription?.unsubscribe();
+    service.dispose?.();
+  });
+
+  it("retained fork PR status polls keep the head repository owner", async () => {
+    const runner = createRunner([
+      currentPullRequestJson({
+        headRefName: "open-button-targets-active-file",
+        headRepositoryOwner: { login: "fork-owner" },
+      }),
+    ]);
+    const service = createGitHubService({
+      ttlMs: 0,
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+    });
+    const reads = recordCurrentPullRequestStatusReads(service);
+
+    const subscription = service.retainCurrentPullRequestStatusPoll?.({
+      cwd: "/repo",
+      headRef: "open-button-targets-active-file",
+      headRepositoryOwner: "fork-owner",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(reads).toEqual([
+      expect.objectContaining({
+        cwd: "/repo",
+        headRef: "open-button-targets-active-file",
+        headRepositoryOwner: "fork-owner",
+        reason: "self-heal-github",
+      }),
+    ]);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
 
     subscription?.unsubscribe();
     service.dispose?.();
@@ -428,11 +727,11 @@ describe("GitHubService", () => {
 
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
-    expect(runner.calls).toHaveLength(1);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
 
     now = EXPECTED_GITHUB_SLOW_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS - EXPECTED_GITHUB_FAST_POLL_MS);
-    expect(runner.calls).toHaveLength(2);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
     expect(reads.map((read) => read.reason)).toEqual([undefined, "self-heal-github"]);
 
     subscription?.unsubscribe();
@@ -445,14 +744,17 @@ describe("GitHubService", () => {
       currentPullRequestJson({
         statusCheckRollup: [{ __typename: "StatusContext", context: "ci", state: "PENDING" }],
       }),
+      currentPullRequestGithubFactsJson(),
       { error: new Error("network down") },
       { error: new Error("network still down") },
       currentPullRequestJson({
         statusCheckRollup: [{ __typename: "StatusContext", context: "ci", state: "SUCCESS" }],
       }),
+      currentPullRequestGithubFactsJson(),
       currentPullRequestJson({
         statusCheckRollup: [{ __typename: "StatusContext", context: "ci", state: "SUCCESS" }],
       }),
+      currentPullRequestGithubFactsJson(),
     ]);
     const service = createGitHubService({
       ttlMs: 0,
@@ -477,7 +779,7 @@ describe("GitHubService", () => {
     now += EXPECTED_GITHUB_SLOW_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_SLOW_POLL_MS);
 
-    expect(runner.calls).toHaveLength(5);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(5);
     expect(reads.map((read) => read.reason)).toEqual([
       undefined,
       "self-heal-github",
@@ -514,7 +816,7 @@ describe("GitHubService", () => {
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
 
-    expect(runner.calls).toHaveLength(1);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
 
     service.dispose?.();
   });
@@ -540,7 +842,7 @@ describe("GitHubService", () => {
     now = EXPECTED_GITHUB_FAST_POLL_MS;
     await vi.advanceTimersByTimeAsync(EXPECTED_GITHUB_FAST_POLL_MS);
 
-    expect(runner.calls).toHaveLength(1);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
   });
 
   it("fetches PR reviews and issue comments with one GraphQL call sorted chronologically", async () => {
@@ -576,6 +878,9 @@ describe("GitHubService", () => {
     });
     expect(runner.calls[0]?.args[3]).toContain("reviews(first: 100)");
     expect(runner.calls[0]?.args[3]).toContain("comments(first: 100)");
+    expect(runner.calls[0]?.args[3]).toContain("bodyHTML");
+    expect(runner.calls[0]?.args[3]).toContain("avatarUrl");
+    expect(runner.calls[0]?.args[3]).toContain("reviewThreads(first: 100)");
     expect(timeline).toEqual({
       prNumber: 42,
       repoOwner: "parentOwner",
@@ -588,6 +893,7 @@ describe("GitHubService", () => {
           id: "PRR_empty_commented",
           author: "unknown",
           authorUrl: null,
+          avatarUrl: null,
           body: "",
           createdAt: Date.parse("2026-04-02T13:50:00Z"),
           url: "https://github.com/parentOwner/parentRepo/pull/42#pullrequestreview-2",
@@ -598,6 +904,7 @@ describe("GitHubService", () => {
           id: "PRR_approved",
           author: "reviewer",
           authorUrl: "https://github.com/reviewer",
+          avatarUrl: "https://avatars.githubusercontent.com/u/1?v=4",
           body: "Looks good to me.",
           createdAt: Date.parse("2026-04-02T13:52:14Z"),
           url: "https://github.com/parentOwner/parentRepo/pull/42#pullrequestreview-1",
@@ -608,11 +915,377 @@ describe("GitHubService", () => {
           id: "IC_later",
           author: "commenter",
           authorUrl: "https://github.com/commenter",
+          avatarUrl: "https://avatars.githubusercontent.com/u/2?v=4",
           body: "Can we add a regression test?",
           createdAt: Date.parse("2026-04-02T13:55:00Z"),
           url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-3",
         },
       ],
+    });
+  });
+
+  it("rewrites GitHub attachment image URLs in timeline comments", async () => {
+    const privateAttachmentUrl =
+      "https://private-user-images.githubusercontent.com/123/asset.png?jwt=abc&expires=123";
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        reviews: {
+          nodes: [],
+          pageInfo: { hasNextPage: false },
+        },
+        comments: {
+          nodes: [
+            {
+              id: "IC_attachment",
+              body: "Screenshot: ![bug](https://github.com/user-attachments/assets/raw-asset)",
+              bodyHTML: `<p>Screenshot: <img alt="bug" src="${privateAttachmentUrl.replaceAll("&", "&amp;")}" /></p>`,
+              url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-4",
+              createdAt: "2026-04-02T13:56:00Z",
+              author: null,
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.items).toHaveLength(1);
+    expect(timeline.items[0]).toMatchObject({
+      kind: "comment",
+      id: "IC_attachment",
+      body: `Screenshot: ![bug](${privateAttachmentUrl})`,
+    });
+  });
+
+  it("rewrites GitHub attachment image URLs in review thread comments", async () => {
+    const privateAttachmentUrl =
+      "https://private-user-images.githubusercontent.com/123/thread.png?jwt=thread";
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        reviews: {
+          nodes: [],
+          pageInfo: { hasNextPage: false },
+        },
+        comments: {
+          nodes: [],
+          pageInfo: { hasNextPage: false },
+        },
+        reviewThreads: {
+          nodes: [
+            {
+              id: "PRRT_attachment",
+              path: "packages/app/src/git/pull-request-panel/data.ts",
+              line: 24,
+              startLine: 20,
+              isResolved: false,
+              isOutdated: false,
+              comments: {
+                nodes: [
+                  {
+                    id: "PRRC_attachment",
+                    body: '<img src="https://github.com/user-attachments/assets/thread-asset" alt="thread" />',
+                    bodyHTML: `<p><img alt="thread" src="${privateAttachmentUrl}" /></p>`,
+                    url: "https://github.com/parentOwner/parentRepo/pull/42#discussion_r2",
+                    createdAt: "2026-04-02T13:51:00Z",
+                    author: null,
+                    pullRequestReview: { id: "PRR_empty_commented" },
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.items).toHaveLength(1);
+    expect(timeline.items[0]).toMatchObject({
+      kind: "comment",
+      id: "PRRC_attachment",
+      body: `<img src="${privateAttachmentUrl}" alt="thread" />`,
+    });
+  });
+
+  it("leaves external badge images unchanged", async () => {
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        reviews: {
+          nodes: [],
+          pageInfo: { hasNextPage: false },
+        },
+        comments: {
+          nodes: [
+            {
+              id: "IC_badge",
+              body: "![build](https://img.shields.io/github/actions/workflow/status/getpaseo/paseo/ci.yml)",
+              bodyHTML:
+                '<p><img alt="build" src="https://camo.githubusercontent.com/badge-signature" /></p>',
+              url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-5",
+              createdAt: "2026-04-02T13:57:00Z",
+              author: null,
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.items[0]).toMatchObject({
+      kind: "comment",
+      id: "IC_badge",
+      body: "![build](https://img.shields.io/github/actions/workflow/status/getpaseo/paseo/ci.yml)",
+    });
+  });
+
+  it("leaves GitHub attachment image URLs unchanged when rendered images do not match", async () => {
+    const body = "![bug](https://github.com/user-attachments/assets/raw-asset)";
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        reviews: {
+          nodes: [],
+          pageInfo: { hasNextPage: false },
+        },
+        comments: {
+          nodes: [
+            {
+              id: "IC_mismatch",
+              body,
+              bodyHTML: "<p>No rendered image.</p>",
+              url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-6",
+              createdAt: "2026-04-02T13:58:00Z",
+              author: null,
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.items[0]).toMatchObject({
+      kind: "comment",
+      id: "IC_mismatch",
+      body,
+    });
+  });
+
+  it("maps inline review thread comments as chronological PR timeline comments with location", async () => {
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        reviewThreads: {
+          nodes: [
+            {
+              id: "PRRT_1",
+              path: "packages/app/src/git/pull-request-panel/data.ts",
+              line: 24,
+              startLine: 20,
+              isResolved: true,
+              isOutdated: false,
+              comments: {
+                nodes: [
+                  {
+                    id: "PRRC_1",
+                    body: "This should include line context.",
+                    bodyHTML: "<p>This should include line context.</p>",
+                    url: "https://github.com/parentOwner/parentRepo/pull/42#discussion_r1",
+                    createdAt: "2026-04-02T13:51:00Z",
+                    author: {
+                      login: "inline-reviewer",
+                      url: "https://github.com/inline-reviewer",
+                      avatarUrl: "https://avatars.githubusercontent.com/u/3?v=4",
+                    },
+                    pullRequestReview: { id: "PRR_empty_commented" },
+                  },
+                ],
+                pageInfo: { hasNextPage: true },
+              },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.truncated).toBe(true);
+    expect(timeline.items.map((item) => item.id)).toEqual([
+      "PRR_empty_commented",
+      "PRRC_1",
+      "PRR_approved",
+      "IC_later",
+    ]);
+    expect(timeline.items[1]).toEqual({
+      kind: "comment",
+      id: "PRRC_1",
+      author: "inline-reviewer",
+      authorUrl: "https://github.com/inline-reviewer",
+      avatarUrl: "https://avatars.githubusercontent.com/u/3?v=4",
+      body: "This should include line context.",
+      createdAt: Date.parse("2026-04-02T13:51:00Z"),
+      url: "https://github.com/parentOwner/parentRepo/pull/42#discussion_r1",
+      reviewId: "PRR_empty_commented",
+      location: {
+        path: "packages/app/src/git/pull-request-panel/data.ts",
+        line: 24,
+        startLine: 20,
+        threadId: "PRRT_1",
+        isResolved: true,
+        isOutdated: false,
+      },
+    });
+    expect(runner.calls[0]?.args[3]).toContain("pullRequestReview");
+  });
+
+  it("keeps inline review thread comments once when they also appear in PR comments", async () => {
+    const runner = createRunner([
+      pullRequestTimelineJson({
+        comments: {
+          nodes: [
+            {
+              id: "PRRC_1",
+              body: "This should include line context.",
+              url: "https://github.com/parentOwner/parentRepo/pull/42#discussion_r1",
+              createdAt: "2026-04-02T13:51:00Z",
+              author: {
+                login: "inline-reviewer",
+                url: "https://github.com/inline-reviewer",
+                avatarUrl: "https://avatars.githubusercontent.com/u/3?v=4",
+              },
+            },
+            {
+              id: "IC_later",
+              body: "Can we add a regression test?",
+              url: "https://github.com/parentOwner/parentRepo/pull/42#issuecomment-3",
+              createdAt: "2026-04-02T13:55:00Z",
+              author: {
+                login: "commenter",
+                url: "https://github.com/commenter",
+                avatarUrl: "https://avatars.githubusercontent.com/u/2?v=4",
+              },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+        reviewThreads: {
+          nodes: [
+            {
+              id: "PRRT_1",
+              path: "packages/app/src/git/pull-request-panel/data.ts",
+              line: 24,
+              startLine: 20,
+              isResolved: false,
+              isOutdated: false,
+              comments: {
+                nodes: [
+                  {
+                    id: "PRRC_1",
+                    body: "This should include line context.",
+                    url: "https://github.com/parentOwner/parentRepo/pull/42#discussion_r1",
+                    createdAt: "2026-04-02T13:51:00Z",
+                    author: {
+                      login: "inline-reviewer",
+                      url: "https://github.com/inline-reviewer",
+                      avatarUrl: "https://avatars.githubusercontent.com/u/3?v=4",
+                    },
+                    pullRequestReview: { id: "PRR_empty_commented" },
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+          pageInfo: { hasNextPage: false },
+        },
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const timeline = await service.getPullRequestTimeline({
+      cwd: "/repo",
+      prNumber: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+    });
+
+    expect(timeline.items.map((item) => item.id)).toEqual([
+      "PRR_empty_commented",
+      "PRRC_1",
+      "PRR_approved",
+      "IC_later",
+    ]);
+    expect(timeline.items[1]).toMatchObject({
+      id: "PRRC_1",
+      reviewId: "PRR_empty_commented",
+      location: {
+        path: "packages/app/src/git/pull-request-panel/data.ts",
+        line: 24,
+        startLine: 20,
+        threadId: "PRRT_1",
+      },
     });
   });
 
@@ -1039,6 +1712,7 @@ describe("GitHubService", () => {
         statusCheckRollup: [
           {
             __typename: "CheckRun",
+            databaseId: 12345,
             completedAt: "2026-04-02T13:52:14Z",
             conclusion: "SUCCESS",
             detailsUrl: "https://github.com/acme/repo/actions/runs/123",
@@ -1073,12 +1747,7 @@ describe("GitHubService", () => {
       headRef: "feature/pr-pane",
     });
 
-    expect(runner.calls[0]?.args).toEqual([
-      "pr",
-      "view",
-      "--json",
-      "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
-    ]);
+    expect(runner.calls[0]?.args).toEqual(["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS]);
     expect(status).toEqual({
       number: 42,
       repoOwner: "acme",
@@ -1098,6 +1767,8 @@ describe("GitHubService", () => {
           url: "https://github.com/acme/repo/actions/runs/123",
           workflow: "Server CI",
           duration: "2m 14s",
+          checkRunId: 12345,
+          workflowRunId: 123,
         },
         {
           name: "deploy/preview",
@@ -1107,6 +1778,327 @@ describe("GitHubService", () => {
       ],
       checksStatus: "success",
       reviewDecision: "pending",
+    });
+  });
+
+  it("fetches GitHub check details with capped failed job log tails and reuses cached logs", async () => {
+    const longLog = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join("\n");
+    const runner = createRunner([
+      JSON.stringify({
+        id: 12345,
+        name: "server-tests",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        details_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        output: {
+          title: "Tests failed",
+          summary: "1 failure",
+          text: "Assertion failed",
+        },
+        check_suite: {
+          workflow_run: {
+            id: 456,
+          },
+        },
+      }),
+      JSON.stringify([
+        {
+          path: "packages/server/src/index.ts",
+          start_line: 10,
+          end_line: 12,
+          annotation_level: "failure",
+          message: "Expected true",
+          title: "server test failed",
+          raw_details: "stack trace",
+        },
+      ]),
+      JSON.stringify({
+        jobs: [
+          {
+            id: 789,
+            name: "test",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+            completed_at: "2026-04-02T13:52:14Z",
+          },
+          {
+            id: 790,
+            name: "lint",
+            status: "completed",
+            conclusion: "success",
+            html_url: "https://github.com/acme/repo/actions/runs/456/job/790",
+            completed_at: "2026-04-02T13:52:15Z",
+          },
+        ],
+      }),
+      longLog,
+      JSON.stringify({
+        id: 12345,
+        name: "server-tests",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        check_suite: { workflow_run: { id: 456 } },
+      }),
+      JSON.stringify([]),
+      JSON.stringify({
+        jobs: [
+          {
+            id: 789,
+            name: "test",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+            completed_at: "2026-04-02T13:52:14Z",
+          },
+        ],
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const first = await service.getGitHubCheckDetails({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "repo",
+      checkRunId: 12345,
+    });
+    const second = await service.getGitHubCheckDetails({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "repo",
+      checkRunId: 12345,
+      force: true,
+      reason: "verify-log-cache",
+    });
+
+    expect(first).toEqual({
+      checkRunId: 12345,
+      workflowRunId: 456,
+      name: "server-tests",
+      status: "completed",
+      conclusion: "failure",
+      url: "https://github.com/acme/repo/actions/runs/456/job/789",
+      detailsUrl: "https://github.com/acme/repo/actions/runs/456/job/789",
+      output: {
+        title: "Tests failed",
+        summary: "1 failure",
+        text: "Assertion failed",
+      },
+      annotations: [
+        {
+          path: "packages/server/src/index.ts",
+          startLine: 10,
+          endLine: 12,
+          annotationLevel: "failure",
+          message: "Expected true",
+          title: "server test failed",
+          rawDetails: "stack trace",
+        },
+      ],
+      failedJobs: [
+        {
+          jobId: 789,
+          name: "test",
+          status: "completed",
+          conclusion: "failure",
+          url: "https://github.com/acme/repo/actions/runs/456/job/789",
+          logTail: Array.from({ length: 200 }, (_, index) => `line ${index + 21}`).join("\n"),
+          logTruncated: true,
+        },
+      ],
+      truncated: true,
+    });
+    expect(second.failedJobs[0]?.logTail).toBe(first.failedJobs[0]?.logTail);
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      ["api", "repos/acme/repo/check-runs/12345"],
+      ["api", "repos/acme/repo/check-runs/12345/annotations", "-f", "per_page=20"],
+      ["api", "repos/acme/repo/actions/runs/456/jobs", "-f", "per_page=100"],
+      ["api", "repos/acme/repo/actions/jobs/789/logs"],
+      ["api", "repos/acme/repo/check-runs/12345"],
+      ["api", "repos/acme/repo/check-runs/12345/annotations", "-f", "per_page=20"],
+      ["api", "repos/acme/repo/actions/runs/456/jobs", "-f", "per_page=100"],
+    ]);
+  });
+
+  it("caps failed check jobs at five and caps each log tail to 16 KiB", async () => {
+    const oversizedLog = "x".repeat(20 * 1024);
+    const failedJobs = Array.from({ length: 6 }, (_, index) => ({
+      id: 800 + index,
+      name: `failed-${index + 1}`,
+      status: "completed",
+      conclusion: "failure",
+      html_url: `https://github.com/acme/repo/actions/runs/456/job/${800 + index}`,
+      completed_at: `2026-04-02T13:52:${10 + index}Z`,
+    }));
+    const runner = createRunner([
+      JSON.stringify({
+        id: 12345,
+        name: "server-tests",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        check_suite: { workflow_run: { id: 456 } },
+      }),
+      JSON.stringify([]),
+      JSON.stringify({ jobs: failedJobs }),
+      oversizedLog,
+      oversizedLog,
+      oversizedLog,
+      oversizedLog,
+      oversizedLog,
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const details = await service.getGitHubCheckDetails({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "repo",
+      checkRunId: 12345,
+    });
+
+    expect(details.failedJobs.map((job) => job.jobId)).toEqual([800, 801, 802, 803, 804]);
+    expect(details.failedJobs.map((job) => job.logTruncated)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(details.failedJobs.map((job) => Buffer.byteLength(job.logTail ?? "", "utf8"))).toEqual([
+      16 * 1024,
+      16 * 1024,
+      16 * 1024,
+      16 * 1024,
+      16 * 1024,
+    ]);
+    expect(runner.calls.map((call) => call.args)).toEqual([
+      ["api", "repos/acme/repo/check-runs/12345"],
+      ["api", "repos/acme/repo/check-runs/12345/annotations", "-f", "per_page=20"],
+      ["api", "repos/acme/repo/actions/runs/456/jobs", "-f", "per_page=100"],
+      ["api", "repos/acme/repo/actions/jobs/800/logs"],
+      ["api", "repos/acme/repo/actions/jobs/801/logs"],
+      ["api", "repos/acme/repo/actions/jobs/802/logs"],
+      ["api", "repos/acme/repo/actions/jobs/803/logs"],
+      ["api", "repos/acme/repo/actions/jobs/804/logs"],
+    ]);
+    expect(details.truncated).toBe(true);
+  });
+
+  it("marks check details truncated when annotations hit the page cap", async () => {
+    const annotations = Array.from({ length: 20 }, (_, index) => ({
+      path: `packages/server/src/file-${index}.ts`,
+      start_line: index + 1,
+      annotation_level: "failure",
+      message: `Failure ${index + 1}`,
+    }));
+    const runner = createRunner([
+      JSON.stringify({
+        id: 12345,
+        name: "server-tests",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        check_suite: { workflow_run: { id: 456 } },
+      }),
+      JSON.stringify(annotations),
+      JSON.stringify({ jobs: [] }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const details = await service.getGitHubCheckDetails({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "repo",
+      checkRunId: 12345,
+    });
+
+    expect(details.annotations).toHaveLength(20);
+    expect(details.truncated).toBe(true);
+  });
+
+  it("marks check details truncated when workflow jobs hit the page cap", async () => {
+    const jobs = Array.from({ length: 100 }, (_, index) => ({
+      id: 900 + index,
+      name: `job-${index + 1}`,
+      status: "completed",
+      conclusion: "success",
+      html_url: `https://github.com/acme/repo/actions/runs/456/job/${900 + index}`,
+      completed_at: `2026-04-02T13:52:${String(index % 60).padStart(2, "0")}Z`,
+    }));
+    const runner = createRunner([
+      JSON.stringify({
+        id: 12345,
+        name: "server-tests",
+        status: "completed",
+        conclusion: "failure",
+        html_url: "https://github.com/acme/repo/actions/runs/456/job/789",
+        check_suite: { workflow_run: { id: 456 } },
+      }),
+      JSON.stringify([]),
+      JSON.stringify({ jobs }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const details = await service.getGitHubCheckDetails({
+      cwd: "/repo",
+      repoOwner: "acme",
+      repoName: "repo",
+      checkRunId: 12345,
+    });
+
+    expect(details.failedJobs).toEqual([]);
+    expect(details.truncated).toBe(true);
+  });
+
+  it("retries current PR view without statusCheckRollup when token permissions are insufficient", async () => {
+    const runner = createScriptedRunner([
+      {
+        error: statusCheckRollupPermissionError(["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS]),
+      },
+      currentPullRequestJson({
+        headRefName: "feature/pr-pane",
+        reviewDecision: "APPROVED",
+      }),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const status = await service.getCurrentPullRequestStatus({
+      cwd: "/repo",
+      headRef: "feature/pr-pane",
+    });
+
+    expect(runner.calls.slice(0, 2).map((call) => call.args)).toEqual([
+      ["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS],
+      ["pr", "view", "--json", CURRENT_PR_STATUS_BASE_FIELDS],
+    ]);
+    expect(status).toMatchObject({
+      title: "Fork PR",
+      headRefName: "feature/pr-pane",
+      checks: [],
+      checksStatus: "none",
+      reviewDecision: "approved",
     });
   });
 
@@ -1127,6 +2119,72 @@ describe("GitHubService", () => {
     });
 
     expect(status?.mergeable).toBe("UNKNOWN");
+  });
+
+  it("loads GitHub merge, auto-merge, permission, policy, and queue facts for PR 993 shape", async () => {
+    const runner = createScriptedRunner([
+      currentPullRequestJson({
+        number: 993,
+        url: "https://github.com/getpaseo/paseo/pull/993",
+        title: "Auto-merge UX",
+        headRefName: "github-pr-auto-merge-ux",
+        mergeable: "MERGEABLE",
+        reviewDecision: "APPROVED",
+        statusCheckRollup: [
+          {
+            __typename: "CheckRun",
+            name: "server tests",
+            workflowName: "CI",
+            status: "IN_PROGRESS",
+            conclusion: null,
+            detailsUrl: "https://github.com/getpaseo/paseo/actions/runs/993",
+          },
+        ],
+      }),
+      currentPullRequestGithubFactsJson(),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const status = await service.getCurrentPullRequestStatus({
+      cwd: "/repo",
+      headRef: "github-pr-auto-merge-ux",
+    });
+
+    expect(runner.calls.map((call) => call.args[0])).toEqual(["pr", "api"]);
+    expect(status).toMatchObject({
+      number: 993,
+      mergeable: "MERGEABLE",
+      checks: [
+        {
+          name: "server tests",
+          status: "pending",
+          url: "https://github.com/getpaseo/paseo/actions/runs/993",
+          workflow: "CI",
+        },
+      ],
+      checksStatus: "pending",
+      github: {
+        mergeStateStatus: "BLOCKED",
+        autoMergeRequest: null,
+        viewerCanEnableAutoMerge: true,
+        viewerCanDisableAutoMerge: false,
+        viewerCanMergeAsAdmin: false,
+        viewerCanUpdateBranch: true,
+        repository: {
+          autoMergeAllowed: true,
+          mergeCommitAllowed: false,
+          squashMergeAllowed: true,
+          rebaseMergeAllowed: false,
+          viewerDefaultMergeMethod: "SQUASH",
+        },
+        isMergeQueueEnabled: false,
+        isInMergeQueue: false,
+      },
+    });
   });
 
   it("resolves fork PR heads to the parent repository when gh pr view returns a stale branch match", async () => {
@@ -1189,13 +2247,8 @@ describe("GitHubService", () => {
       title: "Real fork PR",
       headRefName: "feature/fork",
     });
-    expect(runner.calls.map((call) => call.args)).toEqual([
-      [
-        "pr",
-        "view",
-        "--json",
-        "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
-      ],
+    expect(runner.calls.slice(0, 3).map((call) => call.args)).toEqual([
+      ["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS],
       ["repo", "view", "--json", "owner,name,parent"],
       [
         "pr",
@@ -1206,10 +2259,107 @@ describe("GitHubService", () => {
         "all",
         "--head",
         "forkOwner:feature/fork",
-        "--json",
-        "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
         "--limit",
         "10",
+        "--json",
+        CURRENT_PR_STATUS_FIELDS,
+      ],
+    ]);
+  });
+
+  it("retries scoped PR list without statusCheckRollup when token permissions are insufficient", async () => {
+    const runner = createScriptedRunner([
+      currentPullRequestJson({
+        number: 7,
+        url: "https://github.com/parentOwner/parentRepo/pull/7",
+        title: "Stale tracking PR",
+        headRefName: "old-branch",
+      }),
+      JSON.stringify({
+        owner: { login: "forkOwner" },
+        name: "parentRepo",
+        parent: { owner: { login: "parentOwner" }, name: "parentRepo" },
+      }),
+      {
+        error: statusCheckRollupPermissionError([
+          "pr",
+          "list",
+          "--repo",
+          "parentOwner/parentRepo",
+          "--state",
+          "all",
+          "--head",
+          "forkOwner:feature/fork",
+          "--json",
+          CURRENT_PR_STATUS_FIELDS,
+          "--limit",
+          "10",
+        ]),
+      },
+      JSON.stringify([
+        {
+          number: 42,
+          url: "https://github.com/parentOwner/parentRepo/pull/42",
+          title: "Real fork PR",
+          state: "OPEN",
+          isDraft: false,
+          baseRefName: "main",
+          headRefName: "feature/fork",
+          mergedAt: null,
+          reviewDecision: "REVIEW_REQUIRED",
+          headRepositoryOwner: { login: "forkOwner" },
+        },
+      ]),
+    ]);
+    const service = createGitHubService({
+      runner: runner.runner,
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => 100,
+    });
+
+    const status = await service.getCurrentPullRequestStatus({
+      cwd: "/repo",
+      headRef: "feature/fork",
+    });
+
+    expect(status).toMatchObject({
+      number: 42,
+      repoOwner: "parentOwner",
+      repoName: "parentRepo",
+      headRefName: "feature/fork",
+      checks: [],
+      checksStatus: "none",
+    });
+    expect(runner.calls.slice(0, 4).map((call) => call.args)).toEqual([
+      ["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS],
+      ["repo", "view", "--json", "owner,name,parent"],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "parentOwner/parentRepo",
+        "--state",
+        "all",
+        "--head",
+        "forkOwner:feature/fork",
+        "--limit",
+        "10",
+        "--json",
+        CURRENT_PR_STATUS_FIELDS,
+      ],
+      [
+        "pr",
+        "list",
+        "--repo",
+        "parentOwner/parentRepo",
+        "--state",
+        "all",
+        "--head",
+        "forkOwner:feature/fork",
+        "--limit",
+        "10",
+        "--json",
+        CURRENT_PR_STATUS_BASE_FIELDS,
       ],
     ]);
   });
@@ -1263,12 +2413,7 @@ describe("GitHubService", () => {
       }),
     ).resolves.toBeNull();
     expect(calls.map((call) => call.args)).toEqual([
-      [
-        "pr",
-        "view",
-        "--json",
-        "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
-      ],
+      ["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS],
       ["repo", "view", "--json", "owner,name,parent"],
     ]);
   });
@@ -1323,13 +2468,8 @@ describe("GitHubService", () => {
       repoName: "repo",
       headRefName: "main",
     });
-    expect(runner.calls.map((call) => call.args)).toEqual([
-      [
-        "pr",
-        "view",
-        "--json",
-        "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
-      ],
+    expect(runner.calls.slice(0, 2).map((call) => call.args)).toEqual([
+      ["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS],
       [
         "pr",
         "list",
@@ -1337,10 +2477,10 @@ describe("GitHubService", () => {
         "all",
         "--head",
         "main",
-        "--json",
-        "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner",
         "--limit",
         "10",
+        "--json",
+        CURRENT_PR_STATUS_FIELDS,
       ],
     ]);
   });
@@ -1854,13 +2994,15 @@ describe("GitHubService", () => {
       service.getCurrentPullRequestStatus({ cwd: "/repo", headRef: "feature/fork" }),
     ).resolves.toMatchObject({ number: 42 });
 
-    expect(runner.calls).toHaveLength(1);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
   });
 
   it("bypasses the warm PR status cache for forced reads", async () => {
     const runner = createRunner([
       currentPullRequestJson({ number: 41, title: "First" }),
+      currentPullRequestGithubFactsJson(),
       currentPullRequestJson({ number: 42, title: "Forced" }),
+      currentPullRequestGithubFactsJson(),
     ]);
     const service = createGitHubService({
       runner: runner.runner,
@@ -1880,7 +3022,7 @@ describe("GitHubService", () => {
       }),
     ).resolves.toMatchObject({ number: 42 });
 
-    expect(runner.calls).toHaveLength(2);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(2);
   });
 
   it("coalesces concurrent PR status callers", async () => {
@@ -1895,8 +3037,13 @@ describe("GitHubService", () => {
     const second = service.getCurrentPullRequestStatus({ cwd: "/repo", headRef: "feature/fork" });
     await Promise.resolve();
 
-    expect(runner.calls).toHaveLength(1);
+    expect(currentPullRequestStatusCalls(runner.calls)).toHaveLength(1);
     runner.resolveNext(currentPullRequestJson());
+    for (let i = 0; i < 10 && runner.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+    expect(runner.calls[1]?.args[0]).toBe("api");
+    runner.resolveNext(currentPullRequestGithubFactsJson());
 
     await expect(Promise.all([first, second])).resolves.toEqual([
       expect.objectContaining({ number: 42 }),

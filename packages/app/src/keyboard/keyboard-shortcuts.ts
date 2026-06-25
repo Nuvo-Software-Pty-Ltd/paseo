@@ -28,8 +28,10 @@ export interface KeyboardShortcutMatch {
 export interface KeyboardShortcutHelpRow {
   id: string;
   label: string;
+  labelKey: string;
   keys: ShortcutKey[];
   note?: string;
+  noteKey?: string;
 }
 
 export type ShortcutSectionId = "navigation" | "tabs-panes" | "projects" | "panels" | "agent-input";
@@ -37,6 +39,7 @@ export type ShortcutSectionId = "navigation" | "tabs-panes" | "projects" | "pane
 export interface KeyboardShortcutHelpSection {
   id: ShortcutSectionId;
   title: string;
+  titleKey: string;
   rows: KeyboardShortcutHelpRow[];
 }
 
@@ -107,6 +110,59 @@ const SHORTCUT_HELP_SECTION_TITLES: Record<ShortcutSectionId, string> = {
   "agent-input": "Agent Input",
 };
 
+const SHORTCUT_HELP_SECTION_LABEL_KEYS: Record<ShortcutSectionId, string> = {
+  navigation: "settings.shortcuts.sections.navigation",
+  "tabs-panes": "settings.shortcuts.sections.tabsPanes",
+  projects: "settings.shortcuts.sections.projects",
+  panels: "settings.shortcuts.sections.panels",
+  "agent-input": "settings.shortcuts.sections.agentInput",
+};
+
+const SHORTCUT_HELP_LABEL_KEYS: Record<string, string> = {
+  "new-agent": "settings.shortcuts.help.openProject",
+  "new-workspace": "settings.shortcuts.help.newWorkspace",
+  "new-worktree": "settings.shortcuts.help.newWorktree",
+  "archive-worktree": "settings.shortcuts.help.archiveWorktree",
+  "workspace-tab-new": "settings.shortcuts.help.newTab",
+  "workspace-tab-close-current": "settings.shortcuts.help.closeCurrentTab",
+  "workspace-jump-index": "settings.shortcuts.help.jumpToWorkspace",
+  "workspace-tab-jump-index": "settings.shortcuts.help.jumpToTab",
+  "workspace-prev": "settings.shortcuts.help.previousWorkspace",
+  "workspace-next": "settings.shortcuts.help.nextWorkspace",
+  "workspace-tab-prev": "settings.shortcuts.help.previousTab",
+  "workspace-tab-next": "settings.shortcuts.help.nextTab",
+  "workspace-pane-split-right": "settings.shortcuts.help.splitPaneRight",
+  "workspace-pane-split-down": "settings.shortcuts.help.splitPaneDown",
+  "workspace-pane-focus-left": "settings.shortcuts.help.focusPaneLeft",
+  "workspace-pane-focus-right": "settings.shortcuts.help.focusPaneRight",
+  "workspace-pane-focus-up": "settings.shortcuts.help.focusPaneUp",
+  "workspace-pane-focus-down": "settings.shortcuts.help.focusPaneDown",
+  "workspace-pane-move-tab-left": "settings.shortcuts.help.moveTabLeft",
+  "workspace-pane-move-tab-right": "settings.shortcuts.help.moveTabRight",
+  "workspace-pane-move-tab-up": "settings.shortcuts.help.moveTabUp",
+  "workspace-pane-move-tab-down": "settings.shortcuts.help.moveTabDown",
+  "workspace-pane-close": "settings.shortcuts.help.closePane",
+  "workspace-terminal-new": "settings.shortcuts.help.newTerminal",
+  "toggle-command-center": "settings.shortcuts.help.toggleCommandCenter",
+  "show-shortcuts": "settings.shortcuts.help.showKeyboardShortcuts",
+  "toggle-left-sidebar": "settings.shortcuts.help.toggleLeftSidebar",
+  "toggle-right-sidebar": "settings.shortcuts.help.toggleRightSidebar",
+  "toggle-both-sidebars": "settings.shortcuts.help.toggleBothSidebars",
+  "toggle-settings": "settings.shortcuts.help.toggleSettings",
+  "toggle-focus": "settings.shortcuts.help.toggleFocusMode",
+  "cycle-theme": "settings.shortcuts.help.cycleTheme",
+  "focus-message-input": "settings.shortcuts.help.focusMessageInput",
+  "cycle-agent-mode": "settings.shortcuts.help.cycleAgentMode",
+  "voice-toggle": "settings.shortcuts.help.toggleVoiceMode",
+  "dictation-toggle": "settings.shortcuts.help.startStopDictation",
+  "agent-interrupt": "settings.shortcuts.help.interruptAgent",
+  "voice-mute-toggle": "settings.shortcuts.help.muteUnmuteVoiceMode",
+};
+
+const SHORTCUT_HELP_NOTE_KEYS: Record<string, string> = {
+  "show-shortcuts": "settings.shortcuts.helpNotes.showKeyboardShortcuts",
+};
+
 // --- Binding definitions ---
 
 const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
@@ -133,6 +189,32 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       section: "projects",
       label: "Open project",
       keys: ["mod", "shift", "O"],
+    },
+  },
+
+  // --- New workspace ---
+  {
+    id: "workspace-new-cmd-n-mac",
+    action: "workspace.new",
+    combo: "Cmd+N",
+    when: { mac: true, commandCenter: false },
+    help: {
+      id: "new-workspace",
+      section: "projects",
+      label: "New workspace",
+      keys: ["mod", "N"],
+    },
+  },
+  {
+    id: "workspace-new-ctrl-n-non-mac",
+    action: "workspace.new",
+    combo: "Ctrl+N",
+    when: { mac: false, commandCenter: false, terminal: false },
+    help: {
+      id: "new-workspace",
+      section: "projects",
+      label: "New workspace",
+      keys: ["mod", "N"],
     },
   },
 
@@ -830,6 +912,20 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
     },
   },
   {
+    id: "message-input-mode-cycle-shift-tab",
+    action: "message-input.action",
+    combo: "Shift+Tab",
+    repeat: false,
+    when: { commandCenter: false, focusScope: "message-input" },
+    payload: { type: "message-input", kind: "mode-cycle" },
+    help: {
+      id: "cycle-agent-mode",
+      section: "agent-input",
+      label: "Cycle agent mode",
+      keys: ["shift", "Tab"],
+    },
+  },
+  {
     id: "message-input-voice-toggle-cmd-shift-d-mac",
     action: "message-input.action",
     combo: "Cmd+Shift+D",
@@ -897,52 +993,6 @@ const SHORTCUT_BINDINGS: readonly ShortcutBinding[] = [
       keys: ["Esc"],
     },
   },
-  {
-    id: "message-input-send-enter",
-    action: "message-input.action",
-    combo: "Enter",
-    when: { focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "send" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-send",
-      section: "agent-input",
-      label: "Send message",
-      keys: ["Enter"],
-    },
-  },
-  {
-    id: "message-input-queue-cmd-enter-mac",
-    action: "message-input.action",
-    combo: "Cmd+Enter",
-    when: { mac: true, focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "queue" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-queue",
-      section: "agent-input",
-      label: "Queue message",
-      keys: ["mod", "Enter"],
-    },
-  },
-  {
-    id: "message-input-queue-ctrl-enter-non-mac",
-    action: "message-input.action",
-    combo: "Ctrl+Enter",
-    when: { mac: false, focusScope: "message-input", commandCenter: false },
-    payload: { type: "message-input", kind: "queue" },
-    preventDefault: false,
-    stopPropagation: false,
-    help: {
-      id: "message-input-queue",
-      section: "agent-input",
-      label: "Queue message",
-      keys: ["mod", "Enter"],
-    },
-  },
-
   {
     id: "message-input-dictation-confirm-enter",
     action: "message-input.action",
@@ -1020,6 +1070,24 @@ function parseDigit(event: KeyboardEvent): number | null {
   return null;
 }
 
+function matchesKeyOrCode(combo: KeyCombo, event: KeyboardEvent): boolean {
+  if (combo.key === undefined) {
+    return event.code === combo.code;
+  }
+  const eventKey = event.key.toLowerCase();
+  if (eventKey === combo.key) return true;
+  if (combo.shift === true && combo.shiftedKey !== undefined && eventKey === combo.shiftedKey) {
+    return true;
+  }
+  // macOS rewrites event.key when Option is held (Option+T -> "†",
+  // Option+[ -> "“"), so Alt-bound letter / bracket bindings can only
+  // match by event.code. Stay key-first for non-Alt bindings so Dvorak
+  // keeps its logical-character matching (e.g. Cmd+V on physical Period
+  // must paste, not trigger Cmd+.).
+  if (combo.alt === true && event.code === combo.code) return true;
+  return combo.codeFallback === true && event.code === combo.code;
+}
+
 function matchesCombo(combo: KeyCombo, event: KeyboardEvent, isMac: boolean): boolean {
   if (combo.mod) {
     if (isMac) {
@@ -1040,10 +1108,7 @@ function matchesCombo(combo: KeyCombo, event: KeyboardEvent, isMac: boolean): bo
   if (combo.code === "Digit") {
     return parseDigit(event) !== null;
   }
-
-  const codeMatch = event.code === combo.code;
-  const keyMatch = combo.key !== undefined && event.key.toLowerCase() === combo.key.toLowerCase();
-  return codeMatch || keyMatch;
+  return matchesKeyOrCode(combo, event);
 }
 
 function matchesWhen(when: ShortcutWhen | undefined, context: KeyboardShortcutContext): boolean {
@@ -1294,6 +1359,21 @@ export function getDefaultKeysForAction(
   return null;
 }
 
+/**
+ * The `KeyboardEvent.key` whose hold reveals the sidebar workspace-jump number
+ * badges. It must match the modifier of the active `workspace.navigate.index`
+ * binding for this runtime, otherwise the badges appear for a modifier that
+ * does not actually jump: Alt on web, Cmd (Meta) on desktop Mac, Ctrl on
+ * desktop non-Mac.
+ */
+export function getWorkspaceIndexJumpModifierKey(platform: {
+  isMac: boolean;
+  isDesktop: boolean;
+}): "Alt" | "Meta" | "Control" {
+  if (!platform.isDesktop) return "Alt";
+  return platform.isMac ? "Meta" : "Control";
+}
+
 export function buildKeyboardShortcutHelpSections(
   input: KeyboardShortcutPlatformContext,
   bindings: readonly ParsedShortcutBinding[] = DEFAULT_BINDINGS,
@@ -1328,8 +1408,10 @@ export function buildKeyboardShortcutHelpSections(
     rows.push({
       id: help.id,
       label: help.label,
+      labelKey: SHORTCUT_HELP_LABEL_KEYS[help.id] ?? help.label,
       keys: help.keys,
       ...(help.note ? { note: help.note } : {}),
+      ...(SHORTCUT_HELP_NOTE_KEYS[help.id] ? { noteKey: SHORTCUT_HELP_NOTE_KEYS[help.id] } : {}),
     });
   }
 
@@ -1350,6 +1432,7 @@ export function buildKeyboardShortcutHelpSections(
       {
         id: sectionId,
         title: SHORTCUT_HELP_SECTION_TITLES[sectionId],
+        titleKey: SHORTCUT_HELP_SECTION_LABEL_KEYS[sectionId],
         rows,
       },
     ];

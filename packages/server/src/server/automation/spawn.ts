@@ -4,8 +4,10 @@ import type { AgentStore } from "../agent/agent-storage.js";
 import type { AgentSessionConfig } from "../agent/agent-sdk-types.js";
 import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
-import { getUnattendedModeId } from "../agent/provider-manifest.js";
-import type { ScheduleExecutionResult, ScheduleTarget } from "../schedule/types.js";
+import { resolveCreateAgentTitles } from "../agent/create-agent-title.js";
+import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
+import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
+import type { ScheduleExecutionResult, ScheduleTarget } from "@getpaseo/protocol/schedule/types";
 
 // D-3.5d — shared spawn core for automations (schedules + webhook
 // triggers). Extracted verbatim from `ScheduleService.executeSchedule`
@@ -16,10 +18,17 @@ import type { ScheduleExecutionResult, ScheduleTarget } from "../schedule/types.
 // helper only performs the spawn and returns the {agentId, output} the
 // run record needs.
 
+// The slice of ProviderSnapshotManager the new-agent spawn needs to resolve
+// the provider's create-config (unattended mode + feature values) the same way
+// the interactive create-agent path does. Optional so existing-agent spawns and
+// callers without a snapshot manager (none today) still work.
+export type AutomationCreateConfigResolver = Pick<ProviderSnapshotManager, "resolveCreateConfig">;
+
 export interface AutomationSpawnDeps {
   agentManager: AgentManager;
   agentStorage: AgentStore;
   logger: Logger;
+  providerSnapshotManager?: AutomationCreateConfigResolver;
 }
 
 /**
@@ -73,11 +82,29 @@ export async function createAutomationSpawn(params: {
   wrappedPrompt: string;
   labels: Record<string, string>;
   deps: AutomationSpawnDeps;
+  /**
+   * New-agent run flavor. Schedules (upstream behavior) run the RAW schedule
+   * prompt so it renders as a normal user turn, derive the agent title from it,
+   * and ARCHIVE the throwaway agent once its single run settles. Webhook
+   * triggers (D-3.5d) run the system-notification `wrappedPrompt` and KEEP the
+   * agent (it is the user's ongoing conversation). When omitted, defaults to the
+   * webhook flavor (wrapped prompt, no archive, no title derivation) — which is
+   * the conservative behavior for existing-agent targets and unconfigured
+   * callers. Ignored for existing-agent targets.
+   */
+  newAgent?: {
+    /** Prompt actually fed to `runAgent` (raw for schedules). */
+    runPrompt: string;
+    /** Archive the new agent after the run settles (and on failure). */
+    archiveAfterRun: boolean;
+  };
 }): Promise<AutomationSpawnHandle> {
-  const { target, wrappedPrompt, labels, deps } = params;
-  const { agentManager, agentStorage, logger } = deps;
+  const { target, wrappedPrompt, labels, deps, newAgent } = params;
+  const { agentManager, agentStorage, logger, providerSnapshotManager } = deps;
 
-  const runTurnFor = (agentId: string): (() => Promise<ScheduleExecutionResult>) => {
+  // Existing-agent targets always run the wrapped (system-notification) prompt
+  // and are never archived by the automation.
+  const runTurnForExisting = (agentId: string): (() => Promise<ScheduleExecutionResult>) => {
     return async () => {
       const result = await agentManager.runAgent(agentId, wrappedPrompt);
       const timelineText = curateAgentActivity(result.timeline);
@@ -101,26 +128,101 @@ export async function createAutomationSpawn(params: {
     if (agentManager.hasInFlightRun(agent.id)) {
       throw new Error(`Agent ${agent.id} already has an active run`);
     }
-    return { agentId: agent.id, runTurn: runTurnFor(agent.id) };
+    return { agentId: agent.id, runTurn: runTurnForExisting(agent.id) };
   }
+
+  const runPrompt = newAgent?.runPrompt ?? wrappedPrompt;
+  const archiveAfterRun = newAgent?.archiveAfterRun ?? false;
+
+  // Resolve the provider's create-config (unattended mode + feature values) the
+  // same way the interactive create path does, so a scheduled/triggered new
+  // agent lands in the provider's unattended mode (e.g. bypassPermissions /
+  // build+auto_accept) instead of the bare manifest default. Upstream parity:
+  // an explicit modeId on the target is honored verbatim (the resolver is
+  // skipped); otherwise the resolver is consulted with requestedMode undefined.
+  // Without a snapshot manager, fall back to the manifest unattended mode.
+  // Lazily resolve the fallback only when the target pins no explicit modeId, so
+  // the (potentially expensive) snapshot-manager call is skipped otherwise. Split
+  // out of the inline conditional to satisfy no-nested-ternary without changing
+  // evaluation order.
+  const resolveFallbackCreateConfig = async () =>
+    providerSnapshotManager
+      ? await providerSnapshotManager.resolveCreateConfig({
+          cwd: target.config.cwd,
+          provider: target.config.provider,
+          requestedMode: undefined,
+          featureValues: target.config.featureValues,
+          parent: null,
+          unattended: true,
+        })
+      : {
+          modeId: getUnattendedModeId(target.config.provider),
+          featureValues: target.config.featureValues,
+        };
+  const resolvedCreateConfig =
+    target.config.modeId !== undefined
+      ? { modeId: target.config.modeId, featureValues: target.config.featureValues }
+      : await resolveFallbackCreateConfig();
+
+  // Derive the agent title from the raw prompt (first content line) unless the
+  // target pins an explicit title. Mirrors resolveCreateAgentTitles in the
+  // interactive create path. Only schedules supply newAgent.runPrompt (the raw
+  // prompt); webhook triggers leave the title underived.
+  const { provisionalTitle } = resolveCreateAgentTitles({
+    configTitle: target.config.title,
+    initialPrompt: newAgent?.runPrompt,
+  });
 
   const config: AgentSessionConfig = {
     provider: target.config.provider,
     cwd: target.config.cwd,
-    modeId: target.config.modeId ?? getUnattendedModeId(target.config.provider),
+    modeId: resolvedCreateConfig.modeId,
     model: target.config.model,
     thinkingOptionId: target.config.thinkingOptionId,
-    title: target.config.title,
+    title: target.config.title ?? undefined,
     approvalPolicy: target.config.approvalPolicy,
     sandboxMode: target.config.sandboxMode,
     networkAccess: target.config.networkAccess,
     webSearch: target.config.webSearch,
+    featureValues: resolvedCreateConfig.featureValues,
     extra: target.config.extra,
     systemPrompt: target.config.systemPrompt,
     mcpServers: target.config.mcpServers as AgentSessionConfig["mcpServers"],
   };
-  const agent = await agentManager.createAgent(config, undefined, { labels });
-  return { agentId: agent.id, runTurn: runTurnFor(agent.id) };
+  const agent = await agentManager.createAgent(config, undefined, {
+    labels,
+    initialPrompt: newAgent?.runPrompt,
+    initialTitle: provisionalTitle,
+  });
+
+  const runTurn = async (): Promise<ScheduleExecutionResult> => {
+    let result;
+    try {
+      result = await agentManager.runAgent(agent.id, runPrompt);
+    } catch (error) {
+      if (archiveAfterRun) {
+        try {
+          await agentManager.archiveAgent(agent.id);
+        } catch (archiveError) {
+          logger.warn(
+            { err: archiveError, agentId: agent.id },
+            "Failed to archive automation agent after failed run",
+          );
+        }
+      }
+      throw error;
+    }
+    if (archiveAfterRun) {
+      await agentManager.archiveAgent(agent.id);
+    }
+    const timelineText = curateAgentActivity(result.timeline);
+    return {
+      agentId: agent.id,
+      output: buildRunOutput({ output: null, timelineText, finalText: result.finalText }),
+    };
+  };
+
+  return { agentId: agent.id, runTurn };
 }
 
 /**
@@ -140,6 +242,7 @@ export async function spawnFromAutomation(params: {
   wrappedPrompt: string;
   labels: Record<string, string>;
   deps: AutomationSpawnDeps;
+  newAgent?: { runPrompt: string; archiveAfterRun: boolean };
 }): Promise<ScheduleExecutionResult> {
   const handle = await createAutomationSpawn(params);
   return handle.runTurn();

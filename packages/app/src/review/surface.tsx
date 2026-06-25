@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 import { Pencil, Plus, Trash2 } from "lucide-react-native";
 import {
   Pressable,
@@ -11,10 +12,12 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Button } from "@/components/ui/button";
 import { Shortcut } from "@/components/ui/shortcut";
 import { isWeb } from "@/constants/platform";
+import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
+import type { Theme } from "@/styles/theme";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import { useWorkspaceFocusRestoration } from "@/workspace/focus";
 import { useReviewDraftComments, useReviewDraftStore, type ReviewDraftComment } from "./store";
@@ -76,6 +79,14 @@ const INLINE_REVIEW_GAP = 6;
 export const SMALL_ACTION_HIT_SLOP = 8;
 const REVIEW_CANCEL_SHORTCUT_KEYS: ShortcutKey[] = ["Esc"];
 const REVIEW_SAVE_SHORTCUT_KEYS: ShortcutKey[] = ["mod", "Enter"];
+const foregroundMutedIconColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const destructiveIconColorMapping = (theme: Theme) => ({ color: theme.colors.destructive });
+const accentForegroundIconColorMapping = (theme: Theme) => ({
+  color: theme.colors.accentForeground,
+});
+const ThemedPencil = withUnistyles(Pencil);
+const ThemedPlus = withUnistyles(Plus);
+const ThemedTrash2 = withUnistyles(Trash2);
 
 export interface InlineReviewEditorState {
   target: ReviewableDiffTarget;
@@ -271,18 +282,22 @@ export function InlineReviewGutterCell({
   reviewTarget,
   comments,
   isLineHovered = false,
+  lineHeight,
   onStartComment,
   style,
+  actionTestID,
 }: {
   children: ReactNode;
   reviewTarget: ReviewableDiffTarget | null | undefined;
   comments: readonly ReviewDraftComment[];
   isEditorOpen: boolean;
   isLineHovered?: boolean;
+  lineHeight?: number;
   onStartComment: (target: ReviewableDiffTarget) => void;
   style?: StyleProp<ViewStyle>;
+  actionTestID?: string;
 }) {
-  const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const canComment = Boolean(reviewTarget);
   const hasComments = comments.length > 0;
   const [isGutterHovered, setIsGutterHovered] = useState(false);
@@ -321,16 +336,34 @@ export function InlineReviewGutterCell({
   }, [isInteractionActive]);
 
   const pressableStyle = useCallback((): StyleProp<ViewStyle> => style, [style]);
+  const lineHeightStyle = useMemo<StyleProp<ViewStyle>>(
+    () =>
+      lineHeight !== undefined
+        ? inlineUnistylesStyle({ height: lineHeight, minHeight: lineHeight })
+        : null,
+    [lineHeight],
+  );
 
   const labelStyle = useMemo<StyleProp<ViewStyle>>(
-    () => [styles.gutterLabel, hasComments && styles.gutterLabelActive],
-    [hasComments],
+    () => [styles.gutterLabel, lineHeightStyle, hasComments && styles.gutterLabelActive],
+    [hasComments, lineHeightStyle],
+  );
+  const innerStyle = useMemo<StyleProp<ViewStyle>>(
+    () => [styles.gutterInner, lineHeightStyle],
+    [lineHeightStyle],
+  );
+  const actionIconStyle = useMemo<StyleProp<ViewStyle>>(
+    () => [
+      styles.gutterActionIcon,
+      lineHeight !== undefined && inlineUnistylesStyle({ top: Math.floor((lineHeight - 22) / 2) }),
+    ],
+    [lineHeight],
   );
 
   return (
     <Pressable
       accessibilityRole={canComment ? "button" : undefined}
-      accessibilityLabel={canComment ? "Add review comment" : undefined}
+      accessibilityLabel={canComment ? t("review.comment.add") : undefined}
       hitSlop={canComment ? SMALL_ACTION_HIT_SLOP : undefined}
       disabled={!canComment}
       onPress={handlePress}
@@ -340,12 +373,12 @@ export function InlineReviewGutterCell({
       onPressOut={handlePressOut}
       style={pressableStyle}
     >
-      <View style={styles.gutterInner}>
+      <View style={innerStyle}>
         <View style={labelStyle}>
           {children}
           {showAction ? (
-            <View style={styles.gutterActionIcon}>
-              <Plus size={16} strokeWidth={2.4} color={theme.colors.accentForeground} />
+            <View style={actionIconStyle} testID={actionTestID}>
+              <ThemedPlus size={16} strokeWidth={2.4} uniProps={accentForegroundIconColorMapping} />
             </View>
           ) : null}
         </View>
@@ -391,7 +424,7 @@ export function InlineReviewThread({
     () => [
       styles.threadContainer,
       getInlineReviewThreadViewportStyle({ viewportWidth, pinToViewport }),
-      { minHeight: height },
+      inlineUnistylesStyle({ minHeight: height }),
     ],
     [viewportWidth, pinToViewport, height],
   );
@@ -428,8 +461,7 @@ function CommentRow({
   onEditComment: (target: ReviewableDiffTarget, comment: ReviewDraftComment) => void;
   onDeleteComment: (id: string) => void;
 }) {
-  const { theme } = useUnistyles();
-
+  const { t } = useTranslation();
   const handleEdit = useCallback(
     () => onEditComment(reviewTarget, comment),
     [onEditComment, reviewTarget, comment],
@@ -448,23 +480,23 @@ function CommentRow({
       <View style={styles.commentActions}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Edit review comment"
+          accessibilityLabel={t("review.comment.edit")}
           testID={`review-comment-edit-${comment.id}`}
           hitSlop={SMALL_ACTION_HIT_SLOP}
           onPress={handleEdit}
           style={iconButtonStyle}
         >
-          <Pencil size={14} color={theme.colors.foregroundMuted} />
+          <ThemedPencil size={14} uniProps={foregroundMutedIconColorMapping} />
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Delete review comment"
+          accessibilityLabel={t("review.comment.delete")}
           testID={`review-comment-delete-${comment.id}`}
           hitSlop={SMALL_ACTION_HIT_SLOP}
           onPress={handleDelete}
           style={iconButtonDestructiveStyle}
         >
-          <Trash2 size={14} color={theme.colors.destructive} />
+          <ThemedTrash2 size={14} uniProps={destructiveIconColorMapping} />
         </Pressable>
       </View>
     </View>
@@ -478,7 +510,8 @@ export function getInlineReviewThreadViewportStyle({
   viewportWidth?: number;
   pinToViewport: boolean;
 }): StyleProp<ViewStyle> {
-  const widthStyle = viewportWidth && viewportWidth > 0 ? { width: viewportWidth } : null;
+  const widthStyle =
+    viewportWidth && viewportWidth > 0 ? inlineUnistylesStyle({ width: viewportWidth }) : null;
   if (!pinToViewport || !isWeb) {
     return widthStyle;
   }
@@ -497,7 +530,7 @@ export function InlineReviewEditor({
   onSave: (body: string) => void;
   testID?: string;
 }) {
-  const { theme } = useUnistyles();
+  const { t } = useTranslation();
   const inputRef = useRef<TextInput | null>(null);
   const focus = useWorkspaceFocusRestoration();
   const canShowKeyboardHints = useCanShowReviewKeyboardHints();
@@ -572,10 +605,10 @@ export function InlineReviewEditor({
     <View style={styles.editorBlock} testID={testID}>
       <TextInput
         ref={inputRef}
-        accessibilityLabel="Review comment"
+        accessibilityLabel={t("review.comment.label")}
         testID={testID ? `${testID}-input` : undefined}
-        placeholder="Leave a comment"
-        placeholderTextColor={theme.colors.foregroundMuted}
+        placeholder={t("review.comment.placeholder")}
+        placeholderTextColor={styles.placeholderColor.color}
         multiline
         value={body}
         onChangeText={setBody}
@@ -585,7 +618,7 @@ export function InlineReviewEditor({
       />
       <View style={styles.editorActions}>
         <Button
-          accessibilityLabel="Cancel review comment"
+          accessibilityLabel={t("review.comment.cancelAccessibility")}
           testID={testID ? `${testID}-cancel` : undefined}
           hitSlop={SMALL_ACTION_HIT_SLOP}
           onPress={onCancel}
@@ -593,10 +626,10 @@ export function InlineReviewEditor({
           size="xs"
           trailing={cancelShortcut}
         >
-          Cancel
+          {t("review.comment.cancel")}
         </Button>
         <Button
-          accessibilityLabel="Save review comment"
+          accessibilityLabel={t("review.comment.saveAccessibility")}
           testID={testID ? `${testID}-save` : undefined}
           hitSlop={SMALL_ACTION_HIT_SLOP}
           disabled={!canSave}
@@ -605,7 +638,7 @@ export function InlineReviewEditor({
           size="xs"
           trailing={saveShortcut}
         >
-          Comment
+          {t("review.comment.save")}
         </Button>
       </View>
     </View>
@@ -615,16 +648,16 @@ export function InlineReviewEditor({
 const styles = StyleSheet.create((theme) => ({
   gutterInner: {
     minHeight: theme.lineHeight.diff,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: "stretch",
+    justifyContent: "flex-start",
     overflow: "visible",
   },
   gutterLabel: {
     width: "100%",
     minWidth: 0,
     height: theme.lineHeight.diff,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: "stretch",
+    justifyContent: "flex-start",
     position: "relative",
     overflow: "visible",
   },
@@ -643,6 +676,9 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.accent,
     zIndex: 10,
     elevation: 10,
+  },
+  placeholderColor: {
+    color: theme.colors.foregroundMuted,
   },
   threadContainer: {
     flex: 1,

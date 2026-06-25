@@ -1,5 +1,4 @@
 import type { Theme } from "./theme";
-import { Fonts } from "@/constants/theme";
 import { isWeb } from "@/constants/platform";
 
 const webSelectableTextStyle = isWeb ? { userSelect: "text" as const } : {};
@@ -21,7 +20,9 @@ export function createMarkdownStyles(theme: Theme) {
       ...webSelectableTextStyle,
       color: theme.colors.foreground,
       fontSize: theme.fontSize.base,
-      lineHeight: 22,
+      // Prose line-height scales with the UI ramp (≈22 at base 16), NOT the
+      // code-size-coupled lineHeight.diff token used by code/diff surfaces.
+      lineHeight: Math.round(theme.fontSize.base * 1.4),
       flexShrink: 1,
       minWidth: 0,
       width: "100%" as const,
@@ -169,8 +170,9 @@ export function createMarkdownStyles(theme: Theme) {
       paddingVertical: 2,
       borderRadius: theme.borderRadius.md,
       borderWidth: 0,
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.sm,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
+      lineHeight: Math.round(theme.fontSize.code * 1.45),
     },
 
     code_block: {
@@ -179,8 +181,8 @@ export function createMarkdownStyles(theme: Theme) {
       color: theme.colors.foreground,
       padding: theme.spacing[3],
       borderRadius: theme.borderRadius.md,
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.sm,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       marginVertical: theme.spacing[2],
     },
 
@@ -192,8 +194,8 @@ export function createMarkdownStyles(theme: Theme) {
       borderRadius: theme.borderRadius.md,
       borderWidth: 1,
       borderColor: theme.colors.border,
-      fontFamily: Fonts.mono,
-      fontSize: theme.fontSize.sm,
+      fontFamily: theme.fontFamily.mono,
+      fontSize: theme.fontSize.code,
       marginVertical: theme.spacing[3],
     },
 
@@ -252,13 +254,11 @@ export function createMarkdownStyles(theme: Theme) {
     // =========================================================================
 
     bullet_list: {
-      marginVertical: theme.spacing[2],
       paddingLeft: 0,
       width: "100%" as const,
     },
 
     ordered_list: {
-      marginVertical: theme.spacing[2],
       paddingLeft: 0,
       width: "100%" as const,
     },
@@ -390,18 +390,18 @@ export function createCompactMarkdownStyles(theme: Theme) {
 
     code_inline: {
       ...baseStyles.code_inline,
-      fontSize: theme.fontSize.xs,
+      fontSize: theme.fontSize.code,
     },
 
     code_block: {
       ...baseStyles.code_block,
-      fontSize: theme.fontSize.xs,
+      fontSize: theme.fontSize.code,
       padding: theme.spacing[2],
     },
 
     fence: {
       ...baseStyles.fence,
-      fontSize: theme.fontSize.xs,
+      fontSize: theme.fontSize.code,
       padding: theme.spacing[2],
     },
   };

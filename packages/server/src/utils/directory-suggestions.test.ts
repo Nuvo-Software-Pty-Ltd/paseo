@@ -93,6 +93,37 @@ describe("searchHomeDirectories", () => {
     expect(exactIndex).toBeLessThan(prefixIndex);
   });
 
+  it("does not let Python virtual environments crowd out top-level project matches", async () => {
+    const projectPath = path.join(homeDir, "django-po-merge");
+    mkdirSync(projectPath, { recursive: true });
+    const dependencyPaths = ["venv", "env", "virtualenv"].map((environmentDirectoryName) =>
+      path.join(
+        homeDir,
+        `${environmentDirectoryName}-project`,
+        environmentDirectoryName,
+        "Lib",
+        "site-packages",
+        "django",
+      ),
+    );
+    for (const dependencyPath of dependencyPaths) {
+      mkdirSync(dependencyPath, { recursive: true });
+    }
+
+    const results = await searchHomeDirectories({
+      homeDir,
+      query: "~/django",
+      limit: 30,
+    });
+
+    const resolvedResults = results.map((result) => realpathSync.native(result));
+    const projectIndex = resolvedResults.indexOf(realpathSync.native(projectPath));
+    expect(projectIndex).toBeGreaterThanOrEqual(0);
+    for (const dependencyPath of dependencyPaths) {
+      expect(resolvedResults).not.toContain(realpathSync.native(dependencyPath));
+    }
+  });
+
   it("prioritizes partial matches that appear earlier in the path", async () => {
     const earlierPath = path.join(homeDir, "farofoo");
     const laterPath = path.join(homeDir, "x", "y", "farofoo");
@@ -225,6 +256,234 @@ describe("searchWorkspaceEntries", () => {
       includeDirectories: false,
     });
     expect(filesOnly).toEqual([{ path: "README.md", kind: "file" }]);
+  });
+
+  it("supports fuzzy basename queries for nested workspace files", async () => {
+    writeFileSync(path.join(workspaceDir, "src", "components", "message-renderer.tsx"), "");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "msgrndr",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+    });
+
+    expect(results).toEqual([
+      {
+        path: "src/components/message-renderer.tsx",
+        kind: "file",
+      },
+    ]);
+  });
+
+  it("ranks fuzzy basename matches after exact, prefix, and substring matches", async () => {
+    writeFileSync(path.join(workspaceDir, "src", "components", "msgrndr"), "");
+    writeFileSync(path.join(workspaceDir, "src", "components", "msgrndr-panel.tsx"), "");
+    writeFileSync(path.join(workspaceDir, "src", "components", "use-msgrndr.ts"), "");
+    writeFileSync(path.join(workspaceDir, "src", "components", "message-renderer.tsx"), "");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "msgrndr",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+    });
+
+    expect(results.map((entry) => entry.path)).toEqual([
+      "src/components/msgrndr",
+      "src/components/msgrndr-panel.tsx",
+      "src/components/use-msgrndr.ts",
+      "src/components/message-renderer.tsx",
+    ]);
+  });
+
+  it("suffix mode matches whole path segment suffixes without fuzzy matches", async () => {
+    mkdirSync(path.join(workspaceDir, "packages", "app", "src"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, "src", "file.ts"), "");
+    writeFileSync(path.join(workspaceDir, "packages", "app", "src", "file.ts"), "");
+    writeFileSync(path.join(workspaceDir, "src", "paseo-config-file.ts"), "");
+
+    const basenameResults = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "file.ts",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+    const suffixResults = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "src/file.ts",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+
+    expect(basenameResults).toEqual([
+      { path: "src/file.ts", kind: "file" },
+      { path: "packages/app/src/file.ts", kind: "file" },
+    ]);
+    expect(suffixResults).toEqual([
+      { path: "src/file.ts", kind: "file" },
+      { path: "packages/app/src/file.ts", kind: "file" },
+    ]);
+  });
+
+  it("suffix mode resolves exact workspace file paths before broad traversal", async () => {
+    const targetPath = path.join(
+      workspaceDir,
+      "packages",
+      "server",
+      "src",
+      "services",
+      "quota-fetcher",
+      "providers",
+      "local.ts",
+    );
+    mkdirSync(path.dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, "");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "packages/server/src/services/quota-fetcher/providers/local.ts",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+      maxEntriesScanned: 1,
+    });
+
+    expect(results).toEqual([
+      {
+        path: "packages/server/src/services/quota-fetcher/providers/local.ts",
+        kind: "file",
+      },
+    ]);
+  });
+
+  it("suffix mode resolves explicit hidden file paths without broad hidden traversal", async () => {
+    const targetPath = path.join(workspaceDir, ".dev", "paseo-home", "daemon.log");
+    mkdirSync(path.dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, "daemon log\n");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: ".dev/paseo-home/daemon.log",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+      maxEntriesScanned: 1,
+    });
+
+    expect(results).toEqual([{ path: ".dev/paseo-home/daemon.log", kind: "file" }]);
+  });
+
+  it("suffix mode finds files under allowlisted hidden workspace directories", async () => {
+    mkdirSync(path.join(workspaceDir, ".claude"), { recursive: true });
+    mkdirSync(path.join(workspaceDir, ".github", "workflows"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, ".claude", "settings.local.json"), "{}");
+    writeFileSync(path.join(workspaceDir, ".github", "workflows", "ci.yml"), "");
+
+    const claudeResults = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "settings.local.json",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+    const githubResults = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "ci.yml",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+
+    expect(claudeResults).toEqual([{ path: ".claude/settings.local.json", kind: "file" }]);
+    expect(githubResults).toEqual([{ path: ".github/workflows/ci.yml", kind: "file" }]);
+  });
+
+  it("does not broadly traverse unlisted hidden workspace directories", async () => {
+    mkdirSync(path.join(workspaceDir, ".dev", "cache"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, ".dev", "cache", "needle.ts"), "");
+    writeFileSync(path.join(workspaceDir, "src", "needle.ts"), "");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "needle.ts",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+
+    expect(results).toEqual([{ path: "src/needle.ts", kind: "file" }]);
+  });
+
+  it("does not suggest hidden directories even when includeDirectories is true", async () => {
+    mkdirSync(path.join(workspaceDir, ".claude"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, ".claude", "settings.local.json"), "{}");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "claude",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: true,
+      matchMode: "fuzzy",
+    });
+
+    expect(results.some((entry) => entry.path === ".claude" && entry.kind === "directory")).toBe(
+      false,
+    );
+    expect(results).toContainEqual({
+      path: ".claude/settings.local.json",
+      kind: "file",
+    });
+  });
+
+  it("path mode does not suggest hidden workspace directories", async () => {
+    mkdirSync(path.join(workspaceDir, ".claude"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, ".claude", "settings.local.json"), "{}");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "./",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: true,
+      matchMode: "fuzzy",
+    });
+
+    expect(results).toContainEqual({
+      path: "README.md",
+      kind: "file",
+    });
+    expect(results.some((entry) => entry.path === ".claude" && entry.kind === "directory")).toBe(
+      false,
+    );
+  });
+
+  it("does not traverse .git while searching workspace files", async () => {
+    mkdirSync(path.join(workspaceDir, ".git", "objects", "ab"), { recursive: true });
+    writeFileSync(path.join(workspaceDir, ".git", "objects", "ab", "deadbeef"), "");
+
+    const results = await searchWorkspaceEntries({
+      cwd: workspaceDir,
+      query: "deadbeef",
+      limit: 20,
+      includeFiles: true,
+      includeDirectories: false,
+      matchMode: "suffix",
+    });
+
+    expect(results).toEqual([]);
   });
 
   // POSIX-only: creates and follows a symlink escape fixture.

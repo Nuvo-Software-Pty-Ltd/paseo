@@ -1,10 +1,14 @@
-import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
-import type { TerminalState } from "../shared/messages.js";
+import { fork } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { assertAbsolutePath, isSameOrDescendantPath } from "../server/path-utils.js";
+import type { TerminalState } from "@getpaseo/protocol/messages";
+import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
+import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
 import type {
   ClientMessage,
   ServerMessage,
+  TerminalActivityTransition,
   TerminalCommandFinishedInfo,
   TerminalExitInfo,
   TerminalSession,
@@ -12,8 +16,12 @@ import type {
 } from "./terminal.js";
 import type { CaptureTerminalLinesResult } from "./terminal-capture.js";
 import type {
+  TerminalActivityListener,
+  TerminalActivityTransitionEvent,
   TerminalListItem,
   TerminalManager,
+  TerminalWorkspaceContributionChangedEvent,
+  TerminalWorkspaceContributionChangedListener,
   TerminalsChangedEvent,
   TerminalsChangedListener,
 } from "./terminal-manager.js";
@@ -28,6 +36,20 @@ import type {
 
 const REQUEST_TIMEOUT_MS = 10000;
 
+type RequiredWorkerTerminalInfo = WorkerTerminalInfo & { workspaceId: string };
+
+function requiredWorkspaceId(workspaceId: string | undefined): string {
+  if (workspaceId === undefined) {
+    throw new Error("workspaceId is required");
+  }
+  return workspaceId;
+}
+
+function asRequiredWorkerTerminalInfo(info: WorkerTerminalInfo): RequiredWorkerTerminalInfo {
+  requiredWorkspaceId(info.workspaceId);
+  return info as RequiredWorkerTerminalInfo;
+}
+
 type TerminalWorkerRequestInput = TerminalWorkerRequest extends infer Request
   ? Request extends TerminalWorkerRequest
     ? Omit<Request, "requestId">
@@ -41,13 +63,19 @@ interface PendingRequest {
 }
 
 interface WorkerTerminalRecord {
-  info: WorkerTerminalInfo;
+  info: RequiredWorkerTerminalInfo;
   state: TerminalState;
+  activity: TerminalActivity | null;
+  // Cached input-mode preamble from the worker (the authoritative tracker lives
+  // in the worker process). Refreshed on every getTerminalState response and on
+  // the snapshotReady event that precedes a live-restore replay.
+  replayPreamble: string;
   exitInfo: TerminalExitInfo | null;
   messageListeners: Set<(msg: ServerMessage) => void>;
   exitListeners: Set<(info: TerminalExitInfo) => void>;
   commandFinishedListeners: Set<(info: TerminalCommandFinishedInfo) => void>;
   titleChangeListeners: Set<(title?: string) => void>;
+  activityChangeListeners: Set<(transition: TerminalActivityTransition) => void>;
   session: TerminalSession;
 }
 
@@ -64,6 +92,11 @@ interface TerminalWorkerProcess {
 interface WorkerTerminalManagerOptions {
   requestTimeoutMs?: number;
   forkWorker?: () => TerminalWorkerProcess;
+  getTerminalActivityUrl?: () => string | null;
+}
+
+function createActivityToken(): string {
+  return randomBytes(32).toString("base64url");
 }
 
 function resolveWorkerUrl(): URL {
@@ -95,12 +128,14 @@ function isResponse(message: TerminalWorkerToParentMessage): message is Terminal
   return message.type === "response";
 }
 
-function cloneTerminalInfo(info: WorkerTerminalInfo): WorkerTerminalInfo {
+function cloneTerminalInfo(info: RequiredWorkerTerminalInfo): RequiredWorkerTerminalInfo {
   return {
     id: info.id,
     name: info.name,
     cwd: info.cwd,
+    workspaceId: info.workspaceId,
     ...(info.title ? { title: info.title } : {}),
+    activity: info.activity,
   };
 }
 
@@ -120,12 +155,38 @@ export function createWorkerTerminalManager(
   const pendingRequests = new Map<string, PendingRequest>();
   const recordsById = new Map<string, WorkerTerminalRecord>();
   const terminalIdsByCwd = new Map<string, Set<string>>();
+  const terminalActivityTokenById = new Map<string, string>();
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
+  const terminalActivityListeners = new Set<TerminalActivityListener>();
+  const terminalWorkspaceContributionChangedListeners =
+    new Set<TerminalWorkspaceContributionChangedListener>();
   let workerExited = false;
   let workerShutdownTimer: ReturnType<typeof setTimeout> | null = null;
 
   function emitTerminalsChanged(event: TerminalsChangedEvent): void {
     for (const listener of Array.from(terminalsChangedListeners)) {
+      try {
+        listener(event);
+      } catch {
+        // no-op
+      }
+    }
+  }
+
+  function emitTerminalWorkspaceContributionChanged(
+    event: TerminalWorkspaceContributionChangedEvent,
+  ): void {
+    for (const listener of Array.from(terminalWorkspaceContributionChangedListeners)) {
+      try {
+        listener(event);
+      } catch {
+        // no-op
+      }
+    }
+  }
+
+  function emitTerminalActivityTransition(event: TerminalActivityTransitionEvent): void {
+    for (const listener of Array.from(terminalActivityListeners)) {
       try {
         listener(event);
       } catch {
@@ -149,14 +210,16 @@ export function createWorkerTerminalManager(
         id: record.info.id,
         name: record.info.name,
         cwd: record.info.cwd,
+        workspaceId: record.info.workspaceId,
         ...(record.info.title ? { title: record.info.title } : {}),
+        activity: record.activity,
       });
     }
     return terminals;
   }
 
   function registerRecord(input: {
-    info: WorkerTerminalInfo;
+    info: RequiredWorkerTerminalInfo;
     state: TerminalState;
   }): TerminalSession {
     const existing = recordsById.get(input.info.id);
@@ -169,11 +232,14 @@ export function createWorkerTerminalManager(
     const record: WorkerTerminalRecord = {
       info: cloneTerminalInfo(input.info),
       state: input.state,
+      activity: input.info.activity,
+      replayPreamble: "",
       exitInfo: null,
       messageListeners: new Set(),
       exitListeners: new Set(),
       commandFinishedListeners: new Set(),
       titleChangeListeners: new Set(),
+      activityChangeListeners: new Set(),
       session: undefined as unknown as TerminalSession,
     };
 
@@ -187,6 +253,9 @@ export function createWorkerTerminalManager(
       get cwd() {
         return record.info.cwd;
       },
+      get workspaceId() {
+        return record.info.workspaceId;
+      },
       send(message: ClientMessage): void {
         if (message.type === "resize") {
           record.state = {
@@ -197,8 +266,18 @@ export function createWorkerTerminalManager(
         }
         sendBestEffortRequest({ type: "send", terminalId: record.info.id, message });
       },
-      subscribe(listener: (msg: ServerMessage) => void): () => void {
+      subscribe(
+        listener: (msg: ServerMessage) => void,
+        options?: { initialSnapshot?: "state" | "ready" },
+      ): () => void {
         record.messageListeners.add(listener);
+        if (options?.initialSnapshot === "ready") {
+          queueMicrotask(() => {
+            if (record.messageListeners.has(listener)) {
+              listener({ type: "snapshotReady", revision: 0 });
+            }
+          });
+        }
         return () => {
           record.messageListeners.delete(listener);
         };
@@ -232,6 +311,27 @@ export function createWorkerTerminalManager(
           record.titleChangeListeners.delete(listener);
         };
       },
+      onActivityChange(listener: (transition: TerminalActivityTransition) => void): () => void {
+        record.activityChangeListeners.add(listener);
+        return () => {
+          record.activityChangeListeners.delete(listener);
+        };
+      },
+      getActivity(): TerminalActivity | null {
+        return record.activity;
+      },
+      setActivity(state: TerminalActivityState): void {
+        record.activity = { state, changedAt: Date.now() };
+        sendBestEffortRequest({ type: "setActivity", terminalId: record.info.id, state });
+      },
+      clearActivityAttention(): boolean {
+        if (record.activity?.attentionReason == null) {
+          return false;
+        }
+        record.activity = { state: record.activity.state, changedAt: Date.now() };
+        sendBestEffortRequest({ type: "clearAttention", terminalId: record.info.id });
+        return true;
+      },
       getSize(): { rows: number; cols: number } {
         return {
           rows: record.state.rows,
@@ -241,14 +341,37 @@ export function createWorkerTerminalManager(
       getState(): TerminalState {
         return record.state;
       },
-      getStateSnapshot(): TerminalStateSnapshot {
+      getStateSnapshot(options?: { scrollbackLines?: number }): TerminalStateSnapshot {
+        const scrollbackLines = options?.scrollbackLines;
+        const scrollback =
+          typeof scrollbackLines === "number"
+            ? record.state.scrollback.slice(-scrollbackLines)
+            : record.state.scrollback;
         return {
-          state: record.state,
+          state: { ...record.state, scrollback },
           revision: 0,
         };
       },
+      getReplayPreamble(): string {
+        // Refreshed from every getTerminalState response, which the controller fetches
+        // before every snapshot replay (legacy + visible-snapshot restore). The one
+        // gap is restore.mode === "live", which replays without fetching state — there
+        // this can be stale/empty. No client sends "live" today; revisit (ship the
+        // preamble on the worker's snapshotReady) if one ever does.
+        return record.replayPreamble;
+      },
       getTitle(): string | undefined {
         return record.info.title;
+      },
+      setTitle(nextTitle: string): void {
+        const manualTitle = nextTitle.trim();
+        if (!manualTitle) {
+          return;
+        }
+        record.info = { ...record.info, title: manualTitle };
+        for (const listener of Array.from(record.titleChangeListeners)) {
+          listener(manualTitle);
+        }
       },
       getExitInfo(): TerminalExitInfo | null {
         return record.exitInfo;
@@ -282,6 +405,7 @@ export function createWorkerTerminalManager(
       return undefined;
     }
     recordsById.delete(terminalId);
+    terminalActivityTokenById.delete(terminalId);
     const terminalIds = terminalIdsByCwd.get(record.info.cwd);
     if (terminalIds) {
       terminalIds.delete(terminalId);
@@ -302,6 +426,9 @@ export function createWorkerTerminalManager(
     if (message.message.type === "snapshot") {
       record.state = message.message.state;
     }
+    if (message.message.type === "snapshotReady" && message.message.replayPreamble !== undefined) {
+      record.replayPreamble = message.message.replayPreamble;
+    }
     for (const listener of Array.from(record.messageListeners)) {
       listener(message.message);
     }
@@ -319,7 +446,15 @@ export function createWorkerTerminalManager(
       listener(message.info);
     }
     record.exitListeners.clear();
-    removeRecord(message.terminalId);
+    const previousBucket = deriveTerminalActivityStatusBucket(record.activity);
+    const removedRecord = removeRecord(message.terminalId);
+    if (previousBucket !== null && removedRecord) {
+      emitTerminalWorkspaceContributionChanged({
+        terminalId: removedRecord.info.id,
+        cwd: removedRecord.info.cwd,
+        workspaceId: removedRecord.info.workspaceId,
+      });
+    }
     emitTerminalsChanged({
       cwd: record.info.cwd,
       terminals: listTerminalItemsForCwd(record.info.cwd),
@@ -365,32 +500,55 @@ export function createWorkerTerminalManager(
     }
   }
 
-  function handleTerminalsChangedEvent(
-    message: Extract<TerminalWorkerToParentMessage, { type: "terminalsChanged" }>,
+  function handleTerminalActivityChangeEvent(
+    message: Extract<TerminalWorkerToParentMessage, { type: "terminalActivityChange" }>,
   ): void {
+    const record = recordsById.get(message.terminalId);
+    if (!record) {
+      return;
+    }
+    const previousActivity = record.activity;
+    record.activity = message.activity;
+    const transition: TerminalActivityTransition = {
+      activity: message.activity,
+      previous: message.previous,
+    };
+    for (const listener of Array.from(record.activityChangeListeners)) {
+      listener(transition);
+    }
+    emitTerminalActivityTransition({
+      terminalId: record.info.id,
+      name: record.info.name,
+      cwd: record.info.cwd,
+      workspaceId: record.info.workspaceId,
+      activity: message.activity,
+      previous: message.previous,
+    });
+    const previousBucket = deriveTerminalActivityStatusBucket(previousActivity);
+    const nextBucket = deriveTerminalActivityStatusBucket(message.activity);
+    if (previousBucket !== nextBucket) {
+      emitTerminalWorkspaceContributionChanged({
+        terminalId: record.info.id,
+        cwd: record.info.cwd,
+        workspaceId: record.info.workspaceId,
+      });
+    }
     emitTerminalsChanged({
-      cwd: message.cwd,
-      terminals: message.terminals.map((terminal) => ({
-        id: terminal.id,
-        name: terminal.name,
-        cwd: terminal.cwd,
-        ...(terminal.title ? { title: terminal.title } : {}),
-      })),
+      cwd: record.info.cwd,
+      terminals: listTerminalItemsForCwd(record.info.cwd),
     });
   }
 
   function handleWorkerEvent(message: TerminalWorkerToParentMessage): void {
     switch (message.type) {
       case "terminalCreated": {
-        registerRecord({ info: message.terminal, state: message.state });
-        return;
-      }
-
-      case "terminalRemoved": {
-        removeRecord(message.terminalId);
+        registerRecord({
+          info: asRequiredWorkerTerminalInfo(message.terminal),
+          state: message.state,
+        });
         emitTerminalsChanged({
-          cwd: message.cwd,
-          terminals: listTerminalItemsForCwd(message.cwd),
+          cwd: message.terminal.cwd,
+          terminals: listTerminalItemsForCwd(message.terminal.cwd),
         });
         return;
       }
@@ -415,8 +573,8 @@ export function createWorkerTerminalManager(
         return;
       }
 
-      case "terminalsChanged": {
-        handleTerminalsChangedEvent(message);
+      case "terminalActivityChange": {
+        handleTerminalActivityChangeEvent(message);
         return;
       }
     }
@@ -488,24 +646,69 @@ export function createWorkerTerminalManager(
     });
   }
 
-  function toSessions(terminals: WorkerTerminalInfo[]): TerminalSession[] {
-    return terminals
-      .map((terminal) => recordsById.get(terminal.id)?.session)
-      .filter((session): session is TerminalSession => Boolean(session));
-  }
-
   return {
-    async getTerminals(cwd: string): Promise<TerminalSession[]> {
-      const result = (await sendRequest({ type: "getTerminals", cwd })) as WorkerTerminalInfo[];
-      return toSessions(result);
+    async getTerminals(
+      cwd: string,
+      options?: { workspaceId?: string },
+    ): Promise<TerminalSession[]> {
+      assertAbsolutePath(cwd);
+
+      // Served from the local mirror, exactly like every other parent read.
+      // Terminals are bucketed by exact cwd, but an agent can open a terminal in
+      // a subdirectory of the workspace. A query for the workspace root must
+      // surface those too, so aggregate every bucket at or below `cwd`.
+      const sessions: TerminalSession[] = [];
+      for (const [bucketCwd, terminalIds] of terminalIdsByCwd) {
+        if (!isSameOrDescendantPath(cwd, bucketCwd)) {
+          continue;
+        }
+        for (const terminalId of terminalIds) {
+          const session = recordsById.get(terminalId)?.session;
+          if (session) {
+            sessions.push(session);
+          }
+        }
+      }
+
+      // When the query carries a workspaceId, two workspaces sharing a cwd must
+      // not see each other's terminals. A missing owner is not workspace
+      // membership; unscoped callers can still list those legacy terminals.
+      if (options?.workspaceId !== undefined) {
+        return sessions.filter((session) => session.workspaceId === options.workspaceId);
+      }
+      return sessions;
     },
 
-    async createTerminal(options: WorkerCreateTerminalOptions): Promise<TerminalSession> {
-      const result = (await sendRequest({ type: "createTerminal", options })) as {
-        terminal: WorkerTerminalInfo;
+    async createTerminal(
+      options: WorkerCreateTerminalOptions & { workspaceId: string },
+    ): Promise<TerminalSession> {
+      const terminalId = options.id ?? randomUUID();
+      const activityToken = createActivityToken();
+      const terminalActivityUrl = managerOptions.getTerminalActivityUrl?.() ?? null;
+      terminalActivityTokenById.set(terminalId, activityToken);
+      let result: {
+        terminal: RequiredWorkerTerminalInfo;
         state: TerminalState;
       };
-      return registerRecord({ info: result.terminal, state: result.state });
+      try {
+        result = (await sendRequest({
+          type: "createTerminal",
+          options: {
+            ...options,
+            id: terminalId,
+            activityToken,
+            activityUrl: terminalActivityUrl,
+          },
+        })) as {
+          terminal: RequiredWorkerTerminalInfo;
+          state: TerminalState;
+        };
+      } catch (error) {
+        terminalActivityTokenById.delete(terminalId);
+        throw error;
+      }
+      const session = registerRecord({ info: result.terminal, state: result.state });
+      return session;
     },
 
     registerCwdEnv(options: { cwd: string; env: Record<string, string> }): void {
@@ -516,15 +719,64 @@ export function createWorkerTerminalManager(
       });
     },
 
+    validateTerminalActivityToken(
+      terminalId: string,
+      token: string,
+    ): "valid" | "unknown" | "invalid" {
+      const expected = terminalActivityTokenById.get(terminalId);
+      if (!expected) {
+        return "unknown";
+      }
+      return expected === token ? "valid" : "invalid";
+    },
+
     getTerminal(id: string): TerminalSession | undefined {
       return recordsById.get(id)?.session;
     },
 
-    async getTerminalState(id: string): Promise<TerminalStateSnapshot | null> {
-      return (await sendRequest({
+    async getTerminalState(
+      id: string,
+      options?: { scrollbackLines?: number },
+    ): Promise<TerminalStateSnapshot | null> {
+      const snapshot = (await sendRequest({
         type: "getTerminalState",
         terminalId: id,
+        ...(options ? { options } : {}),
       })) as TerminalWorkerStateResult;
+      if (snapshot && snapshot.replayPreamble !== undefined) {
+        const record = recordsById.get(id);
+        if (record) {
+          record.replayPreamble = snapshot.replayPreamble;
+        }
+      }
+      return snapshot;
+    },
+
+    setTerminalTitle(id: string, title: string): boolean {
+      const session = recordsById.get(id)?.session;
+      if (!session) {
+        return false;
+      }
+      session.setTitle(title);
+      return true;
+    },
+
+    async setTerminalActivity(id: string, state: TerminalActivityState): Promise<boolean> {
+      const record = recordsById.get(id);
+      if (!record) {
+        return false;
+      }
+      await sendRequest({ type: "setActivity", terminalId: id, state });
+      return true;
+    },
+
+    async clearTerminalAttention(id: string): Promise<boolean> {
+      const record = recordsById.get(id);
+      if (!record || record.activity?.attentionReason == null) {
+        return false;
+      }
+      await sendRequest({ type: "clearAttention", terminalId: id });
+      return true;
     },
 
     killTerminal(id: string): void {
@@ -585,6 +837,22 @@ export function createWorkerTerminalManager(
       terminalsChangedListeners.add(listener);
       return () => {
         terminalsChangedListeners.delete(listener);
+      };
+    },
+
+    subscribeTerminalActivity(listener: TerminalActivityListener): () => void {
+      terminalActivityListeners.add(listener);
+      return () => {
+        terminalActivityListeners.delete(listener);
+      };
+    },
+
+    subscribeTerminalWorkspaceContributionChanged(
+      listener: TerminalWorkspaceContributionChangedListener,
+    ): () => void {
+      terminalWorkspaceContributionChangedListeners.add(listener);
+      return () => {
+        terminalWorkspaceContributionChangedListeners.delete(listener);
       };
     },
   };

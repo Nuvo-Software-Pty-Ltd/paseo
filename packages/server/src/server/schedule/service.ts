@@ -11,6 +11,7 @@ import {
 import { createAutomationSpawn, spawnFromAutomation } from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
+import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -19,7 +20,7 @@ import type {
   StoredSchedule,
   UpdateScheduleInput,
   UpdateScheduleNewAgentConfig,
-} from "./types.js";
+} from "@getpaseo/protocol/schedule/types";
 
 const SCHEDULE_TICK_INTERVAL_MS = 1000;
 
@@ -126,11 +127,14 @@ function completeSchedule(schedule: StoredSchedule, now: Date): StoredSchedule {
   };
 }
 
+type CreateConfigResolver = Pick<ProviderSnapshotManager, "resolveCreateConfig">;
+
 export interface ScheduleServiceOptions {
   store: ScheduleStore;
   logger: Logger;
   agentManager: AgentManager;
   agentStorage: AgentStore;
+  providerSnapshotManager: CreateConfigResolver;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
@@ -140,6 +144,7 @@ export class ScheduleService {
   private readonly logger: Logger;
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStore;
+  private readonly providerSnapshotManager: CreateConfigResolver;
   private readonly now: () => Date;
   private readonly runner: (
     schedule: StoredSchedule,
@@ -153,6 +158,7 @@ export class ScheduleService {
     this.logger = options.logger.child({ module: "schedule-service" });
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
+    this.providerSnapshotManager = options.providerSnapshotManager;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
@@ -349,6 +355,28 @@ export class ScheduleService {
     await this.store.delete(id);
   }
 
+  async deleteForAgent(agentId: string): Promise<number> {
+    const schedules = await this.store.list();
+    const matches = schedules.filter(
+      (schedule) => schedule.target.type === "agent" && schedule.target.agentId === agentId,
+    );
+    const results = await Promise.allSettled(
+      matches.map((schedule) => this.store.delete(schedule.id)),
+    );
+    let deleted = 0;
+    for (const [index, result] of results.entries()) {
+      if (result.status === "fulfilled") {
+        deleted += 1;
+      } else {
+        this.logger.warn(
+          { err: result.reason, scheduleId: matches[index].id, agentId },
+          "Failed to delete schedule for archived agent; continuing",
+        );
+      }
+    }
+    return deleted;
+  }
+
   async runOnce(id: string): Promise<StoredSchedule> {
     const schedule = await this.inspect(id);
     if (schedule.status === "completed") {
@@ -418,6 +446,7 @@ export class ScheduleService {
         createAutomationSpawn({
           target: schedule.target,
           wrappedPrompt,
+          newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
           labels: {
             "paseo.schedule-id": schedule.id,
             "paseo.schedule-run": runId,
@@ -426,6 +455,7 @@ export class ScheduleService {
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             logger: this.logger,
+            providerSnapshotManager: this.providerSnapshotManager,
           },
         }),
       );
@@ -694,6 +724,12 @@ export class ScheduleService {
     return spawnFromAutomation({
       target: schedule.target,
       wrappedPrompt,
+      // Schedule new-agents run the RAW prompt (renders as a normal user turn),
+      // are titled from it, and are archived once the single run settles. The
+      // wrappedPrompt is used only for existing-agent targets. Provider
+      // create-config (unattended mode + feature values) is resolved via
+      // providerSnapshotManager in the spawn helper.
+      newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
       labels: {
         "paseo.schedule-id": schedule.id,
         "paseo.schedule-run": runId,
@@ -702,6 +738,7 @@ export class ScheduleService {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.logger,
+        providerSnapshotManager: this.providerSnapshotManager,
       },
     });
   }

@@ -35,14 +35,21 @@ function hasProjectId<T extends { projectId: string }>(projects: T[], projectId:
   return projects.some((project) => project.projectId === projectId);
 }
 
-function agentRecord(overrides: { id: string; cwd: string; archivedAt?: string | null }) {
+function agentRecord(overrides: {
+  id: string;
+  cwd: string;
+  archivedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  lastActivityAt?: string;
+}) {
   return {
     id: overrides.id,
     provider: "codex" as const,
     cwd: overrides.cwd,
-    createdAt: "2026-03-01T00:00:00.000Z",
-    updatedAt: "2026-03-02T00:00:00.000Z",
-    lastActivityAt: "2026-03-02T00:00:00.000Z",
+    createdAt: overrides.createdAt ?? "2026-03-01T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-03-02T00:00:00.000Z",
+    lastActivityAt: overrides.lastActivityAt ?? "2026-03-02T00:00:00.000Z",
     lastUserMessageAt: null,
     title: null,
     labels: {},
@@ -95,6 +102,12 @@ describe("bootstrapWorkspaceRegistries", () => {
       agentRecord({
         id: "agent-2",
         cwd: NON_GIT_PROJECT,
+        // Latest activity in the workspace — `updatedAt` folds to the MAX
+        // activity across records (upstream behavior), so this drives the
+        // expected `2026-03-03` workspace `updatedAt` below.
+        createdAt: "2026-03-01T01:00:00.000Z",
+        updatedAt: "2026-03-03T00:00:00.000Z",
+        lastActivityAt: "2026-03-03T00:00:00.000Z",
       }),
     );
     await agentStorage.upsert(
@@ -113,7 +126,10 @@ describe("bootstrapWorkspaceRegistries", () => {
 
     const workspaces = await workspaceRegistry.list();
     expect(workspaces).toHaveLength(1);
-    expect(workspaces[0]?.workspaceId).toBe(NON_GIT_PROJECT);
+    expect(workspaces[0]?.workspaceId).toMatch(/^wks_[0-9a-f]{16}$/);
+    expect(workspaces[0]?.cwd).toBe(NON_GIT_PROJECT);
+    expect(workspaces[0]?.createdAt).toBe("2026-03-01T00:00:00.000Z");
+    expect(workspaces[0]?.updatedAt).toBe("2026-03-03T00:00:00.000Z");
 
     const projects = await projectRegistry.list();
     expect(projects).toHaveLength(1);
@@ -166,7 +182,7 @@ describe("bootstrapWorkspaceRegistries", () => {
     await workspaceRegistry.initialize();
     // An existing pre-D-3.5a project row — no workspaceId.
     await projectRegistry.upsert({
-      projectId: "/tmp/existing",
+      projectId: "proj-existing",
       rootPath: "/tmp/existing",
       kind: "non_git",
       displayName: "existing",
@@ -175,8 +191,8 @@ describe("bootstrapWorkspaceRegistries", () => {
       archivedAt: null,
     });
     await workspaceRegistry.upsert({
-      workspaceId: "/tmp/existing",
-      projectId: "/tmp/existing",
+      workspaceId: "ws-existing",
+      projectId: "proj-existing",
       cwd: "/tmp/existing",
       kind: "directory",
       displayName: "existing",
@@ -201,11 +217,208 @@ describe("bootstrapWorkspaceRegistries", () => {
     // No re-derivation from agent storage (the /tmp/another-project agent is ignored).
     expect(await projectRegistry.list()).toHaveLength(1);
     expect(await workspaceRegistry.list()).toHaveLength(1);
+    expect((await workspaceRegistry.list())[0]?.workspaceId).toBe("ws-existing");
     // VERIFY-3.5a finding #3: the existing project is lazily backfilled onto
-    // the default container even though the rebuild short-circuited.
-    const existing = await projectRegistry.get("/tmp/existing");
+    // the default container even though the rebuild short-circuited. (Keyed by
+    // its projectId — `proj-existing` — not its rootPath.)
+    const existing = await projectRegistry.get("proj-existing");
     expect(existing?.workspaceId).toBe(DEFAULT_CONTAINER_WORKSPACE_ID);
     expect(await workspaceContainerRegistry.get(DEFAULT_CONTAINER_WORKSPACE_ID)).not.toBeNull();
+  });
+
+  test("migrates cwd-only agents to the oldest existing same-cwd workspace", async () => {
+    await projectRegistry.initialize();
+    await workspaceRegistry.initialize();
+    await projectRegistry.upsert({
+      projectId: NON_GIT_PROJECT,
+      rootPath: NON_GIT_PROJECT,
+      kind: "non_git",
+      displayName: "non-git-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archivedAt: null,
+    });
+    await workspaceRegistry.upsert({
+      workspaceId: "ws-newer",
+      projectId: NON_GIT_PROJECT,
+      cwd: NON_GIT_PROJECT,
+      kind: "directory",
+      displayName: "newer",
+      createdAt: "2026-03-02T00:00:00.000Z",
+      updatedAt: "2026-03-02T00:00:00.000Z",
+      archivedAt: null,
+    });
+    await workspaceRegistry.upsert({
+      workspaceId: "ws-older",
+      projectId: NON_GIT_PROJECT,
+      cwd: NON_GIT_PROJECT,
+      kind: "directory",
+      displayName: "older",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archivedAt: null,
+    });
+
+    await agentStorage.initialize();
+    await agentStorage.upsert({
+      id: "legacy-agent",
+      provider: "codex",
+      cwd: NON_GIT_PROJECT,
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+      lastActivityAt: "2026-03-01T12:00:00.000Z",
+      lastUserMessageAt: null,
+      title: null,
+      labels: {},
+      lastStatus: "idle",
+      lastModeId: null,
+      config: null,
+      runtimeInfo: { provider: "codex", sessionId: null },
+      persistence: null,
+      archivedAt: null,
+    });
+
+    await bootstrapWorkspaceRegistries({
+      paseoHome,
+      agentStorage,
+      projectRegistry,
+      workspaceRegistry,
+      workspaceContainerRegistry,
+      workspaceGitService,
+      logger,
+    });
+
+    expect((await agentStorage.get("legacy-agent"))?.workspaceId).toBe("ws-older");
+    expect(await workspaceRegistry.list()).toHaveLength(2);
+  });
+
+  test("migrated legacy agents stay owned by the deterministic workspace when a same-cwd workspace is added later", async () => {
+    await projectRegistry.initialize();
+    await workspaceRegistry.initialize();
+    await projectRegistry.upsert({
+      projectId: NON_GIT_PROJECT,
+      rootPath: NON_GIT_PROJECT,
+      kind: "non_git",
+      displayName: "non-git-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archivedAt: null,
+    });
+    await workspaceRegistry.upsert({
+      workspaceId: "ws-original-owner",
+      projectId: NON_GIT_PROJECT,
+      cwd: NON_GIT_PROJECT,
+      kind: "directory",
+      displayName: "original",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archivedAt: null,
+    });
+
+    await agentStorage.initialize();
+    await agentStorage.upsert({
+      id: "legacy-agent",
+      provider: "codex",
+      cwd: NON_GIT_PROJECT,
+      createdAt: "2026-03-01T12:00:00.000Z",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+      lastActivityAt: "2026-03-01T12:00:00.000Z",
+      lastUserMessageAt: null,
+      title: null,
+      labels: {},
+      lastStatus: "idle",
+      lastModeId: null,
+      config: null,
+      runtimeInfo: { provider: "codex", sessionId: null },
+      persistence: null,
+      archivedAt: null,
+    });
+
+    await bootstrapWorkspaceRegistries({
+      paseoHome,
+      agentStorage,
+      projectRegistry,
+      workspaceRegistry,
+      workspaceContainerRegistry,
+      workspaceGitService,
+      logger,
+    });
+    await workspaceRegistry.upsert({
+      workspaceId: "ws-created-later",
+      projectId: NON_GIT_PROJECT,
+      cwd: NON_GIT_PROJECT,
+      kind: "directory",
+      displayName: "created later",
+      createdAt: "2026-03-04T00:00:00.000Z",
+      updatedAt: "2026-03-04T00:00:00.000Z",
+      archivedAt: null,
+    });
+    await bootstrapWorkspaceRegistries({
+      paseoHome,
+      agentStorage,
+      projectRegistry,
+      workspaceRegistry,
+      workspaceContainerRegistry,
+      workspaceGitService,
+      logger,
+    });
+
+    expect((await agentStorage.get("legacy-agent"))?.workspaceId).toBe("ws-original-owner");
+    expect(await workspaceRegistry.get("ws-created-later")).toMatchObject({
+      cwd: NON_GIT_PROJECT,
+    });
+  });
+
+  test("preserves existing workspace IDs when only the projects file is missing", async () => {
+    await workspaceRegistry.initialize();
+    await workspaceRegistry.upsert({
+      workspaceId: "ws-existing",
+      projectId: NON_GIT_PROJECT,
+      cwd: NON_GIT_PROJECT,
+      kind: "directory",
+      displayName: "non-git-project",
+      createdAt: "2026-03-01T00:00:00.000Z",
+      updatedAt: "2026-03-01T00:00:00.000Z",
+      archivedAt: null,
+    });
+
+    await agentStorage.initialize();
+    await agentStorage.upsert({
+      id: "agent-1",
+      provider: "codex",
+      cwd: NON_GIT_PROJECT,
+      createdAt: "2026-03-02T00:00:00.000Z",
+      updatedAt: "2026-03-02T00:00:00.000Z",
+      lastActivityAt: "2026-03-02T00:00:00.000Z",
+      lastUserMessageAt: null,
+      title: null,
+      labels: {},
+      lastStatus: "idle",
+      lastModeId: null,
+      config: null,
+      runtimeInfo: { provider: "codex", sessionId: null },
+      persistence: null,
+      archivedAt: null,
+    });
+
+    await bootstrapWorkspaceRegistries({
+      paseoHome,
+      agentStorage,
+      projectRegistry,
+      workspaceRegistry,
+      workspaceContainerRegistry,
+      workspaceGitService,
+      logger,
+    });
+
+    const workspaces = await workspaceRegistry.list();
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0]?.workspaceId).toBe("ws-existing");
+    expect(workspaces[0]?.cwd).toBe(NON_GIT_PROJECT);
+
+    const projects = await projectRegistry.list();
+    expect(projects).toHaveLength(1);
+    expect(projects[0]?.projectId).toBe(NON_GIT_PROJECT);
   });
 
   // Cloud `/workspace/<ws>/...` containers are POSIX/Linux-only (ECS; gated by

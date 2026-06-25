@@ -19,6 +19,7 @@ import {
   asCheckoutDiffManager,
   asDaemonConfigStore,
   asSessionInternals,
+  createProviderSnapshotManagerStub,
 } from "./test-utils/session-stubs.js";
 import {
   DEFAULT_CONTAINER_WORKSPACE_ID,
@@ -75,6 +76,7 @@ describe("Session project RPCs (D-3.5a)", () => {
         chatService: asChatService(),
         scheduleService: asScheduleService(),
         loopService: asLoopService(),
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
         checkoutDiffManager: asCheckoutDiffManager({
           subscribe: async () => ({
             initial: { cwd: "/tmp", files: [], error: null },

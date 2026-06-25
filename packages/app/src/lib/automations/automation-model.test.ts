@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ScheduleSummary } from "@server/server/schedule/types";
-import type { WebhookTriggerSummary } from "@server/server/trigger/types";
+import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTriggerSummary } from "@getpaseo/protocol/trigger/types";
 import {
   formatEveryMs,
   mergeAutomations,
