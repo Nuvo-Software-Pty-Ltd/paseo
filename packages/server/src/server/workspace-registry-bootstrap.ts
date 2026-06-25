@@ -542,6 +542,7 @@ async function runWorkspaceIdBackfill(options: {
   });
 }
 
+// eslint-disable-next-line complexity
 export async function bootstrapWorkspaceRegistries(options: {
   paseoHome: string;
   agentStorage: AgentStore;
@@ -793,10 +794,7 @@ export async function bootstrapWorkspaceRegistries(options: {
     // workspace+project upsert). The project record additionally carries HEAD's
     // container FK (workspaceId: containerWorkspaceId) + a null repoUrl so the
     // D-3.5a on-host container model is preserved.
-    const projectRanges = new Map<
-      string,
-      { createdAt: string | null; updatedAt: string | null }
-    >();
+    const projectRanges = new Map<string, { createdAt: string | null; updatedAt: string | null }>();
     const upstreamWorkspaceUpsertInputs: {
       workspaceId: string;
       membership: ReturnType<typeof classifyDirectoryForProjectMembership>;

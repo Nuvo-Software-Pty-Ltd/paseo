@@ -742,5 +742,4 @@ export class ScheduleService {
       },
     });
   }
-
 }

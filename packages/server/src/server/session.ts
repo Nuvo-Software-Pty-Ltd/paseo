@@ -728,6 +728,7 @@ export class Session {
   private readonly daemonSession: DaemonSession;
   private readonly createAgentLifecycleDispatch: CreateAgentLifecycleDispatch;
 
+  // eslint-disable-next-line complexity
   constructor(options: SessionOptions) {
     const {
       clientId,
@@ -2100,6 +2101,7 @@ export class Session {
     }
   }
 
+  // eslint-disable-next-line complexity
   private dispatchWorkspaceAndProjectMessage(
     msg: SessionInboundMessage,
   ): Promise<void> | undefined {

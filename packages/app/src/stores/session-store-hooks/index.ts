@@ -144,4 +144,3 @@ export function useWorkspaceStatusesForBadges(): DesktopBadgeWorkspaceStatus[] {
 
 // Orchestra cloud project selectors (re-homed during the upstream-0.1.99 merge).
 export { useProjectSource, useServerProjects } from "./cloud-projects";
-

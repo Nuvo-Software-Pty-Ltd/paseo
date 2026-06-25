@@ -467,6 +467,7 @@ async function reconcileManagedProcessLedger(
   }
 }
 
+// eslint-disable-next-line complexity
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,

@@ -1,3 +1,4 @@
+/* eslint-disable max-nested-callbacks */
 import { resolve } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 

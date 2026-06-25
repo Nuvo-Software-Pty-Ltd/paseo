@@ -141,22 +141,28 @@ export async function createAutomationSpawn(params: {
   // an explicit modeId on the target is honored verbatim (the resolver is
   // skipped); otherwise the resolver is consulted with requestedMode undefined.
   // Without a snapshot manager, fall back to the manifest unattended mode.
+  // Lazily resolve the fallback only when the target pins no explicit modeId, so
+  // the (potentially expensive) snapshot-manager call is skipped otherwise. Split
+  // out of the inline conditional to satisfy no-nested-ternary without changing
+  // evaluation order.
+  const resolveFallbackCreateConfig = async () =>
+    providerSnapshotManager
+      ? await providerSnapshotManager.resolveCreateConfig({
+          cwd: target.config.cwd,
+          provider: target.config.provider,
+          requestedMode: undefined,
+          featureValues: target.config.featureValues,
+          parent: null,
+          unattended: true,
+        })
+      : {
+          modeId: getUnattendedModeId(target.config.provider),
+          featureValues: target.config.featureValues,
+        };
   const resolvedCreateConfig =
     target.config.modeId !== undefined
       ? { modeId: target.config.modeId, featureValues: target.config.featureValues }
-      : providerSnapshotManager
-        ? await providerSnapshotManager.resolveCreateConfig({
-            cwd: target.config.cwd,
-            provider: target.config.provider,
-            requestedMode: undefined,
-            featureValues: target.config.featureValues,
-            parent: null,
-            unattended: true,
-          })
-        : {
-            modeId: getUnattendedModeId(target.config.provider),
-            featureValues: target.config.featureValues,
-          };
+      : await resolveFallbackCreateConfig();
 
   // Derive the agent title from the raw prompt (first content line) unless the
   // target pins an explicit title. Mirrors resolveCreateAgentTitles in the
