@@ -31,6 +31,7 @@ import {
   webhookTriggersQueryKey,
 } from "@/hooks/use-automations";
 import { buildHostAgentDetailRoute } from "@/utils/host-routes";
+import { i18n } from "@/i18n/i18next";
 import { AutomationCreateForm, type AutomationEditContext } from "./automation-create-form";
 
 const ThemedSpinner = withUnistyles(LoadingSpinner, (theme) => ({
@@ -95,7 +96,7 @@ function AutomationDetailScreenContent({
     enabled: Boolean(serverId && client && isConnected),
     queryFn: async (): Promise<AutomationDetailRecord> => {
       if (!client) {
-        throw new Error("Host is not connected");
+        throw new Error(i18n.t("workspace.terminal.hostDisconnected"));
       }
       return resolveAutomationDetail({ client, automationId, kind, webhookSupported });
     },
