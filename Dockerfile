@@ -125,6 +125,17 @@ COPY --from=builder /app/packages/relay/dist ./packages/relay/dist
 COPY --from=builder /app/packages/highlight/package.json ./packages/highlight/package.json
 COPY --from=builder /app/packages/highlight/dist ./packages/highlight/dist
 
+# protocol + client are pure (deps hoisted to root node_modules). The daemon
+# (server + cli) imports @getpaseo/protocol/* and @getpaseo/client/* at RUNTIME,
+# so their package.json + dist must be present for the @getpaseo/* workspace
+# symlinks in the copied root node_modules to resolve — otherwise the CLI dies on
+# boot with ERR_MODULE_NOT_FOUND: Cannot find package '@getpaseo/protocol'.
+COPY --from=builder /app/packages/protocol/package.json ./packages/protocol/package.json
+COPY --from=builder /app/packages/protocol/dist ./packages/protocol/dist
+
+COPY --from=builder /app/packages/client/package.json ./packages/client/package.json
+COPY --from=builder /app/packages/client/dist ./packages/client/dist
+
 # Daemon's writable working dir — $PASEO_HOME. ECS will mount a per-workspace
 # EBS volume here at D-2; D-0 just uses a container-local path.
 ENV PASEO_HOME=/var/lib/paseo
