@@ -32,53 +32,54 @@ async function withMobileMockAgent(page: Page, run: () => Promise<void>) {
   }
 }
 
-function bottomSheetBackdrop(page: Page) {
-  return page.getByRole("button", { name: "Bottom sheet backdrop" }).first();
+// At the mobile-web breakpoint our fork renders comboboxes (both the model
+// selector and the tab switcher are shared `Combobox` instances) through an RN
+// `Modal` "web-modal" body, NOT @gorhom/bottom-sheet — see PR #35 and
+// src/components/ui/combobox-presentation.ts (`resolveComboboxPresentation`
+// returns "web-modal" for web-compact because gorhom does not present/reopen
+// reliably on react-native-web). So the upstream gorhom-only selectors
+// ("Bottom sheet backdrop" / "Bottom sheet handle" slider / "Bottom Sheet"
+// label) never exist on web. The web-modal (WebMobileComboboxBody) instead
+// renders testID="combobox-mobile-web-container" with a "Dismiss" backdrop
+// button and a DECORATIVE (role-less) handle, so the close path is a backdrop
+// click — there is no handle-drag close. The open→close→reopen→close sequence
+// is still genuinely exercised against the web-modal container.
+function webComboboxContainer(page: Page) {
+  return page.getByTestId("combobox-mobile-web-container").first();
 }
 
-function bottomSheetHandle(page: Page) {
-  return page.getByRole("slider", { name: "Bottom sheet handle" }).first();
+function webComboboxBackdrop(page: Page) {
+  // The backdrop is a Pressable with accessibilityLabel="Dismiss" but no
+  // accessibilityRole, so react-native-web renders it as a role-less element
+  // (accessible name only). getByLabel matches the name regardless of role;
+  // getByRole("button", …) would not.
+  return page.getByLabel("Dismiss", { exact: true }).first();
 }
 
 async function expectBottomSheetOpen(page: Page) {
-  await expect(bottomSheetBackdrop(page)).toBeVisible({ timeout: 10_000 });
+  await expect(webComboboxContainer(page)).toBeVisible({ timeout: 10_000 });
 }
 
 async function closeBottomSheetWithBackdrop(page: Page) {
-  const backdrop = bottomSheetBackdrop(page);
-  const handle = bottomSheetHandle(page);
-  // Tapping the backdrop is the close path under test, but on a loaded CI runner
-  // the model-selector sheet re-renders as its model list settles and Gorhom
-  // drops backdrop presses during that churn — so a tap (even retried) can fail
-  // to dismiss. Tap the backdrop first; if it survives, drag the handle down,
-  // which drives Gorhom's pan-to-close directly and is unaffected by the churn.
-  // The post-close guard below still protects the regression this test exists
-  // for: a sheet that dismisses, then re-presents.
+  const container = webComboboxContainer(page);
+  const backdrop = webComboboxBackdrop(page);
+  // Clicking the "Dismiss" backdrop is the close path under test. Retry the
+  // click until the container is gone — on a loaded runner the model-selector
+  // body re-renders as its model list settles and an early click can land
+  // before onPress is wired.
   await expect(async () => {
-    if (!(await backdrop.isVisible())) {
+    if (!(await container.isVisible())) {
       return;
     }
-    const box = await backdrop.boundingBox();
-    if (box) {
-      await page.mouse.click(box.x + box.width / 2, box.y + 24);
+    if (await backdrop.isVisible()) {
+      await backdrop.click({ force: true });
     }
     await page.waitForTimeout(150);
-    if (await backdrop.isVisible()) {
-      const handleBox = await handle.boundingBox();
-      if (handleBox) {
-        const startX = handleBox.x + handleBox.width / 2;
-        const startY = handleBox.y + handleBox.height / 2;
-        await page.mouse.move(startX, startY);
-        await page.mouse.down();
-        await page.mouse.move(startX, startY + 400, { steps: 8 });
-        await page.mouse.up();
-      }
-    }
-    await expect(backdrop).not.toBeVisible({ timeout: 1_000 });
+    await expect(container).not.toBeVisible({ timeout: 1_000 });
   }).toPass({ timeout: 15_000 });
   // Guard against the regression where the sheet starts dismissing, then re-presents.
   await page.waitForTimeout(500);
-  await expect(backdrop).not.toBeVisible({ timeout: 1_000 });
+  await expect(container).not.toBeVisible({ timeout: 1_000 });
 }
 
 async function openTabSwitcher(page: Page) {
@@ -91,7 +92,7 @@ async function openModelSelector(page: Page) {
   await page.getByRole("button", { name: /Select model/ }).click();
   await expectBottomSheetOpen(page);
   await expect(
-    page.getByLabel("Bottom Sheet", { exact: true }).getByText("Ten second stream", {
+    webComboboxContainer(page).getByText("Ten second stream", {
       exact: true,
     }),
   ).toBeVisible({ timeout: 10_000 });
