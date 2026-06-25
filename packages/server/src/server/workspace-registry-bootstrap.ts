@@ -702,12 +702,16 @@ export async function bootstrapWorkspaceRegistries(options: {
     const materializedWorkspaceCwds = new Map<string, string>();
 
     for (const entry of recordsByDirectoryKey.values()) {
-      // Mint a stable workspace id: reuse the existing one for this cwd if the
-      // ephemeral registry still has it, else generate a fresh one. (The map
-      // key is now a directoryKey, not a workspaceId, so it cannot be the id.)
-      const workspaceId =
-        existingWorkspaceIdsByCwd.get(path.resolve(entry.membership.checkout.cwd)) ??
-        generateWorkspaceId();
+      // CLOUD convention — the checkout workspace id IS its cwd (container path),
+      // NOT an opaque `generateWorkspaceId()`. Cloud workspace IDs are cwd /
+      // container-path-based and are load-bearing keys (DynamoDB partition keys +
+      // IAM LeadingKeys), so a reconstructed cloud checkout must be keyed by its
+      // cwd to stay stable across recycles. This matches the no-agent durable
+      // path in `appendDurableProjectWorkspaces` (also `workspaceId: checkoutCwd`).
+      // Reuse the existing id if the ephemeral registry still has it; else key by
+      // the normalized cwd. (Upstream's `wks_*` minting stays in the on-host branch.)
+      const checkoutCwd = normalizeWorkspaceId(entry.membership.checkout.cwd);
+      const workspaceId = existingWorkspaceIdsByCwd.get(path.resolve(checkoutCwd)) ?? checkoutCwd;
       const input = buildWorkspaceInputFromAgentRecords({
         workspaceId,
         entry,

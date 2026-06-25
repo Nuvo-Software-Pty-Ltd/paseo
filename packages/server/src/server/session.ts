@@ -1631,6 +1631,26 @@ export class Session {
     };
   }
 
+  // workspace-retention fallback: synthesize a cwd-keyed (non-git) placement for
+  // an agent whose workspace record is momentarily absent (cold cloud respawn /
+  // mid-reconstruction), so it is not dropped from the conversation list.
+  private buildFallbackPlacementForCwd(cwd: string): ProjectPlacementPayload {
+    const normalizedCwd = normalizePersistedWorkspaceId(cwd);
+    return {
+      projectKey: normalizedCwd,
+      projectName: deriveProjectGroupingName(normalizedCwd),
+      checkout: {
+        cwd: normalizedCwd,
+        isGit: false,
+        currentBranch: null,
+        remoteUrl: null,
+        worktreeRoot: null,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      },
+    };
+  }
+
   private async buildProjectPlacementForWorkspaceId(
     workspaceId: string,
   ): Promise<ProjectPlacementPayload | null> {
@@ -4418,8 +4438,9 @@ export class Session {
     limit: number;
     getPlacement: (workspaceId: string | undefined) => Promise<ProjectPlacementPayload | null>;
     filter: AgentUpdatesFilter | undefined;
+    allowCwdFallback: boolean;
   }): Promise<FetchAgentsResponseEntry[]> {
-    const { candidates, limit, getPlacement, filter } = params;
+    const { candidates, limit, getPlacement, filter, allowCwdFallback } = params;
     const matchedEntries: FetchAgentsResponseEntry[] = [];
     const batchSize = 25;
     for (
@@ -4430,7 +4451,15 @@ export class Session {
       const batch = candidates.slice(start, start + batchSize);
       const batchEntries = await Promise.all(
         batch.map(async (agent) => {
-          const project = await getPlacement(agent.workspaceId);
+          let project = await getPlacement(agent.workspaceId);
+          if (!project && agent.cwd && allowCwdFallback) {
+            // workspace-retention fallback — an agent whose workspace record is
+            // momentarily absent (cold cloud respawn / mid-reconstruction) must
+            // not drop off the conversation list; synthesize a cwd-keyed
+            // placement. Active scope pre-filters to agents with a live
+            // placement, so this never fires there.
+            project = this.buildFallbackPlacementForCwd(agent.cwd);
+          }
           return project ? { agent, project } : null;
         }),
       );
@@ -4523,6 +4552,10 @@ export class Session {
       limit,
       getPlacement,
       filter,
+      // The cwd fallback (keep an agent whose workspace record is momentarily
+      // absent) applies to the unscoped list only — history deliberately skips
+      // rows whose workspace project record is missing.
+      allowCwdFallback: request.type !== "fetch_agent_history_request",
     });
 
     const pagedEntries = matchedEntries.slice(0, limit);

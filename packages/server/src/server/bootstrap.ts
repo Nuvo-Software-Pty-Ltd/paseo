@@ -106,7 +106,7 @@ import { AgentStorage, type AgentStore } from "./agent/agent-storage.js";
 import { DynamoAgentStore } from "./agent/dynamo-agent-store.js";
 import {
   attachAgentStoragePersistence,
-  attachClaudeTranscriptCapture,
+  attachProviderTranscriptCapture,
   attachWorkspaceSnapshotCapture,
 } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
@@ -187,6 +187,7 @@ import {
 import { terminateWithTreeKill } from "../utils/tree-kill.js";
 import { isHostnameAllowed, type HostnamesConfig } from "./hostnames.js";
 import {
+  bearerMatchesCapabilityToken,
   createRequireBearerMiddleware,
   createRequireWorkspaceMiddleware,
   isAgentMcpRequestAuthorized,
@@ -705,8 +706,19 @@ export async function createPaseoDaemon(
     // a transient auth-service outage at boot must not kill the daemon.
     fireDaemonVersionBeacon({ logger });
     app.use(
-      createRequireWorkspaceMiddleware(workspaceAuthCallback, (context) => {
-        logger.warn(context, "Rejected HTTP request with invalid workspace token");
+      createRequireWorkspaceMiddleware(workspaceAuthCallback, {
+        onReject: (context) => {
+          logger.warn(context, "Rejected HTTP request with invalid workspace token");
+        },
+        // T-10: /mcp/agents must reject a cross-tenant workspace JWT, so it is
+        // NOT bypassed by the workspace gate. The daemon's own agents reach it
+        // over loopback with the capability token (no JWT) — admit those here;
+        // the route handler re-authorizes via isAgentMcpRequestAuthorized. A
+        // cross-tenant attacker lacks the capability token and still hits the
+        // JWT path (→ 401 on workspace_id mismatch).
+        isCapabilityAuthorized: (req) =>
+          req.path === "/mcp/agents" &&
+          bearerMatchesCapabilityToken(req.header("authorization"), agentMcpAuthToken),
       }),
     );
   } else {
@@ -940,10 +952,10 @@ export async function createPaseoDaemon(
     agentManager,
     agentStorage,
   );
-  // Cloud mode: persist each Claude transcript to S3 after every settled turn
-  // so conversations survive a daemon restart. attachClaudeTranscriptCapture
+  // Cloud mode: persist each provider transcript to S3 after every settled turn
+  // so conversations survive a daemon restart. attachProviderTranscriptCapture
   // no-ops in local mode, so this is byte-for-byte unchanged off-cloud.
-  const detachClaudeTranscriptCapture = attachClaudeTranscriptCapture(logger, agentManager);
+  const detachProviderTranscriptCapture = attachProviderTranscriptCapture(logger, agentManager);
   // Cloud mode: snapshot the workspace git working-tree delta to S3 (turn-settle
   // + periodic + shutdown flush) so uncommitted work survives a recycle —
   // /workspace is tmpfs. Gated on isWorkspaceSnapshotEnabled() (cloud + deploy
@@ -1261,6 +1273,14 @@ export async function createPaseoDaemon(
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
+      // The daemon's own agents reach this route over loopback with the
+      // capability token (no workspace JWT). The cloud workspace middleware
+      // admits those (isCapabilityAuthorized) without setting req.workspaceAuth,
+      // so the workspace-binding check below must not demand a JWT for them.
+      const authedViaCapabilityToken = bearerMatchesCapabilityToken(
+        req.header("authorization"),
+        agentMcpAuthToken,
+      );
       if (config.mcpDebug) {
         logger.debug(
           {
@@ -1273,13 +1293,13 @@ export async function createPaseoDaemon(
           "Agent MCP request",
         );
       }
-      // Defense-in-depth: the global require-workspace middleware (mounted
-      // above) already rejects MCP requests without a valid JWT in cloud
-      // mode. This in-handler gate guards against a future on-host-path bug
-      // letting an unauthenticated request reach the MCP endpoint. F3: we
-      // never look at a workspaceId on the wire — only the JWT-derived
+      // Defense-in-depth: in cloud mode the require-workspace middleware (mounted
+      // above) rejects a cross-tenant workspace JWT before it reaches here and
+      // attaches the validated claim. A non-capability caller must therefore
+      // carry a workspace JWT whose workspace_id is the daemon's bound tenant.
+      // F3: we never look at a workspaceId on the wire — only the JWT-derived
       // claim attached by the middleware.
-      if (isPaseoCloudMode() && !req.workspaceAuth?.workspaceId) {
+      if (isPaseoCloudMode() && !authedViaCapabilityToken && !req.workspaceAuth?.workspaceId) {
         res.status(401).json({
           jsonrpc: "2.0",
           error: {
@@ -1580,7 +1600,7 @@ export async function createPaseoDaemon(
     await closeAllAgents(logger, agentManager);
     await agentManager.flush().catch(() => undefined);
     detachAgentStoragePersistence();
-    detachClaudeTranscriptCapture();
+    detachProviderTranscriptCapture();
     // Final best-effort workspace snapshot (agents are now closed, so the tree
     // is quiescent) before stop continues teardown. Awaited so a graceful
     // shutdown flushes the latest delta; a SIGKILL past stopTimeout still only

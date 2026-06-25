@@ -77,7 +77,7 @@ export function attachAgentStoragePersistence(
  * `captureTranscriptSnapshot` itself gates on `isPaseoCloudMode()`, so this is
  * a no-op in local mode.
  */
-export function attachClaudeTranscriptCapture(
+export function attachProviderTranscriptCapture(
   logger: LoggerLike,
   agentManager: AgentManagerStateSource,
 ): () => void {

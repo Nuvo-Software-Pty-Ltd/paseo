@@ -48,6 +48,10 @@ function createTerminalRequest(cwd: string): CreateTerminalRequest {
   return {
     type: "create_terminal_request",
     cwd,
+    // upstream-0.1.99 made terminals workspace-scoped; the create handler now
+    // requires a workspaceId. Scoped env still resolves from cwd (Site B), so
+    // a constant id here is fine for this test's purpose.
+    workspaceId: "ws_test",
     requestId: `req_${cwd}`,
   } as CreateTerminalRequest;
 }

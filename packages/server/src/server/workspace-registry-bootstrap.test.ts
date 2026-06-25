@@ -35,14 +35,21 @@ function hasProjectId<T extends { projectId: string }>(projects: T[], projectId:
   return projects.some((project) => project.projectId === projectId);
 }
 
-function agentRecord(overrides: { id: string; cwd: string; archivedAt?: string | null }) {
+function agentRecord(overrides: {
+  id: string;
+  cwd: string;
+  archivedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  lastActivityAt?: string;
+}) {
   return {
     id: overrides.id,
     provider: "codex" as const,
     cwd: overrides.cwd,
-    createdAt: "2026-03-01T00:00:00.000Z",
-    updatedAt: "2026-03-02T00:00:00.000Z",
-    lastActivityAt: "2026-03-02T00:00:00.000Z",
+    createdAt: overrides.createdAt ?? "2026-03-01T00:00:00.000Z",
+    updatedAt: overrides.updatedAt ?? "2026-03-02T00:00:00.000Z",
+    lastActivityAt: overrides.lastActivityAt ?? "2026-03-02T00:00:00.000Z",
     lastUserMessageAt: null,
     title: null,
     labels: {},
@@ -95,6 +102,12 @@ describe("bootstrapWorkspaceRegistries", () => {
       agentRecord({
         id: "agent-2",
         cwd: NON_GIT_PROJECT,
+        // Latest activity in the workspace — `updatedAt` folds to the MAX
+        // activity across records (upstream behavior), so this drives the
+        // expected `2026-03-03` workspace `updatedAt` below.
+        createdAt: "2026-03-01T01:00:00.000Z",
+        updatedAt: "2026-03-03T00:00:00.000Z",
+        lastActivityAt: "2026-03-03T00:00:00.000Z",
       }),
     );
     await agentStorage.upsert(
@@ -206,8 +219,9 @@ describe("bootstrapWorkspaceRegistries", () => {
     expect(await workspaceRegistry.list()).toHaveLength(1);
     expect((await workspaceRegistry.list())[0]?.workspaceId).toBe("ws-existing");
     // VERIFY-3.5a finding #3: the existing project is lazily backfilled onto
-    // the default container even though the rebuild short-circuited.
-    const existing = await projectRegistry.get("/tmp/existing");
+    // the default container even though the rebuild short-circuited. (Keyed by
+    // its projectId — `proj-existing` — not its rootPath.)
+    const existing = await projectRegistry.get("proj-existing");
     expect(existing?.workspaceId).toBe(DEFAULT_CONTAINER_WORKSPACE_ID);
     expect(await workspaceContainerRegistry.get(DEFAULT_CONTAINER_WORKSPACE_ID)).not.toBeNull();
   });

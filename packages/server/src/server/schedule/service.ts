@@ -144,6 +144,7 @@ export class ScheduleService {
   private readonly logger: Logger;
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStore;
+  private readonly providerSnapshotManager: CreateConfigResolver;
   private readonly now: () => Date;
   private readonly runner: (
     schedule: StoredSchedule,
@@ -157,6 +158,7 @@ export class ScheduleService {
     this.logger = options.logger.child({ module: "schedule-service" });
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
+    this.providerSnapshotManager = options.providerSnapshotManager;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
   }
@@ -444,6 +446,7 @@ export class ScheduleService {
         createAutomationSpawn({
           target: schedule.target,
           wrappedPrompt,
+          newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
           labels: {
             "paseo.schedule-id": schedule.id,
             "paseo.schedule-run": runId,
@@ -452,6 +455,7 @@ export class ScheduleService {
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             logger: this.logger,
+            providerSnapshotManager: this.providerSnapshotManager,
           },
         }),
       );
@@ -720,6 +724,12 @@ export class ScheduleService {
     return spawnFromAutomation({
       target: schedule.target,
       wrappedPrompt,
+      // Schedule new-agents run the RAW prompt (renders as a normal user turn),
+      // are titled from it, and are archived once the single run settles. The
+      // wrappedPrompt is used only for existing-agent targets. Provider
+      // create-config (unattended mode + feature values) is resolved via
+      // providerSnapshotManager in the spawn helper.
+      newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
       labels: {
         "paseo.schedule-id": schedule.id,
         "paseo.schedule-run": runId,
@@ -728,6 +738,7 @@ export class ScheduleService {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.logger,
+        providerSnapshotManager: this.providerSnapshotManager,
       },
     });
   }

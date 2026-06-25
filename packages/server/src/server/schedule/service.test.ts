@@ -1351,6 +1351,8 @@ describe("ScheduleService", () => {
         createAgent: vi.fn(async () => ({ id: AGENT_ID })),
         runAgent,
         hasInFlightRun: vi.fn(() => false),
+        // Schedule new-agents are archived once the single run settles.
+        archiveAgent: vi.fn(async () => ({ archivedAt: "2026-01-01T00:01:00.000Z" })),
       } as unknown as AgentManager;
       const service = makeService(manager);
       const created = await service.create({
@@ -1411,6 +1413,8 @@ describe("ScheduleService", () => {
         createAgent: vi.fn(async () => ({ id: AGENT_ID })),
         runAgent,
         hasInFlightRun: vi.fn(() => false),
+        // Schedule new-agents are archived once the single run settles.
+        archiveAgent: vi.fn(async () => ({ archivedAt: "2026-01-01T00:01:00.000Z" })),
       } as unknown as AgentManager;
       const service = makeService(manager);
       // Create inside an ALS so the schedule persists cloudOwner* claims.

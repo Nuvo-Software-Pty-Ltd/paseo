@@ -741,23 +741,31 @@ describe("ProviderSnapshotManager public surface", () => {
     test("getSnapshot returns the cloud-shared mirror when PASEO_CLOUD_MODE=1", () => {
       const originalEnv = process.env.PASEO_CLOUD_MODE;
       process.env.PASEO_CLOUD_MODE = "1";
+      // Spies on the per-cwd provider-binary probe path. Cloud mode must
+      // NOT touch these — it serves the static mirror (F1 closed).
+      const isAvailable = vi.fn(async () => true);
+      const fetchCatalog = vi.fn(async () => ({
+        models: [] as AgentModelDefinition[],
+        modes: [] as AgentMode[],
+      }));
+      const manager = new ProviderSnapshotManager({
+        logger: createTestLogger(),
+        extraClients: {
+          claude: createExtraClient("claude", { isAvailable, fetchCatalog }),
+        },
+      });
       try {
-        const { registry, handles } = createRegistry([createMockProvider({ provider: "claude" })]);
-        const manager = new ProviderSnapshotManager(registry, createTestLogger());
-
         const snapshot = manager.getSnapshot();
 
         expect(snapshot.length).toBeGreaterThan(0);
-        const claudeEntry = getProviderEntry(snapshot, "claude");
+        const claudeEntry = snapshot.find((entry) => entry.provider === "claude");
         expect(claudeEntry?.status).toBe("ready");
         expect(claudeEntry?.models?.length ?? 0).toBeGreaterThan(0);
         // F1 closed: cloud-mode does NOT invoke the per-cwd provider binary.
-        expect(handles.claude?.isAvailable).not.toHaveBeenCalled();
-        expect(handles.claude?.fetchModels).not.toHaveBeenCalled();
-        expect(handles.claude?.fetchModes).not.toHaveBeenCalled();
-
-        manager.destroy();
+        expect(isAvailable).not.toHaveBeenCalled();
+        expect(fetchCatalog).not.toHaveBeenCalled();
       } finally {
+        manager.destroy();
         if (originalEnv === undefined) {
           delete process.env.PASEO_CLOUD_MODE;
         } else {
@@ -766,20 +774,23 @@ describe("ProviderSnapshotManager public surface", () => {
       }
     });
 
-    test("getSnapshot excludes providers absent from the daemon's registry", () => {
+    test("getSnapshot only surfaces cloud-mirror providers present in the daemon's registry", () => {
       const originalEnv = process.env.PASEO_CLOUD_MODE;
       process.env.PASEO_CLOUD_MODE = "1";
+      const manager = new ProviderSnapshotManager({ logger: createTestLogger() });
       try {
-        // Registry intentionally has zero providers to verify filtering.
-        const { registry } = createRegistry([]);
-        const manager = new ProviderSnapshotManager(registry, createTestLogger());
-
         const snapshot = manager.getSnapshot();
+        const registered = new Set(manager.listRegisteredProviderIds());
 
-        expect(snapshot).toEqual([]);
-
-        manager.destroy();
+        // The cloud mirror is filtered to providers in the registry (a
+        // deployment that excludes a provider for build/licensing reasons
+        // must not surface it). Every returned entry is registered.
+        expect(snapshot.length).toBeGreaterThan(0);
+        for (const entry of snapshot) {
+          expect(registered.has(entry.provider)).toBe(true);
+        }
       } finally {
+        manager.destroy();
         if (originalEnv === undefined) {
           delete process.env.PASEO_CLOUD_MODE;
         } else {
@@ -789,13 +800,14 @@ describe("ProviderSnapshotManager public surface", () => {
     });
 
     test("getCloudSnapshotVersion exposes the mirror's version string", () => {
-      const { registry } = createRegistry([createMockProvider({ provider: "claude" })]);
-      const manager = new ProviderSnapshotManager(registry, createTestLogger());
+      const manager = new ProviderSnapshotManager({ logger: createTestLogger() });
+      try {
+        const version = manager.getCloudSnapshotVersion();
 
-      const version = manager.getCloudSnapshotVersion();
-
-      expect(version).toMatch(/^\d{4}\.\d{2}-\d+$/);
-      manager.destroy();
+        expect(version).toMatch(/^\d{4}\.\d{2}-\d+$/);
+      } finally {
+        manager.destroy();
+      }
     });
   });
 });

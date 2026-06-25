@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import {
-  attachClaudeTranscriptCapture,
+  attachProviderTranscriptCapture,
   buildConfigOverrides,
   buildSessionConfig,
   toAgentPersistenceHandle,
@@ -69,7 +69,7 @@ function createRecord(overrides?: Partial<StoredAgentRecord>): StoredAgentRecord
   };
 }
 
-describe("attachClaudeTranscriptCapture", () => {
+describe("attachProviderTranscriptCapture", () => {
   let originalCloudMode: string | undefined;
   beforeEach(() => {
     originalCloudMode = process.env.PASEO_CLOUD_MODE;
@@ -84,7 +84,7 @@ describe("attachClaudeTranscriptCapture", () => {
     delete process.env.PASEO_CLOUD_MODE;
     const { manager, emit } = createFakeManager();
     const capture = vi.fn(async () => undefined);
-    attachClaudeTranscriptCapture(createTestLogger(), manager);
+    attachProviderTranscriptCapture(createTestLogger(), manager);
     emit(claudeStateEvent("agent-1", capture));
     expect(capture).not.toHaveBeenCalled();
   });
@@ -93,7 +93,7 @@ describe("attachClaudeTranscriptCapture", () => {
     const { manager, emit } = createFakeManager();
     const gate = createDeferred();
     const capture = vi.fn(() => gate.promise);
-    attachClaudeTranscriptCapture(createTestLogger(), manager);
+    attachProviderTranscriptCapture(createTestLogger(), manager);
 
     // Two rapid turn-complete events while the first snapshot is still running.
     emit(claudeStateEvent("agent-1", capture));
@@ -112,7 +112,7 @@ describe("attachClaudeTranscriptCapture", () => {
   test("ignores closed agents and non-claude providers", async () => {
     const { manager, emit } = createFakeManager();
     const capture = vi.fn(async () => undefined);
-    attachClaudeTranscriptCapture(createTestLogger(), manager);
+    attachProviderTranscriptCapture(createTestLogger(), manager);
 
     emit({
       type: "agent_state",
