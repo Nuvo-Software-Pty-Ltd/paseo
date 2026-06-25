@@ -3,7 +3,6 @@ import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import * as Clipboard from "expo-clipboard";
 import { Button } from "@/components/ui/button";
-import { Fonts } from "@/constants/theme";
 import { WebhookConfigInstructions } from "@/components/automations/webhook-config-instructions";
 
 // The one-time secret reveal shown right after a webhook trigger is created or
@@ -95,7 +94,7 @@ const styles = StyleSheet.create((theme) => ({
   fieldValue: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
-    fontFamily: Fonts.mono,
+    fontFamily: theme.fontFamily.mono,
     padding: theme.spacing[2],
     borderRadius: theme.borderRadius.md,
     backgroundColor: theme.colors.surface0,

@@ -1,6 +1,7 @@
 import path from "node:path";
 import { isPaseoCloudMode, resolvePaseoNodeEnv } from "./paseo-env.js";
 import { z } from "zod";
+import { expandTilde } from "../utils/path.js";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
 import {
@@ -15,7 +16,7 @@ import type {
   ProviderOverride,
 } from "./agent/provider-launch-config.js";
 import { ProviderOverrideSchema } from "./agent/provider-launch-config.js";
-import { AgentProviderSchema } from "./agent/provider-manifest.js";
+import { AgentProviderSchema } from "@getpaseo/protocol/provider-manifest";
 import { hashDaemonPassword } from "./auth.js";
 import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
@@ -148,6 +149,23 @@ interface ResolvedRelay {
   endpoint: string;
   publicEndpoint: string;
   useTls: boolean;
+  publicUseTls: boolean;
+}
+
+interface ResolvedServiceProxy {
+  publicBaseUrl: string | null;
+  standaloneListen: string | null;
+}
+
+function resolveTlsFromEnv(
+  envValue: string | undefined,
+  persistedValue: boolean | undefined,
+  fallback: boolean,
+): boolean {
+  if (envValue !== undefined) {
+    return parseBooleanEnv(envValue) ?? false;
+  }
+  return persistedValue ?? fallback;
 }
 
 function resolveRelayConfig(input: ResolveRelayInput): ResolvedRelay {
@@ -166,16 +184,58 @@ function resolveRelayConfig(input: ResolveRelayInput): ResolvedRelay {
     endpoint;
   const useTls =
     input.cliRelayUseTls ??
-    (input.env.PASEO_RELAY_USE_TLS !== undefined
-      ? (parseBooleanEnv(input.env.PASEO_RELAY_USE_TLS) ?? false)
-      : (input.persisted.daemon?.relay?.useTls ?? endpoint === DEFAULT_RELAY_ENDPOINT));
-  return { enabled, endpoint, publicEndpoint, useTls };
+    resolveTlsFromEnv(
+      input.env.PASEO_RELAY_USE_TLS,
+      input.persisted.daemon?.relay?.useTls,
+      endpoint === DEFAULT_RELAY_ENDPOINT,
+    );
+  const publicUseTls = resolveTlsFromEnv(
+    input.env.PASEO_RELAY_PUBLIC_USE_TLS,
+    input.persisted.daemon?.relay?.publicUseTls,
+    useTls,
+  );
+  return { enabled, endpoint, publicEndpoint, useTls, publicUseTls };
 }
 
 interface ResolvedVoiceLlm {
   provider: AgentProvider | null;
   providerExplicit: boolean;
   model: string | null;
+}
+
+function resolveServiceProxyPublicBaseUrl(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  try {
+    return new URL(value).toString().replace(/\/$/, "");
+  } catch {
+    throw new Error(`Invalid PASEO_SERVICE_PROXY_PUBLIC_BASE_URL: ${value}`);
+  }
+}
+
+function resolveServiceProxyConfig(
+  env: NodeJS.ProcessEnv,
+  persisted: ReturnType<typeof loadPersistedConfig>,
+): ResolvedServiceProxy {
+  const enabledShim =
+    parseBooleanEnv(env.PASEO_SERVICE_PROXY_ENABLED) ?? persisted.daemon?.serviceProxy?.enabled;
+  // COMPAT(serviceProxyEnabled): added 2026-06-02, remove after 2026-12-02.
+  // `enabled=false` used to disable the separate service proxy listener. Localhost
+  // service proxying is now always enabled; this only suppresses optional layers.
+  const optionalLayersEnabled = enabledShim !== false;
+  const publicBaseUrl = optionalLayersEnabled
+    ? resolveServiceProxyPublicBaseUrl(
+        env.PASEO_SERVICE_PROXY_PUBLIC_BASE_URL ??
+          persisted.daemon?.serviceProxy?.publicBaseUrl ??
+          null,
+      )
+    : null;
+  const standaloneListen = optionalLayersEnabled
+    ? (env.PASEO_SERVICE_PROXY_LISTEN ?? persisted.daemon?.serviceProxy?.listen ?? null)
+    : null;
+
+  return { publicBaseUrl, standaloneListen };
 }
 
 function resolveVoiceLlmConfig(
@@ -239,6 +299,25 @@ function resolveAuthConfig(
     : undefined;
 }
 
+function resolveWorktreesRoot(
+  paseoHome: string,
+  persisted: ReturnType<typeof loadPersistedConfig>,
+): string | undefined {
+  const configuredRoot = persisted.worktrees?.root?.trim();
+  if (!configuredRoot) {
+    return undefined;
+  }
+
+  const expandedRoot = expandTilde(configuredRoot);
+  return path.isAbsolute(expandedRoot)
+    ? path.resolve(expandedRoot)
+    : path.resolve(paseoHome, expandedRoot);
+}
+
+function resolveAppendSystemPrompt(persisted: ReturnType<typeof loadPersistedConfig>): string {
+  return persisted.daemon?.appendSystemPrompt ?? "";
+}
+
 function resolveStaticLoadConfigSettings(
   env: NodeJS.ProcessEnv,
   cli: CliConfigOverrides | undefined,
@@ -248,6 +327,9 @@ function resolveStaticLoadConfigSettings(
     mcpEnabled: cli?.mcpEnabled ?? persisted.daemon?.mcp?.enabled ?? true,
     mcpInjectIntoAgents:
       cli?.mcpInjectIntoAgents ?? persisted.daemon?.mcp?.injectIntoAgents ?? false,
+    autoArchiveAfterMerge: persisted.daemon?.autoArchiveAfterMerge ?? false,
+    appendSystemPrompt: resolveAppendSystemPrompt(persisted),
+    terminalProfiles: persisted.daemon?.terminalProfiles,
     hostnames: mergeHostnames([
       // Cloud mode bypasses the localhost-rebinding allowlist: the daemon is
       // reachable only via the ALB at a public DNS name, so the on-host threat
@@ -272,8 +354,15 @@ export function loadConfig(
   const persisted = loadPersistedConfig(paseoHome);
 
   const listen = resolveListenAddress(env, options?.cli, persisted);
-  const { mcpEnabled, mcpInjectIntoAgents, hostnames, appBaseUrl } =
-    resolveStaticLoadConfigSettings(env, options?.cli, persisted);
+  const {
+    mcpEnabled,
+    mcpInjectIntoAgents,
+    autoArchiveAfterMerge,
+    appendSystemPrompt,
+    terminalProfiles,
+    hostnames,
+    appBaseUrl,
+  } = resolveStaticLoadConfigSettings(env, options?.cli, persisted);
 
   const relay = resolveRelayConfig({
     env,
@@ -281,6 +370,7 @@ export function loadConfig(
     cliRelayEnabled: options?.cli?.relayEnabled,
     cliRelayUseTls: options?.cli?.relayUseTls,
   });
+  const serviceProxy = resolveServiceProxyConfig(env, persisted);
 
   const { openai, speech } = resolveSpeechConfig({
     paseoHome,
@@ -296,10 +386,15 @@ export function loadConfig(
   return {
     listen,
     paseoHome,
+    worktreesRoot: resolveWorktreesRoot(paseoHome, persisted),
     corsAllowedOrigins: resolveCorsAllowedOrigins(env, persisted),
     hostnames,
     mcpEnabled,
     mcpInjectIntoAgents,
+    autoArchiveAfterMerge,
+    enableTerminalAgentHooks: persisted.daemon?.enableTerminalAgentHooks ?? false,
+    appendSystemPrompt,
+    terminalProfiles,
     mcpDebug: env.MCP_DEBUG === "1",
     isDev: resolvePaseoNodeEnv(env) === "development",
     agentStoragePath: path.join(paseoHome, "agents"),
@@ -309,6 +404,8 @@ export function loadConfig(
     relayEndpoint: relay.endpoint,
     relayPublicEndpoint: relay.publicEndpoint,
     relayUseTls: relay.useTls,
+    relayPublicUseTls: relay.publicUseTls,
+    serviceProxy,
     appBaseUrl,
     auth: resolveAuthConfig(env, persisted),
     openai,
@@ -317,6 +414,7 @@ export function loadConfig(
     voiceLlmProviderExplicit: voiceLlm.providerExplicit,
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
+    metadataGeneration: persisted.agents?.metadataGeneration,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
   };

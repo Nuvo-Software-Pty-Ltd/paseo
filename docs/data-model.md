@@ -27,10 +27,13 @@ $PASEO_HOME/
 ├── projects/
 │   ├── projects.json                    # Project registry
 │   └── workspaces.json                  # Workspace registry
+├── runtime/
+│   └── managed-processes/
+│       └── {recordId}.json              # Helper processes owned by Paseo; reconciled on daemon bootstrap
 └── push-tokens.json                     # Expo push notification tokens
 ```
 
-The `agents/{sanitized-cwd}/` directory name is derived from the agent's `cwd` by stripping the filesystem root and replacing path separators with `-` (Windows drive letters become a `C-` style prefix). Atomic writes (temp file + rename): agent records, chat, project/workspace registries, push tokens. Non-atomic (plain `writeFile`): `config.json`, `schedules/*.json`, `loops/loops.json`, `server-id`, `daemon-keypair.json`.
+The `agents/{sanitized-cwd}/` directory name is derived from the agent's `cwd` by stripping the filesystem root and replacing path separators with `-` (Windows drive letters become a `C-` style prefix). Persistent server stores write atomically by writing a temp file in the target directory and then renaming it into place.
 
 ---
 
@@ -40,29 +43,30 @@ The `agents/{sanitized-cwd}/` directory name is derived from the agent's `cwd` b
 
 Each agent is stored as a separate JSON file, grouped by project directory.
 
-| Field                | Type                                     | Description                                                                                                                                                               |
-| -------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`                 | `string`                                 | UUID, primary key                                                                                                                                                         |
-| `provider`           | `string`                                 | Agent provider (`"claude"`, `"codex"`, `"opencode"`, etc.)                                                                                                                |
-| `cwd`                | `string`                                 | Working directory the agent operates in                                                                                                                                   |
-| `createdAt`          | `string` (ISO 8601)                      | Creation timestamp                                                                                                                                                        |
-| `updatedAt`          | `string` (ISO 8601)                      | Last update timestamp                                                                                                                                                     |
-| `lastActivityAt`     | `string?` (ISO 8601)                     | Last activity timestamp                                                                                                                                                   |
-| `lastUserMessageAt`  | `string?` (ISO 8601)                     | Last user message timestamp                                                                                                                                               |
-| `title`              | `string?`                                | User-visible title                                                                                                                                                        |
-| `labels`             | `Record<string, string>`                 | Key-value labels (default `{}`). `paseo.parent-agent-id` set automatically when launched via the `create_agent` MCP tool — see [agent-lifecycle.md](./agent-lifecycle.md) |
-| `lastStatus`         | `AgentStatus`                            | One of: `"initializing"`, `"idle"`, `"running"`, `"error"`, `"closed"`                                                                                                    |
-| `lastModeId`         | `string?`                                | Last active mode ID                                                                                                                                                       |
-| `config`             | `SerializableConfig?`                    | Agent session configuration (see below)                                                                                                                                   |
-| `runtimeInfo`        | `RuntimeInfo?`                           | Live runtime state (see below)                                                                                                                                            |
-| `features`           | `AgentFeature[]?`                        | Provider-reported features (toggles/selects)                                                                                                                              |
-| `persistence`        | `PersistenceHandle?`                     | Handle for resuming sessions                                                                                                                                              |
-| `lastError`          | `string?` (nullable)                     | Last error message, if any                                                                                                                                                |
-| `requiresAttention`  | `boolean?`                               | Whether the agent needs user attention                                                                                                                                    |
-| `attentionReason`    | `"finished" \| "error" \| "permission"?` | Why attention is needed                                                                                                                                                   |
-| `attentionTimestamp` | `string?` (ISO 8601)                     | When attention was flagged                                                                                                                                                |
-| `internal`           | `boolean?`                               | Whether this is a system-internal agent (loop workers, etc.)                                                                                                              |
-| `archivedAt`         | `string?` (ISO 8601)                     | Soft-delete timestamp                                                                                                                                                     |
+| Field                | Type                                     | Description                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                 | `string`                                 | UUID, primary key                                                                                                                                                                                                                                                                                                                                                                   |
+| `provider`           | `string`                                 | Agent provider (`"claude"`, `"codex"`, `"opencode"`, etc.)                                                                                                                                                                                                                                                                                                                          |
+| `cwd`                | `string`                                 | Working directory the agent operates in                                                                                                                                                                                                                                                                                                                                             |
+| `workspaceId`        | `string?`                                | Owning workspace id — the single source of ownership. Every agent is stamped with one at create time; legacy cwd-only records are backfilled once by `migrations/backfill-workspace-id.migration.ts` (the only place a cwd→id mapping exists). Runtime code never infers ownership or status from cwd: status is computed per `workspaceId`, and same-cwd siblings are independent. |
+| `createdAt`          | `string` (ISO 8601)                      | Creation timestamp                                                                                                                                                                                                                                                                                                                                                                  |
+| `updatedAt`          | `string` (ISO 8601)                      | Last update timestamp                                                                                                                                                                                                                                                                                                                                                               |
+| `lastActivityAt`     | `string?` (ISO 8601)                     | Last activity timestamp                                                                                                                                                                                                                                                                                                                                                             |
+| `lastUserMessageAt`  | `string?` (ISO 8601)                     | Last user message timestamp                                                                                                                                                                                                                                                                                                                                                         |
+| `title`              | `string?`                                | User-visible title                                                                                                                                                                                                                                                                                                                                                                  |
+| `labels`             | `Record<string, string>`                 | Key-value labels (default `{}`). `paseo.parent-agent-id` is set automatically for `create_agent` subagent relationships — see [agent-lifecycle.md](./agent-lifecycle.md)                                                                                                                                                                                                            |
+| `lastStatus`         | `AgentStatus`                            | One of: `"initializing"`, `"idle"`, `"running"`, `"error"`, `"closed"`                                                                                                                                                                                                                                                                                                              |
+| `lastModeId`         | `string?`                                | Last active mode ID                                                                                                                                                                                                                                                                                                                                                                 |
+| `config`             | `SerializableConfig?`                    | Agent session configuration (see below)                                                                                                                                                                                                                                                                                                                                             |
+| `runtimeInfo`        | `RuntimeInfo?`                           | Live runtime state (see below)                                                                                                                                                                                                                                                                                                                                                      |
+| `features`           | `AgentFeature[]?`                        | Provider-reported features (toggles/selects)                                                                                                                                                                                                                                                                                                                                        |
+| `persistence`        | `PersistenceHandle?`                     | Handle for resuming sessions                                                                                                                                                                                                                                                                                                                                                        |
+| `lastError`          | `string?` (nullable)                     | Last error message, if any                                                                                                                                                                                                                                                                                                                                                          |
+| `requiresAttention`  | `boolean?`                               | Whether the agent needs user attention                                                                                                                                                                                                                                                                                                                                              |
+| `attentionReason`    | `"finished" \| "error" \| "permission"?` | Why attention is needed                                                                                                                                                                                                                                                                                                                                                             |
+| `attentionTimestamp` | `string?` (ISO 8601)                     | When attention was flagged                                                                                                                                                                                                                                                                                                                                                          |
+| `internal`           | `boolean?`                               | Whether this is a system-internal agent (loop workers, etc.)                                                                                                                                                                                                                                                                                                                        |
+| `archivedAt`         | `string?` (ISO 8601)                     | Soft-delete timestamp                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Nested: SerializableConfig
 
@@ -126,6 +130,14 @@ Each agent is stored as a separate JSON file, grouped by project directory.
 
 ---
 
+## Runtime-only Terminal Sessions
+
+Terminals are live daemon state, not persisted JSON records. A terminal carries a `workspaceId` while it is running; workspace-scoped terminal lists include only terminals with the matching `workspaceId`. Legacy live terminals without an owner remain visible to unscoped terminal reads but contribute to no workspace status.
+
+Terminal activity contributes to the workspace status bucket **per `workspaceId`**: a working terminal drives `running` onto the workspace it carries only. Same-`cwd` siblings are untouched; terminal visibility is likewise `workspaceId`-scoped.
+
+---
+
 ## 2. Daemon Configuration
 
 **Path:** `$PASEO_HOME/config.json`
@@ -139,12 +151,16 @@ Single file, validated with `PersistedConfigSchema`.
     listen: "127.0.0.1:6767",
     hostnames: true | string[],   // legacy alias `allowedHosts` is migrated on load
     mcp: { enabled: boolean, injectIntoAgents: boolean },
+    appendSystemPrompt: string,    // appended to supported provider system/developer prompts
     cors: { allowedOrigins: string[] },
-    relay: { enabled: boolean, endpoint: string, publicEndpoint: string, useTls: boolean },
+    relay: { enabled: boolean, endpoint: string, publicEndpoint: string, useTls: boolean, publicUseTls: boolean },
     auth: { password: string }    // bcrypt hash, optional
   },
   app: {
     baseUrl: string
+  },
+  worktrees?: {
+    root?: string            // optional root for new worktrees; defaults to $PASEO_HOME/worktrees
   },
   providers: {
     openai: { apiKey: string },
@@ -154,11 +170,14 @@ Single file, validated with `PersistedConfigSchema`.
     // ProviderOverrideSchema; legacy entries with `command: { mode, ... }` are migrated to the
     // current shape on load via `migrateProviderSettings`. Custom provider IDs must declare
     // `extends` (one of the built-ins or `"acp"`) and `label`. See `provider-launch-config.ts`.
-    providers: Record<providerId, ProviderOverride>
+    providers: Record<providerId, ProviderOverride>,
+    metadataGeneration: {
+      providers: [{ provider, model?, thinkingOptionId? }]
+    }
   },
   features: {
-    dictation: { enabled, stt: { provider, model, confidenceThreshold } },
-    voiceMode: { enabled, llm, stt, turnDetection, tts: { provider, model, voice, speakerId, speed } }
+    dictation: { enabled, stt: { provider, model, language, confidenceThreshold } },
+    voiceMode: { enabled, llm, stt: { provider, model, language }, turnDetection, tts: { provider, model, voice, speakerId, speed } }
   },
   log: {
     level, format,
@@ -170,13 +189,17 @@ Single file, validated with `PersistedConfigSchema`.
 
 All fields are optional with sensible defaults.
 
+`agents.metadataGeneration.providers` controls the preferred structured-generation fallback order for daemon-side metadata tasks such as commit messages, PR text, branch names, and generated agent titles. Entries are tried first in the configured order, then Paseo falls through to dynamically discovered defaults and finally the current selection when available.
+
+Local speech model ids are intentionally narrow: STT uses `parakeet-tdt-0.6b-v2-int8`, TTS uses `kokoro-en-v0_19`, and turn detection uses the bundled Silero VAD model.
+
 ---
 
 ## 3. Schedule
 
 **Path:** `$PASEO_HOME/schedules/{id}.json`
 
-One file per schedule. ID is 8 hex characters. Writes are direct (not atomic).
+One file per schedule. ID is 8 hex characters.
 
 | Field       | Type                                  | Description                      |
 | ----------- | ------------------------------------- | -------------------------------- |
@@ -198,7 +221,7 @@ One file per schedule. ID is 8 hex characters. Writes are direct (not atomic).
 ### Nested: ScheduleCadence (discriminated union on `type`)
 
 - `{ type: "every", everyMs: number }` — interval in milliseconds
-- `{ type: "cron", expression: string }` — cron expression
+- `{ type: "cron", expression: string, timezone?: string }` — cron expression; absent `timezone` means UTC, present `timezone` is an IANA time zone used for local wall-clock recurrence
 
 ### Nested: ScheduleTarget (discriminated union on `type`)
 
@@ -362,6 +385,11 @@ Array of project records.
 | `updatedAt`   | `string` (ISO 8601)         |                                          |
 | `archivedAt`  | `string \| null` (ISO 8601) | Soft-delete timestamp; required nullable |
 
+Active git projects are unique by normalized `rootPath`. Startup reconciliation repairs older bad
+states by moving workspaces from duplicate path-keyed projects onto the canonical project,
+preferring remote-keyed project IDs such as `remote:github.com/owner/repo`, then archiving the
+emptied duplicate.
+
 ---
 
 ## 7. Workspace Registry
@@ -370,16 +398,25 @@ Array of project records.
 
 Array of workspace records. A workspace is a specific working directory within a project.
 
-| Field         | Type                                            | Description                    |
-| ------------- | ----------------------------------------------- | ------------------------------ |
-| `workspaceId` | `string`                                        | Primary key                    |
-| `projectId`   | `string`                                        | FK to Project.projectId        |
-| `cwd`         | `string`                                        | Filesystem path                |
-| `kind`        | `"local_checkout" \| "worktree" \| "directory"` |                                |
-| `displayName` | `string`                                        |                                |
-| `createdAt`   | `string` (ISO 8601)                             |                                |
-| `updatedAt`   | `string` (ISO 8601)                             |                                |
-| `archivedAt`  | `string \| null` (ISO 8601)                     | Soft-delete; required nullable |
+| Field         | Type                                            | Description                                                                                                                                                                           |
+| ------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspaceId` | `string`                                        | Opaque stable identifier (`wks_<hex>`), generated independently of the directory. MUST NOT be treated as a path; compare by exact equality. Use the `cwd` field for directory access. |
+| `projectId`   | `string`                                        | FK to Project.projectId                                                                                                                                                               |
+| `cwd`         | `string`                                        | Filesystem path                                                                                                                                                                       |
+| `kind`        | `"local_checkout" \| "worktree" \| "directory"` |                                                                                                                                                                                       |
+| `displayName` | `string`                                        | The human name (the generated/derived title). Decoupled from `branch` by construction.                                                                                                |
+| `title`       | `string \| null`                                | User-set name override layered over `displayName`. Null means "use `displayName`".                                                                                                    |
+| `branch`      | `string \| null`                                | The worktree's git branch. Separate from `displayName`/`title`; only worktree workspaces set it. A branch rename writes this and never the name.                                      |
+| `createdAt`   | `string` (ISO 8601)                             |                                                                                                                                                                                       |
+| `updatedAt`   | `string` (ISO 8601)                             |                                                                                                                                                                                       |
+| `archivedAt`  | `string \| null` (ISO 8601)                     | Soft-delete; required nullable                                                                                                                                                        |
+
+> **Opaque-ID invariant:** `workspaceId` is opaque identity, never a filesystem path. Filesystem and git operations take `cwd`/`workspaceDirectory` only — never the id. Path-derived grouping keys (e.g. `deriveWorkspaceDirectoryKey`, used at bootstrap to group agents into a workspace) are directory keys, not workspace identity, and must not be persisted or compared as ids.
+
+`projectId` is still a real FK: workspace records should have a matching project record. Read-only
+history surfaces tolerate transient orphaned workspaces by omitting those rows so one bad FK cannot
+blank the whole History screen, but mutation paths should repair or remove the orphaned state rather
+than treating it as valid.
 
 ---
 
@@ -413,6 +450,13 @@ These small files are not validated as full Zod schemas but are persisted under 
 ## Client-side stores (App)
 
 These live in React Native `AsyncStorage` or browser `IndexedDB`, not on the daemon filesystem.
+
+### Keying convention: directory-backed vs workspace-owned
+
+Right-sidebar client state splits on whether it is determined by the directory or owned by the workspace (two workspaces can share one `cwd`). The split is enforced by the cache key, so changing a key changes the sharing semantics — see [architecture.md](architecture.md#right-sidebar-boundary-directory-backed-vs-workspace-owned) for the full table.
+
+- **Directory-backed** (shared by same-`cwd` workspaces): keyed by `(serverId, cwd)`. Git status/diff, GitHub PR status, PR timeline, file preview content. These are TanStack Query caches, not persisted stores.
+- **Workspace-owned** (independent per workspace): keyed by `workspaceId`, with `cwd` used only as a fallback when no `workspaceId` is present. Review draft comments (`@paseo:review-draft-store`), diff-mode overrides (in-memory), workspace composer attachments, and file-explorer nav/expand state. The `workspaceId` part of these keys is **opaque** — never parse it back into a path.
 
 ### Draft Store
 

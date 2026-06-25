@@ -1,4 +1,5 @@
 import "@/styles/unistyles";
+import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
 import { QueryClientProvider } from "@tanstack/react-query";
 import * as Linking from "expo-linking";
@@ -27,9 +28,12 @@ import { DownloadToast } from "@/components/download-toast";
 import { QuittingOverlay } from "@/components/quitting-overlay";
 import { KeyboardShortcutsDialog } from "@/components/keyboard-shortcuts-dialog";
 import { LeftSidebar } from "@/components/left-sidebar";
+import { CompactExplorerSidebarHost } from "@/components/compact-explorer-sidebar-host";
 import { ProjectPickerModal } from "@/components/project-picker-modal";
+import { ProviderSettingsHost } from "@/components/provider-settings-host";
 import { WorkspaceSetupDialog } from "@/components/workspace-setup-dialog";
 import { WorkspaceShortcutTargetsSubscriber } from "@/components/workspace-shortcut-targets-subscriber";
+import { FloatingPanelPortalHost } from "@/components/ui/floating-panel-portal";
 import { getIsElectronRuntime, useIsCompactFormFactor } from "@/constants/layout";
 import { isNative, isWeb } from "@/constants/platform";
 import {
@@ -38,6 +42,7 @@ import {
 } from "@/contexts/horizontal-scroll-context";
 import { OrchestraSessionProvider } from "@/contexts/orchestra-session-context";
 import { SessionProvider } from "@/contexts/session-context";
+import { ExplorerSidebarAnimationProvider } from "@/contexts/explorer-sidebar-animation-context";
 import {
   SidebarAnimationProvider,
   useSidebarAnimation,
@@ -46,7 +51,14 @@ import { SidebarCalloutProvider } from "@/contexts/sidebar-callout-context";
 import { ToastProvider } from "@/contexts/toast-context";
 import { VoiceProvider } from "@/contexts/voice-context";
 import { AnalyticsIdentitySync, AnalyticsProvider, RootErrorBoundary } from "@/lib/posthog";
-import { startDaemonIfGateAllows, startHostRuntimeBootstrap } from "@/app/host-runtime-bootstrap";
+import {
+  resolveStartupBlocker,
+  resolveStartupNavigationReady,
+  shouldRunStartupGiveUpTimer,
+  startDaemonIfGateAllows,
+  startHostRuntimeBootstrap,
+  type StartupBlocker,
+} from "@/navigation/host-runtime-bootstrap";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { listenToDesktopEvent } from "@/desktop/electron/events";
 import { updateDesktopWindowControls } from "@/desktop/electron/window";
@@ -55,31 +67,34 @@ import { loadDesktopSettings } from "@/desktop/settings/desktop-settings";
 import { RosettaCalloutSource } from "@/desktop/updates/rosetta-callout-source";
 import { UpdateCalloutSource } from "@/desktop/updates/update-callout-source";
 import { useActiveWorktreeNewAction } from "@/hooks/use-active-worktree-new-action";
+import { useGlobalNewWorkspaceAction } from "@/hooks/use-global-new-workspace-action";
 import { useFaviconStatus } from "@/hooks/use-favicon-status";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
-import { useLatchedBoolean } from "@/hooks/use-latched-boolean";
+import { KeyboardShiftProvider } from "@/hooks/use-keyboard-shift-style";
+import { useCompactWebViewportZoomLock } from "@/hooks/use-compact-web-viewport-zoom-lock";
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useAppSettings } from "@/hooks/use-settings";
 import { useStableEvent } from "@/hooks/use-stable-event";
+import { I18nProvider } from "@/i18n/provider";
 import { keyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher";
 import { polyfillCrypto } from "@/polyfills/crypto";
 import { queryClient } from "@/query/query-client";
 import {
   getHostRuntimeStore,
-  hasConfiguredLocalDaemonOverride,
   useHostMutations,
   useHostRuntimeClient,
   useHosts,
 } from "@/runtime/host-runtime";
 import { getDaemonStartService } from "@/runtime/daemon-start-service";
+import { applyAppearance } from "@/screens/settings/appearance/apply-appearance";
 import { usePanelStore } from "@/stores/panel-store";
 import { THEME_TO_UNISTYLES, type ThemeName } from "@/styles/theme";
 import type { HostProfile } from "@/types/host-connection";
 import { resolveActiveHost } from "@/utils/active-host";
 import { toggleDesktopSidebarsWithCheckoutIntent } from "@/utils/desktop-sidebar-toggle";
+import { canOpenLeftSidebarGesture } from "@/utils/sidebar-animation-state";
 import {
   buildHostRootRoute,
-  mapPathnameToServer,
   parseHostAgentRouteFromPathname,
   parseServerIdFromPathname,
   parseWorkspaceOpenIntent,
@@ -99,6 +114,7 @@ export interface HostRuntimeBootstrapState {
   retry: () => void;
   hasGivenUpWaitingForHost: boolean;
   storeReady: boolean;
+  startupBlocker: StartupBlocker;
 }
 
 const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
@@ -106,6 +122,7 @@ const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
   retry: () => {},
   hasGivenUpWaitingForHost: false,
   storeReady: false,
+  startupBlocker: { kind: "none" },
 });
 
 function PushNotificationRouter() {
@@ -309,18 +326,26 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
   const anyOnlineHostServerId = useEarliestOnlineHostServerId();
   const daemonStartError = useDaemonStartLastError();
   const daemonStartIsRunning = useDaemonStartIsRunning();
-  const waitForConfiguredLocalDaemon =
-    hasConfiguredLocalDaemonOverride() && !shouldUseDesktopDaemon();
-
   const [hasGivenUpWaitingForHost, setHasGivenUpWaitingForHost] = useState(false);
+  const isDesktopRuntime = shouldUseDesktopDaemon();
+  const startupBlocker = useMemo(
+    () =>
+      resolveStartupBlocker({
+        isDesktopRuntime,
+        anyOnlineHostServerId,
+        daemonStartIsRunning,
+        daemonStartError,
+      }),
+    [anyOnlineHostServerId, daemonStartError, daemonStartIsRunning, isDesktopRuntime],
+  );
+  const shouldRunGiveUpTimer = shouldRunStartupGiveUpTimer({
+    startupBlocker,
+    anyOnlineHostServerId,
+    hasGivenUpWaitingForHost,
+  });
+
   useEffect(() => {
-    if (
-      anyOnlineHostServerId ||
-      daemonStartError ||
-      daemonStartIsRunning ||
-      waitForConfiguredLocalDaemon ||
-      hasGivenUpWaitingForHost
-    ) {
+    if (!shouldRunGiveUpTimer) {
       return;
     }
     const handle = setTimeout(() => {
@@ -329,13 +354,7 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
     return () => {
       clearTimeout(handle);
     };
-  }, [
-    anyOnlineHostServerId,
-    daemonStartError,
-    daemonStartIsRunning,
-    waitForConfiguredLocalDaemon,
-    hasGivenUpWaitingForHost,
-  ]);
+  }, [shouldRunGiveUpTimer]);
 
   const retry = useCallback(() => {
     const daemonStartService = getDaemonStartService({ store: getHostRuntimeStore() });
@@ -346,14 +365,13 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const splashError = !anyOnlineHostServerId ? daemonStartError : null;
-  const isCurrentlyStoreReady =
-    Boolean(anyOnlineHostServerId) || Boolean(splashError) || hasGivenUpWaitingForHost;
-  const storeReady = useLatchedBoolean(isCurrentlyStoreReady);
+  const splashError =
+    startupBlocker.kind === "managed-daemon-error" ? startupBlocker.message : null;
+  const storeReady = resolveStartupNavigationReady({ startupBlocker });
 
   const state = useMemo<HostRuntimeBootstrapState>(
-    () => ({ splashError, retry, hasGivenUpWaitingForHost, storeReady }),
-    [splashError, retry, hasGivenUpWaitingForHost, storeReady],
+    () => ({ splashError, retry, hasGivenUpWaitingForHost, storeReady, startupBlocker }),
+    [splashError, retry, hasGivenUpWaitingForHost, storeReady, startupBlocker],
   );
 
   return (
@@ -377,6 +395,8 @@ function QueryProvider({ children }: { children: ReactNode }) {
 
 const rowStyle = { flex: 1, flexDirection: "row" } as const;
 const flexStyle = { flex: 1 } as const;
+const MOBILE_WEB_EDGE_SWIPE_WIDTH = 32;
+const MOBILE_WEB_GESTURE_TOUCH_ACTION = isWeb ? "auto" : "pan-y";
 
 interface AppContainerProps {
   children: ReactNode;
@@ -408,6 +428,7 @@ function AppContainer({
   }, [settings.theme, updateSettings]);
 
   const isCompactLayout = useIsCompactFormFactor();
+  useCompactWebViewportZoomLock(isCompactLayout);
   const chromeEnabled = chromeEnabledOverride ?? daemons.length > 0;
   const pathname = usePathname();
   const activeServerId = useMemo(
@@ -446,15 +467,29 @@ function AppContainer({
   });
 
   useActiveWorktreeNewAction();
+  useGlobalNewWorkspaceAction();
+
+  const workspaceChrome = (
+    <View style={rowStyle}>
+      {!isCompactLayout && chromeEnabled && !isFocusModeEnabled && (
+        <LeftSidebar selectedAgentId={selectedAgentId} />
+      )}
+      {isCompactLayout && chromeEnabled ? (
+        <ExplorerSidebarAnimationProvider>
+          <CompactExplorerSidebarHost enabled={chromeEnabled}>
+            <View style={flexStyle}>{children}</View>
+          </CompactExplorerSidebarHost>
+        </ExplorerSidebarAnimationProvider>
+      ) : (
+        <View style={flexStyle}>{children}</View>
+      )}
+    </View>
+  );
 
   const content = (
     <View style={layoutStyles.surfaceFill}>
-      <View style={rowStyle}>
-        {!isCompactLayout && chromeEnabled && !isFocusModeEnabled && (
-          <LeftSidebar selectedAgentId={selectedAgentId} />
-        )}
-        <View style={flexStyle}>{children}</View>
-      </View>
+      {workspaceChrome}
+      <FloatingPanelPortalHost />
       {isCompactLayout && chromeEnabled && <LeftSidebar selectedAgentId={selectedAgentId} />}
       <DownloadToast />
       <RosettaCalloutSource />
@@ -462,6 +497,7 @@ function AppContainer({
       <WorktreeSetupCalloutSource />
       <CommandCenter />
       <ProjectPickerModal />
+      <ProviderSettingsHost />
       <WorkspaceShortcutTargetsSubscriber
         enabled={keyboardShortcutsEnabled}
         serverId={activeServerId}
@@ -486,7 +522,6 @@ function MobileGestureWrapper({
   children: ReactNode;
   chromeEnabled: boolean;
 }) {
-  const mobileView = usePanelStore((state) => state.mobileView);
   const showMobileAgentList = usePanelStore((state) => state.showMobileAgentList);
   const horizontalScroll = useHorizontalScrollOptional();
   const {
@@ -495,12 +530,15 @@ function MobileGestureWrapper({
     windowWidth,
     animateToOpen,
     animateToClose,
+    setOverlayPeek,
     isGesturing,
+    mobilePanelState,
     gestureAnimatingRef,
     openGestureRef,
   } = useSidebarAnimation();
   const touchStartX = useSharedValue(0);
-  const openGestureEnabled = chromeEnabled && mobileView === "agent";
+  const touchStartY = useSharedValue(0);
+  const openGestureEnabled = chromeEnabled;
 
   const handleGestureOpen = useCallback(() => {
     gestureAnimatingRef.current = true;
@@ -518,6 +556,7 @@ function MobileGestureWrapper({
           const touch = event.changedTouches[0];
           if (touch) {
             touchStartX.value = touch.absoluteX;
+            touchStartY.value = touch.absoluteY;
           }
         })
         .onTouchesMove((event, stateManager) => {
@@ -525,18 +564,43 @@ function MobileGestureWrapper({
           if (!touch || event.numberOfTouches !== 1) return;
 
           const deltaX = touch.absoluteX - touchStartX.value;
+          const deltaY = touch.absoluteY - touchStartY.value;
+          const absDeltaX = Math.abs(deltaX);
+          const absDeltaY = Math.abs(deltaY);
+
+          if (!canOpenLeftSidebarGesture(mobilePanelState.value, translateX.value, windowWidth)) {
+            stateManager.fail();
+            return;
+          }
 
           if (horizontalScroll?.isAnyScrolledRight.value) {
             stateManager.fail();
             return;
           }
 
-          if (deltaX > 15) {
+          if (isWeb && touchStartX.value > MOBILE_WEB_EDGE_SWIPE_WIDTH) {
+            stateManager.fail();
+            return;
+          }
+
+          if (deltaX <= -10) {
+            stateManager.fail();
+            return;
+          }
+
+          if (absDeltaY > 10 && absDeltaY > absDeltaX) {
+            stateManager.fail();
+            return;
+          }
+
+          if (deltaX > 15 && absDeltaX > absDeltaY) {
             stateManager.activate();
           }
         })
         .onStart(() => {
           isGesturing.value = true;
+          // The overlay is display:none while closed; reveal it for the drag.
+          runOnJS(setOverlayPeek)(true);
         })
         .onUpdate((event) => {
           const newTranslateX = Math.min(0, -windowWidth + event.translationX);
@@ -560,24 +624,28 @@ function MobileGestureWrapper({
         })
         .onFinalize(() => {
           isGesturing.value = false;
+          runOnJS(setOverlayPeek)(false);
         }),
     [
       openGestureEnabled,
       windowWidth,
       translateX,
       backdropOpacity,
+      mobilePanelState,
       animateToOpen,
       animateToClose,
+      setOverlayPeek,
       handleGestureOpen,
       isGesturing,
       openGestureRef,
       horizontalScroll?.isAnyScrolledRight,
       touchStartX,
+      touchStartY,
     ],
   );
 
   return (
-    <GestureDetector gesture={openGesture} touchAction="pan-y">
+    <GestureDetector gesture={openGesture} touchAction={MOBILE_WEB_GESTURE_TOUCH_ACTION}>
       {children}
     </GestureDetector>
   );
@@ -597,6 +665,27 @@ function ProvidersWrapper({ children }: { children: ReactNode }) {
       UnistylesRuntime.setTheme(THEME_TO_UNISTYLES[settings.theme]);
     }
   }, [settingsLoading, settings.theme]);
+
+  // Apply font / size / syntax appearance settings on mount and when they change.
+  // Sibling to the theme effect above; order is irrelevant because both patch all
+  // six registered theme keys, so the active key is always current.
+  useEffect(() => {
+    if (settingsLoading) return;
+    applyAppearance({
+      uiFontFamily: settings.uiFontFamily,
+      monoFontFamily: settings.monoFontFamily,
+      uiFontSize: settings.uiFontSize,
+      codeFontSize: settings.codeFontSize,
+      syntaxTheme: settings.syntaxTheme,
+    });
+  }, [
+    settingsLoading,
+    settings.uiFontFamily,
+    settings.monoFontFamily,
+    settings.uiFontSize,
+    settings.codeFontSize,
+    settings.syntaxTheme,
+  ]);
 
   return (
     <VoiceProvider>
@@ -751,7 +840,6 @@ function OpenProjectListener() {
 }
 
 function AppWithSidebar({ children }: { children: ReactNode }) {
-  const router = useRouter();
   const pathname = usePathname();
   const params = useGlobalSearchParams<{ open?: string | string[] }>();
   const hosts = useHosts();
@@ -759,16 +847,6 @@ function AppWithSidebar({ children }: { children: ReactNode }) {
   const activeServerId = useMemo(() => parseServerIdFromPathname(pathname), [pathname]);
   const shouldShowAppChrome =
     storeReady && activeServerId !== null && hosts.some((host) => host.serverId === activeServerId);
-
-  useEffect(() => {
-    if (!activeServerId || hosts.length === 0) {
-      return;
-    }
-    if (hosts.some((host) => host.serverId === activeServerId)) {
-      return;
-    }
-    router.replace(mapPathnameToServer(pathname, hosts[0].serverId));
-  }, [activeServerId, hosts, pathname, router]);
 
   // Parse selectedAgentKey directly from pathname
   // useLocalSearchParams doesn't update when navigating between same-pattern routes
@@ -801,8 +879,6 @@ function FaviconStatusSync() {
   return null;
 }
 
-const AGENT_SCREEN_OPTIONS = { gestureEnabled: false };
-
 function RootStack() {
   const storeReady = useStoreReady();
   const { theme } = useUnistyles();
@@ -828,20 +904,9 @@ function RootStack() {
         <Stack.Screen name="pair-scan" />
         <Stack.Screen name="orchestra/setup" />
       </Stack.Protected>
-      {/*
-        Do not add getId or dangerouslySingular back to the workspace route.
-        Expo Router maps dangerouslySingular to React Navigation getId, and
-        getId repeatedly breaks Android native-stack/Fabric by reordering an
-        already-mounted workspace screen. Keep workspace identity/retention
-        outside this route-level native-stack API.
-      */}
-      <Stack.Screen name="h/[serverId]/workspace/[workspaceId]" />
-      <Stack.Screen name="h/[serverId]/agent/[agentId]" options={AGENT_SCREEN_OPTIONS} />
-      <Stack.Screen name="h/[serverId]/index" />
-      <Stack.Screen name="h/[serverId]/sessions" />
-      <Stack.Screen name="h/[serverId]/open-project" />
-      <Stack.Screen name="h/[serverId]/settings" />
-      <Stack.Screen name="settings/hosts/[serverId]" />
+      <Stack.Screen name="h/[serverId]" />
+      <Stack.Screen name="settings/hosts/[serverId]/index" />
+      <Stack.Screen name="settings/hosts/[serverId]/[hostSection]" />
     </Stack>
   );
 }
@@ -874,19 +939,26 @@ function RuntimeProviders({ children }: { children: ReactNode }) {
   );
 }
 
-// PortalProvider must remain the innermost global provider here.
+// PortalProvider must stay inside normal app-wide context providers here.
 // `@gorhom/portal` renders portaled children at the host's location in the
 // tree, so any context a portaled sheet might consume (QueryClient, theme,
 // auth, settings, …) must wrap PortalProvider — not be wrapped by it.
-// Adding a new global provider? Put it above PortalProvider.
+// BottomSheetModalProvider is the exception: Gorhom modals consume portal
+// context and need one shared provider for sibling sheets to stack.
 function RootProviders({ children }: { children: ReactNode }) {
   return (
     <QueryProvider>
-      <SafeAreaProvider>
-        <KeyboardProvider>
-          <PortalProvider>{children}</PortalProvider>
-        </KeyboardProvider>
-      </SafeAreaProvider>
+      <I18nProvider>
+        <SafeAreaProvider>
+          <KeyboardProvider>
+            <KeyboardShiftProvider>
+              <PortalProvider>
+                <BottomSheetModalProvider>{children}</BottomSheetModalProvider>
+              </PortalProvider>
+            </KeyboardShiftProvider>
+          </KeyboardProvider>
+        </SafeAreaProvider>
+      </I18nProvider>
     </QueryProvider>
   );
 }

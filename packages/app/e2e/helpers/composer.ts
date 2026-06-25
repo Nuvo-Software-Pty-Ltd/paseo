@@ -1,9 +1,11 @@
 import { expect, type Page } from "@playwright/test";
 import { buildHostWorkspaceRoute } from "@/utils/host-routes";
 import { createTempGitRepo } from "./workspace";
-import { connectTerminalClient, type TerminalPerfDaemonClient } from "./terminal-perf";
-import { connectWorkspaceSetupClient, openHomeWithProject } from "./workspace-setup";
+import { connectSeedClient, type SeedDaemonClient } from "./seed-client";
+import { gotoAppShell } from "./app";
+import { connectWorkspaceSetupClient } from "./workspace-setup";
 import { selectWorkspaceInSidebar } from "./sidebar";
+import { getServerId } from "./server-id";
 import { waitForTabBar } from "./launcher";
 
 function composerInput(page: Page) {
@@ -145,8 +147,9 @@ export async function selectGithubOption(
 }
 
 export interface MockAgentSetup {
-  client: TerminalPerfDaemonClient;
+  client: SeedDaemonClient;
   repo: Awaited<ReturnType<typeof createTempGitRepo>>;
+  cleanup: () => Promise<void>;
 }
 
 /** Create a temp repo, start a mock agent, navigate to it, and wait for it to be running. */
@@ -154,26 +157,39 @@ export async function startRunningMockAgent(
   page: Page,
   opts: { prefix: string; model: string; prompt: string },
 ): Promise<MockAgentSetup> {
-  const serverId = process.env.E2E_SERVER_ID;
-  if (!serverId) throw new Error("E2E_SERVER_ID is not set.");
+  const serverId = getServerId();
 
   const repo = await createTempGitRepo(opts.prefix);
-  const client = await connectTerminalClient();
-  const opened = await client.openProject(repo.path);
-  if (!opened.workspace) throw new Error(opened.error ?? "Failed to open project");
+  const client = await connectSeedClient();
+  const createdWorkspace = await client.createWorkspace({
+    source: { kind: "directory", path: repo.path },
+  });
+  if (!createdWorkspace.workspace) {
+    throw new Error(createdWorkspace.error ?? "Failed to create workspace");
+  }
+  const workspace = createdWorkspace.workspace;
   const agent = await client.createAgent({
     provider: "mock",
     cwd: repo.path,
+    workspaceId: workspace.id,
     model: opts.model,
-    initialPrompt: opts.prompt,
   });
-  const agentUrl = `${buildHostWorkspaceRoute(serverId, repo.path)}?open=${encodeURIComponent(`agent:${agent.id}`)}`;
+  const agentUrl = `${buildHostWorkspaceRoute(serverId, workspace.id)}?open=${encodeURIComponent(`agent:${agent.id}`)}`;
   await page.goto(agentUrl);
+  await expectComposerVisible(page);
+  await client.sendAgentMessage(agent.id, opts.prompt);
   await expect(page.getByRole("button", { name: /stop|cancel/i }).first()).toBeVisible({
     timeout: 30_000,
   });
-  await expectComposerVisible(page);
-  return { client, repo };
+  return {
+    client,
+    repo,
+    cleanup: async () => {
+      await client.removeProject(workspace.projectId).catch(() => undefined);
+      await client.close().catch(() => undefined);
+      await repo.cleanup().catch(() => undefined);
+    },
+  };
 }
 
 export interface GithubWorkspaceHandle {
@@ -186,10 +202,20 @@ export async function openGithubWorkspace(
   repoPath: string,
 ): Promise<GithubWorkspaceHandle> {
   const client = await connectWorkspaceSetupClient();
-  const opened = await client.openProject(repoPath);
-  if (!opened.workspace) throw new Error(opened.error ?? `Failed to open project ${repoPath}`);
-  await openHomeWithProject(page, repoPath);
-  await selectWorkspaceInSidebar(page, opened.workspace.id);
+  const createdWorkspace = await client.createWorkspace({
+    source: { kind: "directory", path: repoPath },
+  });
+  if (!createdWorkspace.workspace) {
+    throw new Error(createdWorkspace.error ?? `Failed to create workspace ${repoPath}`);
+  }
+  const workspace = createdWorkspace.workspace;
+  await gotoAppShell(page);
+  await selectWorkspaceInSidebar(page, workspace.id);
   await waitForTabBar(page);
-  return { cleanup: () => client.close().catch(() => undefined) };
+  return {
+    cleanup: async () => {
+      await client.removeProject(workspace.projectId).catch(() => undefined);
+      await client.close().catch(() => undefined);
+    },
+  };
 }

@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
 import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
-import type { ChatMessage, ChatRoom } from "./chat-types.js";
+import type { ChatMessage, ChatRoom } from "@getpaseo/protocol/chat/types";
 import type { ChatStore, ChatStorePayload } from "./chat-store.js";
 
 // T-1 (D-3) — DynamoDB-backed ChatStore for cloud mode.

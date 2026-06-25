@@ -8,7 +8,7 @@ import {
   View,
   type PressableStateCallbackType,
 } from "react-native";
-import { Archive, Cloud, Folder, Github } from "lucide-react-native";
+import { Archive, Cloud, Folder, FolderPlus, Github } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useQuery } from "@tanstack/react-query";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
@@ -17,7 +17,7 @@ import { useProjectSource, useRecommendedProjectPaths } from "@/stores/session-s
 import { projectSourceAllowsGithub, projectSourceAllowsLocalDirectory } from "@/lib/project-source";
 import { GithubRepoPicker } from "@/components/github-repo-picker";
 import { ADD_PROJECT_LABEL } from "@/lib/cloud-workspace-copy";
-import type { ProjectDescriptorPayload } from "@server/shared/messages";
+import type { ProjectDescriptorPayload } from "@getpaseo/protocol/messages";
 import {
   useHostRuntimeClient,
   useHostRuntimeIsConnected,
@@ -25,7 +25,6 @@ import {
 } from "@/runtime/host-runtime";
 import { useOpenProject } from "@/hooks/use-open-project";
 import { useCloudWorkspaces } from "@/hooks/use-cloud-workspaces";
-import { buildWorkingDirectorySuggestions } from "@/utils/working-directory-suggestions";
 import { isNative } from "@/constants/platform";
 import { useRouter, type Href } from "expo-router";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
@@ -41,10 +40,16 @@ import type { WorkspaceRecord } from "@/lib/orchestra-cloud-client";
 import { partitionCloudWorkspaces } from "@/utils/cloud-workspace-sections";
 import { formatTimeAgo } from "@/utils/time";
 import { showCloudWorkspaceArchiveDialog } from "@/components/cloud-workspace-archive-dialog";
+import {
+  buildProjectPickerOptions,
+  isOpenableProjectPath,
+  type ProjectPickerOption,
+} from "./project-picker-options";
 
 interface PathRowProps {
-  path: string;
+  option: ProjectPickerOption;
   active: boolean;
+  openPathLabel: string;
   onSelect: (path: string) => void;
 }
 
@@ -290,8 +295,12 @@ function CloudWorkspaceRow({
   );
 }
 
-function PathRow({ path, active, onSelect }: PathRowProps) {
+function PathRow({ option, active, openPathLabel, onSelect }: PathRowProps) {
   const { theme } = useUnistyles();
+  const Icon = option.kind === "path" ? FolderPlus : Folder;
+  const path = option.path;
+  const displayPath = shortenPath(path);
+  const label = option.kind === "path" ? `${openPathLabel}: ${displayPath}` : displayPath;
   const handlePress = useCallback(() => {
     onSelect(path);
   }, [onSelect, path]);
@@ -312,10 +321,10 @@ function PathRow({ path, active, onSelect }: PathRowProps) {
     <Pressable style={pressableStyle} onPress={handlePress}>
       <View style={styles.rowContent}>
         <View style={styles.iconSlot}>
-          <Folder size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />
+          <Icon size={16} strokeWidth={2.2} color={theme.colors.foregroundMuted} />
         </View>
         <Text style={rowTextStyle} numberOfLines={1}>
-          {shortenPath(path)}
+          {label}
         </Text>
       </View>
     </Pressable>
@@ -423,9 +432,9 @@ function usePickerGithubSource(
     setContainerError(null);
     void (async () => {
       try {
-        // createWorkspace is idempotent in cloud — it returns the existing
-        // ambient container (authoritative id) without renaming it.
-        const result = await client.createWorkspace("");
+        // createWorkspaceContainer is idempotent in cloud — it returns the
+        // existing ambient container (authoritative id) without renaming it.
+        const result = await client.createWorkspaceContainer("");
         if (result.workspace) {
           setGithubWorkspaceId(result.workspace.workspaceId);
         } else {
@@ -480,7 +489,8 @@ interface PickerResultsBodyProps {
   githubDisabled: boolean;
   githubError: string | null;
   onAddGithub: () => void;
-  options: string[];
+  options: ProjectPickerOption[];
+  openPathLabel: string;
   activeIndex: number;
   query: string;
   activeCloudWorkspaces: WorkspaceRecord[];
@@ -543,10 +553,11 @@ function PickerResultsBody(props: PickerResultsBodyProps) {
         </View>
       ) : null}
       {showOptions
-        ? props.options.map((path, index) => (
+        ? props.options.map((option, index) => (
             <PathRow
-              key={path}
-              path={path}
+              key={`${option.kind}:${option.path}`}
+              option={option}
+              openPathLabel={props.openPathLabel}
               active={index === props.activeIndex}
               onSelect={props.onSelectPath}
             />
@@ -645,18 +656,13 @@ export function ProjectPickerModal() {
   const options = useMemo(() => {
     // github_only (cloud) hides the local-directory source entirely.
     if (!allowLocalDir) {
-      return [] as string[];
+      return [] as ProjectPickerOption[];
     }
-    const suggestedPaths = buildWorkingDirectorySuggestions({
+    return buildProjectPickerOptions({
       recommendedPaths,
       serverPaths: directorySuggestionsQuery.data ?? [],
       query,
     });
-    const trimmedQuery = query.trim();
-    if (!trimmedQuery || suggestedPaths.includes(trimmedQuery)) {
-      return suggestedPaths;
-    }
-    return [trimmedQuery, ...suggestedPaths];
   }, [allowLocalDir, query, directorySuggestionsQuery.data, recommendedPaths]);
 
   const handleClose = useCallback(() => {
@@ -683,7 +689,7 @@ export function ProjectPickerModal() {
 
   const handleSubmitCustom = useCallback(() => {
     const trimmed = query.trim();
-    if (!trimmed) return;
+    if (!isOpenableProjectPath(trimmed)) return;
     void handleSelectPath(trimmed);
   }, [handleSelectPath, query]);
 
@@ -773,12 +779,14 @@ export function ProjectPickerModal() {
 
   // Reset state when opening/closing
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setActiveIndex(0);
-      const id = setTimeout(() => inputRef.current?.focus(), 0);
-      return () => clearTimeout(id);
+    if (!open) {
+      return;
     }
+
+    setQuery("");
+    setActiveIndex(0);
+    const id = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(id);
   }, [open]);
 
   // Clamp active index
@@ -799,14 +807,14 @@ export function ProjectPickerModal() {
 
       if (key === "Escape") {
         event.preventDefault();
-        setOpen(false);
+        handleClose();
         return;
       }
 
       if (key === "Enter") {
         event.preventDefault();
         if (options.length > 0 && activeIndex < options.length) {
-          void handleSelectPath(options[activeIndex]);
+          handleSelectPath(options[activeIndex].path);
         } else if (query.trim()) {
           handleSubmitCustom();
         }
@@ -828,7 +836,7 @@ export function ProjectPickerModal() {
 
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [activeIndex, handleSelectPath, handleSubmitCustom, open, options, query, setOpen]);
+  }, [activeIndex, handleClose, handleSelectPath, handleSubmitCustom, open, options, query]);
 
   const panelStyle = useMemo(
     () => [
@@ -893,8 +901,9 @@ export function ProjectPickerModal() {
               githubBusy={isResolvingContainer}
               githubDisabled={!client || isResolvingContainer}
               githubError={containerError}
-              onAddGithub={handleOpenGithubPicker}
               options={options}
+              openPathLabel="Open path"
+              onAddGithub={handleOpenGithubPicker}
               activeIndex={activeIndex}
               query={query}
               activeCloudWorkspaces={activeCloudWorkspaces}
@@ -953,6 +962,11 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     outlineStyle: "none",
   } as object,
+  errorText: {
+    marginTop: theme.spacing[2],
+    fontSize: theme.fontSize.sm,
+    lineHeight: 18,
+  },
   results: {
     flexGrow: 0,
   },

@@ -14,18 +14,29 @@ Each agent in `AgentManager` carries a `lastStatus` of `initializing`, `idle`, `
 
 ## Relationships
 
-Agents can launch other agents via the `create_agent` MCP tool. When they do, the daemon stamps the new agent with a label `paseo.parent-agent-id` pointing back at the caller (`packages/server/src/server/agent/mcp-server.ts:804`). The client surfaces that as `agent.parentAgentId`.
+Agents can launch other agents via the agent-scoped `create_agent` MCP tool. Agent-scoped creation is always asynchronous. `relationship` and `workspace` are separate decisions:
 
-There is exactly one relationship type today: `parentAgentId`. The daemon does not distinguish between:
+- `relationship` decides whether the new agent belongs under the caller.
+- `workspace` decides where the new agent lives and whether a new workspace/worktree is created.
 
-- **Subagents** — children that exist as part of the parent's work (e.g. orchestration tasks the parent delegates and waits on)
-- **Detached agents** — children launched to take over from the parent (e.g. handoffs, fire-and-forget delegations)
+`relationship: { kind: "subagent" }` stamps the created agent with `paseo.parent-agent-id`, pointing back at the creating agent. The client surfaces that as `agent.parentAgentId`. This requires an agent-scoped MCP session.
 
-Both look the same in storage. This is an accepted limitation — see [Limitations](#limitations).
+`relationship: { kind: "detached" }` creates a sibling/root agent (e.g. handoffs, fire-and-forget delegations). The daemon may still use the creating agent for cwd/config inheritance, but it does not write `paseo.parent-agent-id`.
+
+- **Subagents** — exist as part of the creating agent's work, appear in that agent's subagent track, and are archived with it.
+- **Detached agents** — stand on their own, do not appear in the creating agent's subagent track, and are not archived with it.
+
+`workspace: { kind: "current" }` uses the caller's workspace and can optionally override the runtime cwd. It requires an agent-scoped MCP session. `workspace: { kind: "create", source: { kind: "directory" | "worktree", ... } }` creates a new workspace for the new agent; worktree creation goes through the Paseo worktree workflow and stamps the agent with that fresh workspace id.
+
+Users can also detach an existing subagent from the subagents track. Detach removes the `paseo.parent-agent-id` label only: it does not stop, archive, move, or restart the agent. The agent keeps its current `cwd` and `workspaceId`, leaves the former parent's track, and behaves like a root agent for tab close, workspace activity, and future parent archive.
+
+`notifyOnFinish` defaults to `true` for agent-scoped creation and background prompt follow-ups because most delegated work needs to report back to the creating agent. Set it to `false` only for truly fire-and-forget agents or prompts.
 
 ## Archive
 
 Archive is a **soft delete**: the agent record stays on disk with `archivedAt` set, the runtime is closed, and the agent disappears from active lists. Archive is **global** — it lives on the server and propagates to every connected client.
+
+`create_agent_request` can opt an agent into `autoArchive`. In that mode the daemon archives the agent after the first terminal turn event (`turn_completed`, `turn_failed`, or `turn_canceled`). If the same request created a Paseo worktree through its `worktree` field, auto-archive archives that worktree too, which removes the agent records inside the worktree.
 
 Archiving runs through `AgentManager.archiveAgent` (`packages/server/src/server/agent/agent-manager.ts`):
 
@@ -52,15 +63,23 @@ Closing a tab on a **subagent** (any agent with `parentAgentId`) is **layout-onl
 
 The asymmetry is intentional: a subagent's home is the parent's track, not the tab. Tabs are ephemeral viewing slots; the track is the persistent record of the parent's children.
 
+## Workspace activity
+
+Agent lifecycle status stays literal: a parent agent is `idle` when its own turn is idle, even if a child is running.
+
+Workspace status is an aggregate activity signal computed **per `workspaceId`**: a workspace's status reflects only records whose `workspaceId === workspace.id`. Ownership is never derived from `cwd` — many workspaces may share one directory, and same-`cwd` siblings do not clump under one status. A root agent contributes its normal state bucket to its owning workspace only. Running subagents contribute `running` to their root parent's owning workspace (by the parent agent's `workspaceId`), not to the subagent's current `cwd` or worktree. Non-running subagent attention, permission, and error states stay in the parent's subagents track and do not escalate the workspace bucket.
+
 ## The subagents track
 
-The collapsible section above the composer in an agent's pane (`packages/app/src/subagents/subagents-section.tsx`). Membership rule (`packages/app/src/subagents/subagents.ts`):
+The collapsible track above the composer in an agent's pane (`packages/app/src/subagents/track.tsx`). Membership rule (`packages/app/src/subagents/select.ts`):
 
 ```
 parentAgentId === thisAgent.id  AND  !archivedAt
 ```
 
 Archived subagents disappear from the track, by design. To remove a subagent from the track without closing its tab, use the **archive button (X)** on the row — it opens a confirm dialog and archives the subagent on confirm. That same archive shows the subagent leave the track on every connected client.
+
+To keep the agent alive but remove it from the parent's track, use **detach**. The daemon clears the parent label, emits the normal agent update, and every client reclassifies the agent from subagent to root/sibling from that updated snapshot.
 
 ## Why this shape
 
@@ -69,17 +88,12 @@ The decision was to **decouple "close tab" from "archive" only for subagents**, 
 - **Closing a tab on a root agent still archives** — preserves the existing UX users are trained on
 - **Closing a tab on a subagent is layout-only** — fixes the lossy "click to read, close to dismiss view, lose the row" flow
 - **Archive button on track rows** — gives subagents an explicit lifecycle gesture in their home surface
+- **Detach button on track rows** — lets a subagent continue independently without killing its work
 - **Cascade archive on parent** — keeps subagents from leaking when the parent is archived
 
 We considered universal decoupling (no tab close ever archives, archive is always explicit) but rejected it: it changes a behavior root-agent users rely on.
 
 ## Limitations
-
-### Detached agents are cascade-archived
-
-The daemon can't tell a "subagent" apart from a "detached agent" — both carry `paseo.parent-agent-id`. So when you archive an agent that previously launched a detached child (e.g. via `/paseo-handoff`), cascade will archive the detached child too, even though semantically it should outlive the originator.
-
-Until a richer relation model lands (e.g. a `relation: "subagent" | "detached"` field on creation, or a separate channel for handoff launches), this trade-off stands. Workaround: don't archive an agent whose work was handed off, or unarchive the detached child afterward.
 
 ### Subagent accumulation under long-lived parents
 
@@ -108,13 +122,15 @@ Source of truth for the state machine + UX copy is `paseo-cloud-daemon/90-cloud-
 $PASEO_HOME/agents/{cwd-with-dashes}/{agent-id}.json
 ```
 
+`{cwd-with-dashes}` is derived from the agent's filesystem `cwd`. It is not the workspace id; agent storage stays cwd-keyed while workspace identity is the opaque workspace id.
+
 Each agent is a single JSON file. Fields relevant to this doc:
 
-| Field                             | Type          | Meaning                                                       |
-| --------------------------------- | ------------- | ------------------------------------------------------------- |
-| `id`                              | `string`      | Stable identifier                                             |
-| `archivedAt`                      | `string?`     | Soft-delete timestamp (ISO 8601)                              |
-| `labels["paseo.parent-agent-id"]` | `string?`     | Parent agent ID, set automatically by `create_agent` MCP tool |
-| `lastStatus`                      | `AgentStatus` | `initializing` / `idle` / `running` / `error` / `closed`      |
+| Field                             | Type          | Meaning                                                                                      |
+| --------------------------------- | ------------- | -------------------------------------------------------------------------------------------- |
+| `id`                              | `string`      | Stable identifier                                                                            |
+| `archivedAt`                      | `string?`     | Soft-delete timestamp (ISO 8601)                                                             |
+| `labels["paseo.parent-agent-id"]` | `string?`     | Parent agent ID, set automatically by `create_agent` when `relationship.kind === "subagent"` |
+| `lastStatus`                      | `AgentStatus` | `initializing` / `idle` / `running` / `error` / `closed`                                     |
 
 See [`docs/data-model.md`](./data-model.md) for the full agent record.

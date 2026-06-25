@@ -30,6 +30,38 @@ describe("highlightCode", () => {
     expect(stringToken?.style).toBe("string");
   });
 
+  it("highlights Swift code", () => {
+    const code = 'struct Greeter {\n    let message = "hello"\n}';
+    const result = highlightCode(code, "test.swift");
+
+    expect(result).toHaveLength(3);
+
+    const structToken = result[0].find((t) => t.text === "struct");
+    expect(structToken?.style).toBe("keyword");
+
+    const typeToken = result[0].find((t) => t.text === "Greeter");
+    expect(typeToken?.style).toBe("definition");
+
+    const stringToken = result[1].find((t) => t.text.includes("hello"));
+    expect(stringToken?.style).toBe("string");
+  });
+
+  it("highlights Dart code", () => {
+    const code = 'class Greeter {\n  final String message = "hello";\n}';
+    const result = highlightCode(code, "test.dart");
+
+    expect(result).toHaveLength(3);
+
+    const classToken = result[0].find((t) => t.text === "class");
+    expect(classToken?.style).toBe("keyword");
+
+    const finalToken = result[1].find((t) => t.text === "final");
+    expect(finalToken?.style).toBe("keyword");
+
+    const stringToken = result[1].find((t) => t.text.includes("hello"));
+    expect(stringToken?.style).toBe("string");
+  });
+
   it("highlights TSX code with correct dialect", () => {
     const code = 'const el = <div className="test">hello</div>;';
     const result = highlightCode(code, "test.tsx");

@@ -3,15 +3,17 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import type { StoredAgentRecord } from "./agent/agent-storage.js";
-import type { AgentStore } from "./agent/agent-storage.js";
+import type { AgentStorage, AgentStore } from "./agent/agent-storage.js";
 import {
   classifyDirectoryForProjectMembership,
   deriveCanonicalRepoUrl,
   deriveProjectGroupingKey,
   deriveProjectGroupingName,
+  generateWorkspaceId,
   normalizeWorkspaceId,
 } from "./workspace-registry-model.js";
 import { parseGitHubRepoUrl } from "./cloud-clone.js";
+import { backfillWorkspaceIdForLegacyAgents } from "./migrations/backfill-workspace-id.migration.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import {
   createPersistedProjectRecord,
@@ -517,6 +519,29 @@ function mergeProjectRecord(
   });
 }
 
+// MERGE FLAG (AgentStore vs AgentStorage type gap): upstream's
+// `backfillWorkspaceIdForLegacyAgents` declares `agentStorage: AgentStorage`
+// (the concrete class), but this fork's stores are typed against the `AgentStore`
+// interface so the DynamoDB-backed `DynamoAgentStore` (which `implements
+// AgentStore`) can be injected in cloud mode. The migration only calls
+// `agentStorage.list()`, which `AgentStore` provides, so the gap is purely
+// nominal. This shim bridges it with a single, scoped assertion.
+// PROPER FIX (out of scope — outside the 3 merge files): widen the migration's
+// param to `agentStorage: AgentStore` in
+// `migrations/backfill-workspace-id.migration.ts`, then delete this shim and
+// call `backfillWorkspaceIdForLegacyAgents` directly.
+async function runWorkspaceIdBackfill(options: {
+  agentStorage: AgentStore;
+  workspaceRegistry: WorkspaceRegistry;
+  logger: Logger;
+}): Promise<void> {
+  await backfillWorkspaceIdForLegacyAgents({
+    agentStorage: options.agentStorage as unknown as AgentStorage,
+    workspaceRegistry: options.workspaceRegistry,
+    logger: options.logger,
+  });
+}
+
 export async function bootstrapWorkspaceRegistries(options: {
   paseoHome: string;
   agentStorage: AgentStore;
@@ -567,17 +592,31 @@ export async function bootstrapWorkspaceRegistries(options: {
   // derived cache is current except it may predate the 1:N model — backfill
   // containment and return without re-deriving from agent storage.
   if (projectsExists && workspacesExists) {
+    // Run BOTH backfills on the already-materialized path: HEAD's
+    // project→container containment FK backfill AND upstream's
+    // agent.workspaceId backfill. They fix different relics and both must run.
     await backfillMissingProjectContainment({
       projectRegistry: options.projectRegistry,
       containerWorkspaceId,
       logger: options.logger,
     });
+    await runWorkspaceIdBackfill(options);
     return;
   }
+
+  // Upstream: reuse stable workspace IDs across reboots, keyed by resolved cwd.
+  // Needed by BOTH reconstruction branches below to mint workspace IDs.
+  const existingWorkspaceIdsByCwd = new Map(
+    (await options.workspaceRegistry.list()).map((workspace) => [
+      path.resolve(workspace.cwd),
+      workspace.workspaceId,
+    ]),
+  );
 
   // D-3.5a (finding #4 / OQ-5) — the migrated first project's identity is
   // seeded from `<ws>#metadata.repoUrl`, NOT from the (possibly-absent at
   // cold boot) local clone. Canonicalize so a tokenized seed never leaks.
+  // Only consumed by the cloud reconstruction branch.
   const seedRepoUrl = deriveCanonicalRepoUrl(options.migrationRepoUrlSeed ?? null);
   const seedProjectKey = seedRepoUrl
     ? deriveProjectGroupingKey({
@@ -596,7 +635,7 @@ export async function bootstrapWorkspaceRegistries(options: {
 
   const records = await options.agentStorage.list();
   const activeRecords = records.filter((record) => !record.archivedAt);
-  const recordsByWorkspaceId = new Map<
+  const recordsByDirectoryKey = new Map<
     string,
     {
       membership: ReturnType<typeof classifyDirectoryForProjectMembership>;
@@ -605,108 +644,239 @@ export async function bootstrapWorkspaceRegistries(options: {
   >();
   const placements = await Promise.all(
     activeRecords.map(async (record) => {
-      const normalizedCwd = normalizeWorkspaceId(record.cwd);
+      const normalizedCwd = path.resolve(record.cwd);
       const checkout = await options.workspaceGitService.getCheckout(normalizedCwd);
       const membership = classifyDirectoryForProjectMembership({
         cwd: normalizedCwd,
         checkout,
       });
-      return { record, membership, workspaceId: membership.workspaceId };
+      return { record, membership, directoryKey: membership.workspaceDirectoryKey };
     }),
   );
-  for (const { record, membership, workspaceId } of placements) {
-    const existing = recordsByWorkspaceId.get(workspaceId) ?? { membership, records: [] };
+  for (const { record, membership, directoryKey } of placements) {
+    const existing = recordsByDirectoryKey.get(directoryKey) ?? { membership, records: [] };
     existing.records.push(record);
-    recordsByWorkspaceId.set(workspaceId, existing);
+    recordsByDirectoryKey.set(directoryKey, existing);
   }
 
-  const seedContext: MigrationSeedContext = {
-    seedProjectKey,
-    seedRepoUrl,
-    isCloudContainer,
-    containerWorkspaceId,
-  };
-  const projectAccumulators = new Map<string, ProjectAccumulator>();
-  const workspaceUpsertInputs: WorkspaceReconstructionInput[] = [];
-  // cwd → projectKey of every checkout we materialize from agent records, so
-  // the durable-project reconstruction below never double-writes a workspace
-  // that an agent already anchored (idempotency).
-  const materializedWorkspaceCwds = new Map<string, string>();
+  // ==========================================================================
+  // MERGE FLAG (workspace-registry-bootstrap): HEAD and upstream wrote DIVERGENT
+  // reconstruction algorithms for this function. They could not be cleanly
+  // unified because they produce incompatible `workspaceUpsertInputs` shapes
+  // and use different write strategies (HEAD: deferred guarded project upsert
+  // from `projectAccumulators`; upstream: fused workspace+project upsert from
+  // `projectRanges`). Per the merge plan, BOTH paths are kept, selected by
+  // whether the daemon is in a cloud container (or carries a migration seed).
+  //
+  // - CLOUD branch  = HEAD's durable-project reconstruction (load-bearing for
+  //   cloud workspace/project persistence across daemon recycle). Rewritten to
+  //   iterate `recordsByDirectoryKey` (the old `recordsByWorkspaceId` /
+  //   `membership.workspaceId` no longer exist in the current model) and to mint
+  //   stable workspace IDs via `existingWorkspaceIdsByCwd ?? generateWorkspaceId`.
+  // - ON-HOST branch = upstream's `projectRanges` fold + fused upsert, with
+  //   HEAD's container-FK (`workspaceId: containerWorkspaceId`) layered onto the
+  //   project record so the on-host container-model tests still pass.
+  //
+  // FLAG FOR REVIEW: this is the load-bearing divergence the merge prompt called
+  // out. Verify the cloud branch's workspace-id minting matches prior cloud
+  // behavior (HEAD used the old map key directly) and that both reconstruction
+  // tests (cloud-migration + on-host) pass.
+  // ==========================================================================
+  const isCloudReconstruction = isCloudContainer || options.migrationRepoUrlSeed != null;
 
-  for (const [workspaceId, entry] of recordsByWorkspaceId.entries()) {
-    const input = buildWorkspaceInputFromAgentRecords({
-      workspaceId,
-      entry,
-      seedContext,
-      durableProjectsByRepoUrl,
-      projectAccumulators,
-      now,
-    });
-    workspaceUpsertInputs.push(input);
-    materializedWorkspaceCwds.set(normalizeWorkspaceId(input.workspaceCwd), input.projectKey);
-  }
+  let materializedProjectCount = 0;
+  let materializedWorkspaceCount = 0;
 
-  // Ensure a seeded migrated project exists even when NO agent record
-  // re-parented onto it (e.g. brand-new migration, agents elsewhere).
-  if (seedProjectKey && seedRepoUrl && !projectAccumulators.has(seedProjectKey)) {
-    projectAccumulators.set(seedProjectKey, {
-      projectKey: seedProjectKey,
-      projectName: deriveProjectGroupingName(seedProjectKey),
-      projectRootPath: cloudCanonicalClonePath(containerWorkspaceId),
-      projectKind: "git",
-      repoUrl: seedRepoUrl,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
+  if (isCloudReconstruction) {
+    const seedContext: MigrationSeedContext = {
+      seedProjectKey,
+      seedRepoUrl,
+      isCloudContainer,
+      containerWorkspaceId,
+    };
+    const projectAccumulators = new Map<string, ProjectAccumulator>();
+    const workspaceUpsertInputs: WorkspaceReconstructionInput[] = [];
+    // cwd → projectKey of every checkout we materialize from agent records, so
+    // the durable-project reconstruction below never double-writes a workspace
+    // that an agent already anchored (idempotency).
+    const materializedWorkspaceCwds = new Map<string, string>();
 
-  // workspace-retention — reconstruct checkout records from the durable project
-  // store (the core fix). See `appendDurableProjectWorkspaces`.
-  appendDurableProjectWorkspaces({
-    durableProjects,
-    seedProjectKey,
-    seedRepoUrl,
-    containerWorkspaceId,
-    now,
-    materializedWorkspaceCwds,
-    workspaceUpsertInputs,
-  });
-
-  // Upsert checkout (workspace) records — unchanged shape (DECISION D-1).
-  await Promise.all(
-    workspaceUpsertInputs.map(
-      ({
+    for (const entry of recordsByDirectoryKey.values()) {
+      // Mint a stable workspace id: reuse the existing one for this cwd if the
+      // ephemeral registry still has it, else generate a fresh one. (The map
+      // key is now a directoryKey, not a workspaceId, so it cannot be the id.)
+      const workspaceId =
+        existingWorkspaceIdsByCwd.get(path.resolve(entry.membership.checkout.cwd)) ??
+        generateWorkspaceId();
+      const input = buildWorkspaceInputFromAgentRecords({
         workspaceId,
-        projectKey,
+        entry,
+        seedContext,
+        durableProjectsByRepoUrl,
+        projectAccumulators,
+        now,
+      });
+      workspaceUpsertInputs.push(input);
+      materializedWorkspaceCwds.set(normalizeWorkspaceId(input.workspaceCwd), input.projectKey);
+    }
+
+    // Ensure a seeded migrated project exists even when NO agent record
+    // re-parented onto it (e.g. brand-new migration, agents elsewhere).
+    if (seedProjectKey && seedRepoUrl && !projectAccumulators.has(seedProjectKey)) {
+      projectAccumulators.set(seedProjectKey, {
+        projectKey: seedProjectKey,
+        projectName: deriveProjectGroupingName(seedProjectKey),
+        projectRootPath: cloudCanonicalClonePath(containerWorkspaceId),
+        projectKind: "git",
+        repoUrl: seedRepoUrl,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    // workspace-retention — reconstruct checkout records from the durable project
+    // store (the core fix). See `appendDurableProjectWorkspaces`.
+    appendDurableProjectWorkspaces({
+      durableProjects,
+      seedProjectKey,
+      seedRepoUrl,
+      containerWorkspaceId,
+      now,
+      materializedWorkspaceCwds,
+      workspaceUpsertInputs,
+    });
+
+    // Upsert checkout (workspace) records — unchanged shape (DECISION D-1).
+    await Promise.all(
+      workspaceUpsertInputs.map(
+        ({
+          workspaceId,
+          projectKey,
+          workspaceCwd,
+          workspaceKind,
+          workspaceDisplayName,
+          createdAt,
+          updatedAt,
+        }) =>
+          options.workspaceRegistry.upsert(
+            createPersistedWorkspaceRecord({
+              workspaceId,
+              projectId: projectKey,
+              cwd: workspaceCwd,
+              kind: workspaceKind,
+              displayName: workspaceDisplayName,
+              createdAt,
+              updatedAt,
+            }),
+          ),
+      ),
+    );
+
+    // Upsert project records — guarded merge (see mergeProjectRecord).
+    await Promise.all(
+      Array.from(projectAccumulators.values()).map(async (accumulator) => {
+        const existing = await options.projectRegistry.get(accumulator.projectKey);
+        await options.projectRegistry.upsert(
+          mergeProjectRecord(accumulator, existing, containerWorkspaceId, now),
+        );
+      }),
+    );
+
+    materializedProjectCount = projectAccumulators.size;
+    materializedWorkspaceCount = workspaceUpsertInputs.length;
+  } else {
+    // ON-HOST: upstream's reconstruction (projectRanges fold + fused
+    // workspace+project upsert). The project record additionally carries HEAD's
+    // container FK (workspaceId: containerWorkspaceId) + a null repoUrl so the
+    // D-3.5a on-host container model is preserved.
+    const projectRanges = new Map<
+      string,
+      { createdAt: string | null; updatedAt: string | null }
+    >();
+    const upstreamWorkspaceUpsertInputs: {
+      workspaceId: string;
+      membership: ReturnType<typeof classifyDirectoryForProjectMembership>;
+      workspaceCwd: string;
+      createdAt: string;
+      updatedAt: string;
+    }[] = [];
+
+    for (const entry of recordsByDirectoryKey.values()) {
+      const { membership, records: workspaceRecords } = entry;
+      const workspaceCwd = membership.checkout.cwd;
+      let workspaceCreatedAt: string | null = null;
+      let workspaceUpdatedAt: string | null = null;
+      for (const record of workspaceRecords) {
+        workspaceCreatedAt = minIsoDate(workspaceCreatedAt, resolveAgentCreatedAt(record));
+        workspaceUpdatedAt = maxIsoDate(workspaceUpdatedAt, resolveAgentUpdatedAt(record));
+      }
+
+      const createdAt = workspaceCreatedAt ?? new Date().toISOString();
+      const updatedAt = workspaceUpdatedAt ?? createdAt;
+
+      const existingProjectRange = projectRanges.get(membership.projectKey) ?? {
+        createdAt: null,
+        updatedAt: null,
+      };
+      existingProjectRange.createdAt = minIsoDate(existingProjectRange.createdAt, createdAt);
+      existingProjectRange.updatedAt = maxIsoDate(existingProjectRange.updatedAt, updatedAt);
+      projectRanges.set(membership.projectKey, existingProjectRange);
+
+      upstreamWorkspaceUpsertInputs.push({
+        workspaceId: existingWorkspaceIdsByCwd.get(workspaceCwd) ?? generateWorkspaceId(),
+        membership,
         workspaceCwd,
-        workspaceKind,
-        workspaceDisplayName,
         createdAt,
         updatedAt,
-      }) =>
-        options.workspaceRegistry.upsert(
-          createPersistedWorkspaceRecord({
-            workspaceId,
-            projectId: projectKey,
-            cwd: workspaceCwd,
-            kind: workspaceKind,
-            displayName: workspaceDisplayName,
-            createdAt,
-            updatedAt,
-          }),
-        ),
-    ),
-  );
+      });
+    }
 
-  // Upsert project records — guarded merge (see mergeProjectRecord).
-  await Promise.all(
-    Array.from(projectAccumulators.values()).map(async (accumulator) => {
-      const existing = await options.projectRegistry.get(accumulator.projectKey);
-      await options.projectRegistry.upsert(
-        mergeProjectRecord(accumulator, existing, containerWorkspaceId, now),
-      );
-    }),
-  );
+    await Promise.all(
+      upstreamWorkspaceUpsertInputs.flatMap(
+        ({ workspaceId, membership, workspaceCwd, createdAt, updatedAt }) => {
+          const projectRange = projectRanges.get(membership.projectKey) ?? {
+            createdAt: null,
+            updatedAt: null,
+          };
+          return [
+            options.workspaceRegistry.upsert(
+              createPersistedWorkspaceRecord({
+                workspaceId,
+                projectId: membership.projectKey,
+                cwd: workspaceCwd,
+                kind: membership.workspaceKind,
+                displayName: membership.workspaceDisplayName,
+                createdAt,
+                updatedAt,
+              }),
+            ),
+            options.projectRegistry.upsert(
+              createPersistedProjectRecord({
+                projectId: membership.projectKey,
+                rootPath: membership.projectRootPath,
+                kind: membership.projectKind,
+                displayName: membership.projectName,
+                createdAt: projectRange.createdAt ?? createdAt,
+                updatedAt: projectRange.updatedAt ?? updatedAt,
+                // D-3.5a containment FK — every reconstructed on-host project
+                // attaches to the (default) container; non-git projects have
+                // no repoUrl.
+                workspaceId: containerWorkspaceId,
+                repoUrl: null,
+              }),
+            ),
+          ];
+        },
+      ),
+    );
+
+    materializedProjectCount = projectRanges.size;
+    materializedWorkspaceCount = recordsByDirectoryKey.size;
+  }
+
+  // Backfill agent.workspaceId in BOTH branches (upstream migration; independent
+  // of which reconstruction ran).
+  await runWorkspaceIdBackfill(options);
 
   options.logger.info(
     {
@@ -714,9 +884,12 @@ export async function bootstrapWorkspaceRegistries(options: {
       workspacesFile: path.join(options.paseoHome, "projects", "workspaces.json"),
       containerWorkspaceId,
       migratedFromSeed: Boolean(seedProjectKey),
-      materializedProjects: projectAccumulators.size,
-      materializedWorkspaces: workspaceUpsertInputs.length,
-      reconstructedFromDurableProjects: durableProjects.filter((p) => !p.archivedAt).length,
+      reconstruction: isCloudReconstruction ? "cloud-durable" : "on-host",
+      materializedProjects: materializedProjectCount,
+      materializedWorkspaces: materializedWorkspaceCount,
+      reconstructedFromDurableProjects: isCloudReconstruction
+        ? durableProjects.filter((p) => !p.archivedAt).length
+        : 0,
     },
     "Workspace registries bootstrapped from existing agent storage",
   );

@@ -11,10 +11,12 @@ import {
 } from "../services/github-service.js";
 import {
   getCheckoutDiff as getCheckoutDiffUncached,
+  getCheckoutSnapshotFacts as getCheckoutSnapshotFactsUncached,
   getCheckoutStatus as getCheckoutStatusUncached,
   resolveAbsoluteGitDir as resolveAbsoluteGitDirReal,
   type CheckoutDiffCompare,
   type CheckoutDiffResult,
+  type CheckoutSnapshotFacts,
   type CheckoutStatusGit,
   type PullRequestStatusResult,
 } from "../utils/checkout-git.js";
@@ -54,8 +56,32 @@ function createDeferred<T>() {
 }
 
 async function flushPromises(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let i = 0; i < 5; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+function createCheckoutFacts(
+  cwd: string,
+  overrides?: Partial<Extract<CheckoutSnapshotFacts, { isGit: true }>>,
+): CheckoutSnapshotFacts {
+  return {
+    isGit: true,
+    worktreeRoot: cwd,
+    currentBranch: "main",
+    remoteUrl: "https://github.com/acme/repo.git",
+    absoluteGitDir: join(cwd, ".git"),
+    gitCommonDir: join(cwd, ".git"),
+    paseoWorktree: { isPaseoOwnedWorktree: false },
+    storedBaseRef: null,
+    resolvedBaseRef: "main",
+    mainRepoRoot: null,
+    comparisonBaseRef: null,
+    branchRemoteName: null,
+    branchMergeRef: null,
+    pullRequestLookupTarget: { headRef: "main" },
+    ...overrides,
+  };
 }
 
 function createCheckoutStatus(
@@ -79,11 +105,11 @@ function createCheckoutStatus(
   };
 }
 
-function createPullRequestStatusResult(): PullRequestStatusResult {
+function createPullRequestStatusResult(title = "Update feature"): PullRequestStatusResult {
   return {
     status: {
       url: "https://github.com/acme/repo/pull/123",
-      title: "Update feature",
+      title,
       state: "open",
       baseRefName: "main",
       headRefName: "feature",
@@ -200,6 +226,7 @@ function createGitHubServiceStub(): GitHubService {
 }
 
 interface CreateServiceOptions {
+  getCheckoutSnapshotFacts?: ReturnType<typeof vi.fn>;
   getCheckoutStatus?: ReturnType<typeof vi.fn>;
   getCheckoutShortstat?: ReturnType<typeof vi.fn>;
   getPullRequestStatus?: ReturnType<typeof vi.fn>;
@@ -222,6 +249,7 @@ function buildDefaultServiceDeps() {
   return {
     watch: (() => createWatcher()) as never,
     readdir: vi.fn(async () => []),
+    getCheckoutSnapshotFacts: vi.fn(async (cwd: string) => createCheckoutFacts(cwd)),
     getCheckoutStatus: vi.fn(async (cwd: string) => createCheckoutStatus(cwd)),
     getCheckoutShortstat: vi.fn(async () => ({
       additions: 1,
@@ -269,7 +297,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     vi.useRealTimers();
   });
 
-  test("getSnapshot returns cached warm value without shelling out within consumer TTL", async () => {
+  test("getSnapshot returns the current snapshot without shelling out", async () => {
     let nowMs = Date.parse("2026-04-12T00:00:00.000Z");
     const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
     const service = createService({
@@ -411,7 +439,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     service.dispose();
   });
 
-  test("warm non-forced getSnapshot calls attach to an in-flight refresh instead of returning stale cache", async () => {
+  test("non-forced getSnapshot returns the current snapshot during an in-flight refresh", async () => {
     let nowMs = Date.parse("2026-04-12T00:00:00.000Z");
     const refreshStatus = createDeferred<CheckoutStatusGit>();
     const getCheckoutStatus = vi
@@ -434,24 +462,34 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
       }),
     );
 
-    nowMs += 16_000;
-    const first = service.getSnapshot(REPO_CWD);
+    const initialSnapshot = createSnapshot(REPO_CWD, {
+      git: { diffStat: { additions: 4, deletions: 2 } },
+    });
+
+    nowMs += 3_000;
+    const refresh = service.refresh(REPO_CWD);
     await flushPromises();
-    const second = service.getSnapshot(REPO_CWD);
-    await flushPromises();
+    const directRead = service.getSnapshot(REPO_CWD);
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
     expect(getCheckoutShortstat).toHaveBeenCalledTimes(1);
+    await expect(directRead).resolves.toEqual(initialSnapshot);
 
     refreshStatus.resolve(createCheckoutStatus(REPO_CWD, { currentBranch: "feature" }));
-
-    const freshSnapshot = createSnapshot(REPO_CWD, {
-      git: {
-        currentBranch: "feature",
-        diffStat: { additions: 4, deletions: 2 },
-      },
-    });
-    await expect(Promise.all([first, second])).resolves.toEqual([freshSnapshot, freshSnapshot]);
+    await refresh;
+    expect(service.peekSnapshot(REPO_CWD)).toEqual(
+      createSnapshot(REPO_CWD, {
+        git: {
+          currentBranch: "feature",
+          diffStat: { additions: 4, deletions: 2 },
+        },
+        github: {
+          featuresEnabled: false,
+          pullRequest: null,
+          error: null,
+        },
+      }),
+    );
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
     expect(getCheckoutShortstat).toHaveBeenCalledTimes(2);
 
@@ -471,7 +509,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     for (let index = 0; index < 5; index += 1) {
       service.scheduleRefreshForCwd(REPO_CWD);
     }
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     await flushPromises();
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
@@ -537,6 +575,63 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     service.dispose();
   });
 
+  test("a forced GitHub-inclusive call during an in-flight forced git refresh queues a GitHub refresh", async () => {
+    const forcedGitRefresh = createDeferred<CheckoutStatusGit>();
+    const getCheckoutStatus = vi
+      .fn<() => Promise<CheckoutStatusGit>>()
+      .mockImplementationOnce(async () => forcedGitRefresh.promise)
+      .mockImplementation(async () => createCheckoutStatus(REPO_CWD));
+    const getPullRequestStatus = vi.fn(async () =>
+      createPullRequestStatusResult("Fresh validation PR"),
+    );
+    const service = createService({ getCheckoutStatus, getPullRequestStatus });
+
+    const gitRefresh = service.getSnapshot(REPO_CWD, {
+      force: true,
+      includeGitHub: false,
+      reason: "watch",
+    });
+    await flushPromises();
+
+    const validationRefresh = service.getSnapshot(REPO_CWD, {
+      force: true,
+      includeGitHub: true,
+      reason: "merge-pr-validation",
+    });
+    await flushPromises();
+
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+
+    forcedGitRefresh.resolve(createCheckoutStatus(REPO_CWD));
+
+    await expect(validationRefresh).resolves.toEqual(
+      createSnapshot(REPO_CWD, {
+        github: {
+          pullRequest: {
+            url: "https://github.com/acme/repo/pull/123",
+            title: "Fresh validation PR",
+            state: "open",
+            baseRefName: "main",
+            headRefName: "feature",
+            isMerged: false,
+          },
+        },
+      }),
+    );
+    await gitRefresh;
+
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
+    expect(getPullRequestStatus).toHaveBeenCalledWith(
+      REPO_CWD,
+      expect.anything(),
+      { force: true, reason: "merge-pr-validation" },
+      expect.anything(),
+    );
+
+    service.dispose();
+  });
+
   test("ref-watch firing during an in-flight forced refresh does not produce an extra shell burst", async () => {
     const forcedRefresh = createDeferred<CheckoutStatusGit>();
     const getCheckoutStatus = vi
@@ -549,7 +644,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     const forcePromise = service.getSnapshot(REPO_CWD, { force: true, reason: "test" });
     await flushPromises();
     service.scheduleRefreshForCwd(REPO_CWD);
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     await flushPromises();
 
     forcedRefresh.resolve(createCheckoutStatus(REPO_CWD));
@@ -579,7 +674,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     service.dispose();
   });
 
-  test("consumer TTL triggers cold-load after expiry on getSnapshot", async () => {
+  test("non-forced getSnapshot keeps returning the current snapshot after time passes", async () => {
     let nowMs = 0;
     const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
     const service = createService({
@@ -591,12 +686,12 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     nowMs = 16_000;
     await service.getSnapshot(REPO_CWD);
 
-    expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
 
     service.dispose();
   });
 
-  test("self-heal timer fires at the interval and calls getSnapshot without force", async () => {
+  test("self-heal timer refreshes git without refreshing GitHub", async () => {
     let nowMs = 0;
     const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
     const getPullRequestStatus = vi.fn(async () => createPullRequestStatusResult());
@@ -613,10 +708,13 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     await flushPromises();
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
-    expect(getPullRequestStatus).toHaveBeenLastCalledWith(REPO_CWD, expect.anything(), {
-      force: false,
-      reason: "self-heal-git",
-    });
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
+    expect(getPullRequestStatus).toHaveBeenCalledWith(
+      REPO_CWD,
+      expect.anything(),
+      { force: false, reason: "initial" },
+      expect.anything(),
+    );
 
     subscription.unsubscribe();
     service.dispose();
@@ -624,13 +722,13 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
 
   test("self-heal retries workspace observation setup while a listener remains active", async () => {
     let nowMs = 0;
-    const resolveAbsoluteGitDir = vi
-      .fn<() => Promise<string | null>>()
-      .mockRejectedValueOnce(new Error("git dir temporarily unavailable"))
-      .mockResolvedValue(join(REPO_CWD, ".git"));
+    const getCheckoutSnapshotFacts = vi
+      .fn<(cwd: string) => Promise<CheckoutSnapshotFacts>>()
+      .mockRejectedValueOnce(new Error("git facts temporarily unavailable"))
+      .mockImplementation(async (cwd: string) => createCheckoutFacts(cwd));
     const watch = vi.fn(() => createWatcher() as never);
     const service = createService({
-      resolveAbsoluteGitDir,
+      getCheckoutSnapshotFacts,
       watch,
       now: () => new Date(nowMs),
     });
@@ -638,15 +736,16 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
     await flushPromises();
 
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(1);
+    expect(getCheckoutSnapshotFacts).toHaveBeenCalled();
     expect(watch).not.toHaveBeenCalled();
+    const factsCallsBeforeSelfHeal = getCheckoutSnapshotFacts.mock.calls.length;
 
     nowMs = 60_000;
     await vi.advanceTimersByTimeAsync(60_000);
     await flushPromises();
 
-    expect(resolveAbsoluteGitDir).toHaveBeenCalledTimes(2);
-    expect(resolveAbsoluteGitDir).toHaveBeenLastCalledWith(REPO_CWD);
+    expect(getCheckoutSnapshotFacts.mock.calls.length).toBeGreaterThan(factsCallsBeforeSelfHeal);
+    expect(getCheckoutSnapshotFacts).toHaveBeenLastCalledWith(REPO_CWD, expect.anything());
 
     subscription.unsubscribe();
     service.dispose();
@@ -677,7 +776,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
 
     subscription.unsubscribe();
     watchCallbacks[0]?.();
-    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1_000);
     await flushPromises();
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(callsBeforeStaleCallback);
@@ -748,8 +847,12 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
       github,
       now: () => new Date(nowMs),
     });
-    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    const listener = vi.fn();
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, listener);
     await flushPromises();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    const gitReadsAfterInitialSnapshot = getCheckoutStatus.mock.calls.length;
 
     nowMs = 20_000;
     await vi.advanceTimersByTimeAsync(20_000);
@@ -758,6 +861,119 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     expect(githubReadCalls).toContainEqual({
       reason: "self-heal-github",
       tickMs: 20_000,
+    });
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(gitReadsAfterInitialSnapshot);
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        github: expect.objectContaining({
+          pullRequest: expect.objectContaining({
+            checksStatus: "pending",
+          }),
+        }),
+      }),
+    );
+
+    subscription.unsubscribe();
+    service.dispose();
+    github.dispose?.();
+  });
+
+  test("GitHub self-heal polling uses the fork PR head branch instead of the owner-prefixed local branch", async () => {
+    const retainCurrentPullRequestStatusPoll = vi.fn(() => ({ unsubscribe: vi.fn() }));
+    const github = {
+      ...createGitHubServiceStub(),
+      retainCurrentPullRequestStatusPoll,
+    };
+    const getCheckoutSnapshotFacts = vi.fn(async (cwd: string) =>
+      createCheckoutFacts(cwd, {
+        currentBranch: "fork-owner/open-button-targets-active-file",
+        branchRemoteName: "paseo-pr-1285",
+        branchMergeRef: "refs/heads/open-button-targets-active-file",
+        pullRequestLookupTarget: {
+          headRef: "open-button-targets-active-file",
+          headRepositoryOwner: "fork-owner",
+        },
+      }),
+    );
+    const getCheckoutStatus = vi.fn(async (cwd: string) =>
+      createCheckoutStatus(cwd, {
+        currentBranch: "fork-owner/open-button-targets-active-file",
+        remoteUrl: "git@github.com:getpaseo/paseo.git",
+      }),
+    );
+    const service = createService({
+      getCheckoutSnapshotFacts,
+      getCheckoutStatus,
+      github,
+    });
+
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await flushPromises();
+
+    await vi.waitFor(() => {
+      expect(retainCurrentPullRequestStatusPoll).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cwd: REPO_CWD,
+          headRef: "open-button-targets-active-file",
+          headRepositoryOwner: "fork-owner",
+        }),
+      );
+    });
+
+    subscription.unsubscribe();
+    service.dispose();
+  });
+
+  test("settled GitHub self-heal reads stay on the slow poll window without refreshing git", async () => {
+    let nowMs = 0;
+    const githubReadCalls: Array<{ reason: string | undefined; tickMs: number }> = [];
+    const github = createGitHubService({
+      ttlMs: 0,
+      runner: vi.fn(async () => ({
+        stdout: currentPullRequestJson(),
+        stderr: "",
+      })),
+      resolveGhPath: async () => "/usr/bin/gh",
+      now: () => nowMs,
+    });
+    const getCurrentPullRequestStatus = github.getCurrentPullRequestStatus.bind(github);
+    github.getCurrentPullRequestStatus = vi.fn(
+      async (options): Promise<GitHubCurrentPullRequestStatus | null> => {
+        githubReadCalls.push({ reason: options.reason, tickMs: nowMs });
+        return getCurrentPullRequestStatus(options);
+      },
+    );
+    const getCheckoutStatus = vi.fn(async (cwd: string) =>
+      createCheckoutStatus(cwd, { currentBranch: "feature" }),
+    );
+    const service = createService({
+      getCheckoutStatus,
+      github,
+      now: () => new Date(nowMs),
+    });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    const gitReadsAfterInitialSnapshot = getCheckoutStatus.mock.calls.length;
+
+    nowMs = 20_000;
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromises();
+
+    expect(githubReadCalls).not.toContainEqual({
+      reason: "self-heal-github",
+      tickMs: 20_000,
+    });
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(gitReadsAfterInitialSnapshot);
+
+    nowMs = 120_000;
+    await vi.advanceTimersByTimeAsync(100_000);
+    await flushPromises();
+
+    expect(githubReadCalls).toContainEqual({
+      reason: "self-heal-github",
+      tickMs: 120_000,
     });
 
     subscription.unsubscribe();
@@ -874,7 +1090,7 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     expect(getCheckoutStatus).toHaveBeenCalledTimes(0);
   });
 
-  test("self-heal poll coalesces with a concurrent direct getSnapshot call", async () => {
+  test("direct getSnapshot returns current snapshot during a self-heal refresh", async () => {
     let nowMs = 0;
     const selfHealRefresh = createDeferred<CheckoutStatusGit>();
     const getCheckoutStatus = vi
@@ -895,9 +1111,10 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     await flushPromises();
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
+    await expect(directRead).resolves.toEqual(createSnapshot(REPO_CWD));
 
     selfHealRefresh.resolve(createCheckoutStatus(REPO_CWD));
-    await directRead;
+    await flushPromises();
 
     expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
 
@@ -1173,6 +1390,7 @@ describe("WorkspaceGitServiceImpl D2 read methods", () => {
     ];
     const listPaseoWorktrees = vi.fn(async () => worktrees);
     const service = createService({
+      getCheckoutSnapshotFacts: getCheckoutSnapshotFactsUncached as never,
       getCheckoutStatus: getCheckoutStatusUncached as never,
       listPaseoWorktrees,
     });
@@ -1489,6 +1707,7 @@ describe("WorkspaceGitServiceImpl D2 read methods", () => {
         watch: watchSpy as never,
         readdir: readdir as never,
         runGitCommand: runGitCommandReal as never,
+        getCheckoutSnapshotFacts: getCheckoutSnapshotFactsUncached as never,
         getCheckoutStatus: getCheckoutStatusUncached as never,
         resolveAbsoluteGitDir: resolveAbsoluteGitDirReal as never,
       });
@@ -1509,4 +1728,67 @@ describe("WorkspaceGitServiceImpl D2 read methods", () => {
       }
     },
   );
+
+  test("onWorkspaceStateMayHaveChanged invalidates github cache and schedules a forced github-inclusive refresh", async () => {
+    const github = createGitHubServiceStub();
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
+    const getPullRequestStatus = vi.fn(async () => createPullRequestStatusResult());
+    const service = createService({
+      getCheckoutStatus,
+      getPullRequestStatus,
+      github,
+    });
+
+    await service.getSnapshot(REPO_CWD);
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(1);
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
+
+    service.onWorkspaceStateMayHaveChanged(REPO_CWD);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+
+    expect(github.invalidate).toHaveBeenCalledWith({ cwd: REPO_CWD });
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(2);
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(2);
+
+    service.dispose();
+  });
+
+  test("onWorkspaceStateMayHaveChanged preserves includeGitHub when a file watcher fires within the debounce window", async () => {
+    const github = createGitHubServiceStub();
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
+    const getPullRequestStatus = vi.fn(async () => createPullRequestStatusResult());
+    const service = createService({
+      getCheckoutStatus,
+      getPullRequestStatus,
+      github,
+    });
+
+    await service.getSnapshot(REPO_CWD);
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(1);
+
+    service.onWorkspaceStateMayHaveChanged(REPO_CWD);
+    // File watcher fires 200ms later (before debounce expires)
+    await vi.advanceTimersByTimeAsync(200);
+    service.scheduleRefreshForCwd(REPO_CWD);
+
+    // Advance past the debounce
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushPromises();
+
+    // Should still refresh GitHub because the first signal asked for it
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  test("onWorkspaceStateMayHaveChanged is a no-op for unknown cwds", () => {
+    const github = createGitHubServiceStub();
+    const service = createService({ github });
+
+    service.onWorkspaceStateMayHaveChanged("/unknown/cwd");
+
+    expect(github.invalidate).not.toHaveBeenCalled();
+    service.dispose();
+  });
 });

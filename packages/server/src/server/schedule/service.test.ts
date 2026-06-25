@@ -4,12 +4,28 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
+import type {
+  AgentCapabilityFlags,
+  AgentClient,
+  AgentMode,
+  AgentModelDefinition,
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+  AgentPersistenceHandle,
+  AgentPromptInput,
+  AgentRunOptions,
+  AgentRunResult,
+  AgentSession,
+  AgentSessionConfig,
+  AgentStreamEvent,
+} from "../agent/agent-sdk-types.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { getCurrentWorkspaceAuth, workspaceAuthStorage } from "../cloud-auth.js";
+import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import { ScheduleService } from "./service.js";
 import { FileBackedScheduleStore } from "./store.js";
-import type { StoredSchedule, ScheduleExecutionResult } from "./types.js";
+import type { ScheduleExecutionResult, StoredSchedule } from "@getpaseo/protocol/schedule/types";
 
 function makeStore(paseoHome: string): FileBackedScheduleStore {
   return new FileBackedScheduleStore(join(paseoHome, "schedules"));
@@ -18,6 +34,22 @@ function makeStore(paseoHome: string): FileBackedScheduleStore {
 interface ScheduleServiceInternals {
   executeSchedule(schedule: StoredSchedule): Promise<ScheduleExecutionResult>;
 }
+
+const SCHEDULE_TEST_CAPABILITIES: AgentCapabilityFlags = {
+  supportsStreaming: true,
+  supportsSessionPersistence: true,
+  supportsDynamicModes: true,
+  supportsMcpServers: false,
+  supportsReasoningStream: false,
+  supportsToolInvocations: true,
+};
+
+const NO_UNATTENDED_SCHEDULE_POLICY: Pick<ProviderSnapshotManager, "resolveCreateConfig"> = {
+  async resolveCreateConfig(input) {
+    expect(input).toMatchObject({ parent: null, unattended: true, requestedMode: undefined });
+    return { modeId: undefined, featureValues: input.featureValues };
+  },
+};
 
 describe("ScheduleService", () => {
   let tempDir: string;
@@ -45,6 +77,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async (schedule) => ({
         agentId: "00000000-0000-0000-0000-000000000001",
@@ -83,6 +116,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({
         agentId: null,
@@ -118,6 +152,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({
         agentId: null,
@@ -157,6 +192,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: manager,
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
     });
 
@@ -185,6 +221,389 @@ describe("ScheduleService", () => {
     );
   });
 
+  test("titles scheduled new agents from the schedule prompt", async () => {
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: createTestAgentClients(),
+      registry: agentStorage,
+    });
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+
+    const created = await service.create({
+      prompt: "Audit flaky checkout flow\n\nReport only blockers.",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          approvalPolicy: "never",
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    const inspected = await service.inspect(created.id);
+    const agentId = inspected.runs[0]?.agentId;
+    expect(agentId).toMatch(/^[0-9a-f-]{36}$/);
+    const storedAgent = await agentStorage.get(agentId!);
+    expect(storedAgent?.title).toBe("Audit flaky checkout flow");
+  });
+
+  test("shows scheduled new-agent prompts as normal user turns", async () => {
+    class PromptEchoScheduleSession implements AgentSession {
+      readonly provider = "claude";
+      readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
+      readonly id = "scheduled-prompt-echo-session";
+      private turnCount = 0;
+      private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
+
+      async run(_prompt: AgentPromptInput, _options?: AgentRunOptions): Promise<AgentRunResult> {
+        return {
+          sessionId: this.id,
+          finalText: "done",
+          timeline: [{ type: "assistant_message", text: "done" }],
+        };
+      }
+
+      async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+        const turnId = `turn-${++this.turnCount}`;
+        const textPrompt = typeof prompt === "string" ? prompt : JSON.stringify(prompt);
+        setImmediate(() => {
+          this.emit({ type: "turn_started", provider: this.provider, turnId });
+          this.emit({
+            type: "timeline",
+            provider: this.provider,
+            turnId,
+            item: { type: "user_message", text: textPrompt },
+          });
+          this.emit({
+            type: "timeline",
+            provider: this.provider,
+            turnId,
+            item: { type: "assistant_message", text: "done" },
+          });
+          this.emit({
+            type: "turn_completed",
+            provider: this.provider,
+            turnId,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        });
+        return { turnId };
+      }
+
+      subscribe(callback: (event: AgentStreamEvent) => void): () => void {
+        this.subscribers.add(callback);
+        return () => {
+          this.subscribers.delete(callback);
+        };
+      }
+
+      async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+
+      async getRuntimeInfo() {
+        return {
+          provider: this.provider,
+          sessionId: this.id,
+          model: null,
+          modeId: null,
+        };
+      }
+
+      async getAvailableModes(): Promise<AgentMode[]> {
+        return [];
+      }
+
+      async getCurrentMode(): Promise<string | null> {
+        return null;
+      }
+
+      async setMode(_modeId: string): Promise<void> {}
+
+      getPendingPermissions(): AgentPermissionRequest[] {
+        return [];
+      }
+
+      async respondToPermission(
+        _requestId: string,
+        _response: AgentPermissionResponse,
+      ): Promise<void> {}
+
+      describePersistence(): AgentPersistenceHandle {
+        return {
+          provider: this.provider,
+          sessionId: this.id,
+        };
+      }
+
+      async interrupt(): Promise<void> {}
+
+      async close(): Promise<void> {}
+
+      private emit(event: AgentStreamEvent): void {
+        for (const subscriber of this.subscribers) {
+          subscriber(event);
+        }
+      }
+    }
+
+    class PromptEchoScheduleClient implements AgentClient {
+      readonly provider = "claude";
+      readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
+
+      async createSession(_config: AgentSessionConfig): Promise<AgentSession> {
+        return new PromptEchoScheduleSession();
+      }
+
+      async resumeSession(_handle: AgentPersistenceHandle): Promise<AgentSession> {
+        return new PromptEchoScheduleSession();
+      }
+
+      async fetchCatalog(): Promise<{ models: AgentModelDefinition[]; modes: AgentMode[] }> {
+        return { models: [], modes: [] };
+      }
+
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+    }
+
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: { claude: new PromptEchoScheduleClient() },
+      registry: agentStorage,
+    });
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    const observedUserMessages: string[] = [];
+    const unsubscribe = manager.subscribe((event) => {
+      if (event.type !== "agent_stream" || event.event.type !== "timeline") {
+        return;
+      }
+      if (event.event.item.type === "user_message") {
+        observedUserMessages.push(event.event.item.text);
+      }
+    });
+
+    const created = await service.create({
+      prompt: "Audit nightly run",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          approvalPolicy: "never",
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    try {
+      await service.tick();
+    } finally {
+      unsubscribe();
+    }
+
+    expect(observedUserMessages).toEqual(["Audit nightly run"]);
+    expect((await service.inspect(created.id)).runs[0]?.status).toBe("succeeded");
+  });
+
+  test("archives new-agent schedule sessions after the run finishes", async () => {
+    class CountingScheduleSession implements AgentSession {
+      readonly provider = "claude";
+      readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
+      readonly id: string;
+      closed = false;
+      private turnCount = 0;
+      private readonly subscribers = new Set<(event: AgentStreamEvent) => void>();
+
+      constructor(private readonly config: AgentSessionConfig) {
+        this.id = "scheduled-session-1";
+      }
+
+      async run(_prompt: AgentPromptInput, _options?: AgentRunOptions): Promise<AgentRunResult> {
+        return {
+          sessionId: this.id,
+          finalText: "done",
+          timeline: [{ type: "assistant_message", text: "done" }],
+        };
+      }
+
+      async startTurn(
+        _prompt: AgentPromptInput,
+        _options?: AgentRunOptions,
+      ): Promise<{ turnId: string }> {
+        const turnId = `turn-${++this.turnCount}`;
+        setImmediate(() => {
+          this.emit({ type: "turn_started", provider: this.provider, turnId });
+          this.emit({
+            type: "timeline",
+            provider: this.provider,
+            turnId,
+            item: { type: "assistant_message", text: "done" },
+          });
+          this.emit({
+            type: "turn_completed",
+            provider: this.provider,
+            turnId,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          });
+        });
+        return { turnId };
+      }
+
+      subscribe(callback: (event: AgentStreamEvent) => void): () => void {
+        this.subscribers.add(callback);
+        return () => {
+          this.subscribers.delete(callback);
+        };
+      }
+
+      async *streamHistory(): AsyncGenerator<AgentStreamEvent> {}
+
+      async getRuntimeInfo() {
+        return {
+          provider: this.provider,
+          sessionId: this.id,
+          model: this.config.model ?? null,
+          modeId: this.config.modeId ?? null,
+        };
+      }
+
+      async getAvailableModes(): Promise<AgentMode[]> {
+        return [];
+      }
+
+      async getCurrentMode(): Promise<string | null> {
+        return this.config.modeId ?? null;
+      }
+
+      async setMode(modeId: string): Promise<void> {
+        this.config.modeId = modeId;
+      }
+
+      getPendingPermissions(): AgentPermissionRequest[] {
+        return [];
+      }
+
+      async respondToPermission(
+        _requestId: string,
+        _response: AgentPermissionResponse,
+      ): Promise<void> {}
+
+      describePersistence(): AgentPersistenceHandle {
+        return {
+          provider: this.provider,
+          sessionId: this.id,
+          metadata: { ...this.config },
+        };
+      }
+
+      async interrupt(): Promise<void> {}
+
+      async close(): Promise<void> {
+        this.closed = true;
+      }
+
+      private emit(event: AgentStreamEvent): void {
+        for (const subscriber of this.subscribers) {
+          subscriber(event);
+        }
+      }
+    }
+
+    class CountingScheduleClient implements AgentClient {
+      readonly provider = "claude";
+      readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
+      readonly sessions: CountingScheduleSession[] = [];
+
+      async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        const session = new CountingScheduleSession(config);
+        this.sessions.push(session);
+        return session;
+      }
+
+      async resumeSession(handle: AgentPersistenceHandle): Promise<AgentSession> {
+        const metadata = handle.metadata as Partial<AgentSessionConfig> | undefined;
+        const session = new CountingScheduleSession({
+          ...metadata,
+          provider: this.provider,
+          cwd: metadata?.cwd ?? tempDir,
+        });
+        this.sessions.push(session);
+        return session;
+      }
+
+      async fetchCatalog(): Promise<{ models: AgentModelDefinition[]; modes: AgentMode[] }> {
+        return { models: [], modes: [] };
+      }
+
+      async isAvailable(): Promise<boolean> {
+        return true;
+      }
+    }
+
+    const client = new CountingScheduleClient();
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: { claude: client },
+      registry: agentStorage,
+    });
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+
+    const created = await service.create({
+      prompt: "finish and stop",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          approvalPolicy: "never",
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    const inspected = await service.inspect(created.id);
+    const agentId = inspected.runs[0]?.agentId;
+    expect(agentId).toBeTruthy();
+    expect(client.sessions).toHaveLength(1);
+    expect(client.sessions[0]?.closed).toBe(true);
+    expect(manager.getAgent(agentId!)).toBeNull();
+    const storedAgent = await agentStorage.get(agentId!);
+    expect(storedAgent?.archivedAt).toBeTruthy();
+  });
+
   test("defaults new-agent modeId to provider's unattended mode", async () => {
     const manager = new AgentManager({
       logger: createTestLogger(),
@@ -196,6 +615,12 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: manager,
       agentStorage,
+      providerSnapshotManager: {
+        async resolveCreateConfig(input) {
+          expect(input).toMatchObject({ parent: null, unattended: true, requestedMode: undefined });
+          return { modeId: "bypassPermissions", featureValues: input.featureValues };
+        },
+      },
       now: () => now,
     });
 
@@ -219,8 +644,73 @@ describe("ScheduleService", () => {
     const inspected = await service.inspect(created.id);
     const agentId = inspected.runs[0]?.agentId;
     expect(agentId).toBeTruthy();
-    const agent = manager.getAgent(agentId!);
-    expect(agent?.currentModeId).toBe("bypassPermissions");
+    const agent = await agentStorage.get(agentId!);
+    expect(agent?.lastModeId).toBe("bypassPermissions");
+    expect(agent?.archivedAt).toBeTruthy();
+  });
+
+  test("defaults OpenCode new-agent schedules to build plus auto accept", async () => {
+    const createdConfigs: AgentSessionConfig[] = [];
+    const clients = createTestAgentClients();
+    const opencodeClient = clients.opencode;
+    if (!opencodeClient) {
+      throw new Error("Expected OpenCode test client");
+    }
+    clients.opencode = {
+      provider: opencodeClient.provider,
+      capabilities: opencodeClient.capabilities,
+      createSession: async (...args) => {
+        createdConfigs.push(args[0]);
+        return opencodeClient.createSession(...args);
+      },
+      resumeSession: (...args) => opencodeClient.resumeSession(...args),
+      fetchCatalog: (...args) => opencodeClient.fetchCatalog(...args),
+      isAvailable: () => opencodeClient.isAvailable(),
+    } satisfies AgentClient;
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients,
+      registry: agentStorage,
+    });
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: {
+        async resolveCreateConfig(input) {
+          expect(input).toMatchObject({ parent: null, unattended: true, requestedMode: undefined });
+          return {
+            modeId: "build",
+            featureValues: { ...input.featureValues, auto_accept: true },
+          };
+        },
+      },
+      now: () => now,
+    });
+
+    const created = await service.create({
+      prompt: "Respond with exactly hello",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "opencode",
+          cwd: tempDir,
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    const inspected = await service.inspect(created.id);
+    expect(inspected.runs[0]?.error).toBeNull();
+    expect(createdConfigs[0]).toMatchObject({
+      modeId: "build",
+      featureValues: { auto_accept: true },
+    });
   });
 
   test("advances stale nextRunAt on daemon restart", async () => {
@@ -229,6 +719,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -253,6 +744,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -278,6 +770,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => {
         releaseRun?.();
@@ -326,6 +819,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: manager,
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
     });
 
@@ -383,6 +877,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -405,6 +900,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -428,6 +924,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -450,6 +947,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -473,6 +971,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async (schedule) => ({
         agentId: "00000000-0000-0000-0000-000000000099",
@@ -508,6 +1007,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -560,6 +1060,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -592,6 +1093,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ran" }),
     });
@@ -623,6 +1125,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -648,6 +1151,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -672,6 +1176,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -755,6 +1260,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -785,6 +1291,7 @@ describe("ScheduleService", () => {
       logger: createTestLogger(),
       agentManager: new AgentManager({ logger: createTestLogger() }),
       agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
       now: () => now,
       runner: async () => ({ agentId: null, output: "ok" }),
     });
@@ -826,6 +1333,7 @@ describe("ScheduleService", () => {
         logger: createTestLogger(),
         agentManager: manager,
         agentStorage,
+        providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
         now: () => now,
       });
     }
@@ -923,4 +1431,46 @@ describe("ScheduleService", () => {
       expect(seen).toMatchObject({ workspaceId: "ws_x", accountId: "acc_x" });
     });
   }
+
+  test("deleteForAgent removes only schedules targeting that agent", async () => {
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: new AgentManager({ logger: createTestLogger() }),
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "ok" }),
+    });
+
+    const targetAgentId = "11111111-1111-4111-8111-111111111111";
+    const otherAgentId = "22222222-2222-4222-8222-222222222222";
+
+    const targeted = await service.create({
+      prompt: "ping the doomed agent",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: targetAgentId },
+    });
+    const otherTargeted = await service.create({
+      prompt: "ping the other agent",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: otherAgentId },
+    });
+    const newAgentSchedule = await service.create({
+      prompt: "spawn a fresh agent",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: { provider: "claude", cwd: tempDir },
+      },
+    });
+
+    const deleted = await service.deleteForAgent(targetAgentId);
+    expect(deleted).toBe(1);
+
+    const remaining = await service.list();
+    const remainingIds = remaining.map((schedule) => schedule.id).sort();
+    expect(remainingIds).toEqual([otherTargeted.id, newAgentSchedule.id].sort());
+    expect(remainingIds).not.toContain(targeted.id);
+  });
 });

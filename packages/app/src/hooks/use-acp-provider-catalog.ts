@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import type { MutableDaemonConfigPatch } from "@server/shared/messages";
+import type { MutableDaemonConfigPatch } from "@getpaseo/protocol/messages";
 import { ACP_PROVIDER_CATALOG, type AcpProviderCatalogEntry } from "@/data/acp-provider-catalog";
 
 export type AcpProviderCatalogItem = AcpProviderCatalogEntry;
@@ -19,6 +19,7 @@ export function buildAcpProviderConfigPatch(
         description: entry.description,
         command: [...entry.command],
         env: entry.env ? { ...entry.env } : {},
+        ...(entry.params ? { params: { ...entry.params } } : {}),
       },
     },
   };

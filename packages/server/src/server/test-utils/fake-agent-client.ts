@@ -6,6 +6,7 @@ import path from "node:path";
 import type {
   AgentCapabilityFlags,
   AgentClient,
+  AgentFeature,
   AgentLaunchContext,
   AgentMode,
   AgentModelDefinition,
@@ -18,10 +19,10 @@ import type {
   AgentStreamEvent,
   AgentSlashCommand,
   AgentUsage,
-  ListModelsOptions,
+  FetchCatalogOptions,
 } from "../agent/agent-sdk-types.js";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
-import { isLikelyExternalToolName } from "../agent/tool-name-normalization.js";
+import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
 
 const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
@@ -30,7 +31,12 @@ const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsMcpServers: false,
   supportsReasoningStream: true,
   supportsToolInvocations: true,
+  supportsRewindConversation: false,
+  supportsRewindFiles: false,
+  supportsRewindBoth: false,
 };
+
+const TEST_FEATURE_ID = "test_feature";
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -323,6 +329,18 @@ class FakeAgentSession implements AgentSession {
 
   get provider() {
     return this.providerName;
+  }
+
+  get features(): AgentFeature[] {
+    return [
+      {
+        type: "toggle",
+        id: TEST_FEATURE_ID,
+        label: "Test feature",
+        description: "Deterministic provider feature used by MCP integration tests.",
+        value: this.config.featureValues?.[TEST_FEATURE_ID] === true,
+      },
+    ];
   }
 
   private async appendHistoryEvent(event: AgentStreamEvent): Promise<void> {
@@ -688,6 +706,17 @@ class FakeAgentSession implements AgentSession {
       await this.appendHistoryEvent(turnStarted);
       this.notifySubscribers(turnStarted);
 
+      if (textPrompt.toLowerCase().includes("emit a turn failure")) {
+        const failed: AgentStreamEvent = {
+          type: "turn_failed",
+          provider: this.providerName,
+          error: "Requested fake provider failure",
+        };
+        await this.appendHistoryEvent(failed);
+        this.notifySubscribers(failed);
+        return;
+      }
+
       const stress = parseAgentStreamStressPrompt(textPrompt);
       if (stress !== null) {
         await this.emitStressTurn(stress);
@@ -784,6 +813,13 @@ class FakeAgentSession implements AgentSession {
 
   async setMode(modeId: string): Promise<void> {
     this.config.modeId = modeId;
+  }
+
+  async setFeature(featureId: string, value: unknown): Promise<void> {
+    this.config.featureValues = {
+      ...this.config.featureValues,
+      [featureId]: value,
+    };
   }
 
   getPendingPermissions(): AgentPermissionRequest[] {
@@ -1149,24 +1185,35 @@ class FakeAgentClient implements AgentClient {
     );
   }
 
-  async listModels(_options: ListModelsOptions): Promise<AgentModelDefinition[]> {
+  async fetchCatalog(
+    _options: FetchCatalogOptions,
+  ): Promise<{ models: AgentModelDefinition[]; modes: AgentMode[] }> {
     if (this.provider === "claude") {
-      return [
-        { provider: this.provider, id: "haiku", label: "Haiku", isDefault: true },
-        { provider: this.provider, id: "sonnet", label: "Sonnet", isDefault: false },
-      ];
+      return {
+        models: [
+          { provider: this.provider, id: "haiku", label: "Haiku", isDefault: true },
+          { provider: this.provider, id: "sonnet", label: "Sonnet", isDefault: false },
+        ],
+        modes: [],
+      };
     }
     if (this.provider === "codex") {
-      return [
-        {
-          provider: this.provider,
-          id: "gpt-5.4-mini",
-          label: "gpt-5.4-mini",
-          isDefault: true,
-        },
-      ];
+      return {
+        models: [
+          {
+            provider: this.provider,
+            id: "gpt-5.4-mini",
+            label: "gpt-5.4-mini",
+            isDefault: true,
+          },
+        ],
+        modes: [],
+      };
     }
-    return [{ provider: this.provider, id: "test-model", label: "Test Model", isDefault: true }];
+    return {
+      models: [{ provider: this.provider, id: "test-model", label: "Test Model", isDefault: true }],
+      modes: [],
+    };
   }
 
   async isAvailable(): Promise<boolean> {

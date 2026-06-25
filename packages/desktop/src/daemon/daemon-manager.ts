@@ -15,6 +15,7 @@ import {
 import {
   checkForAppUpdate,
   downloadAndInstallUpdate,
+  type AppUpdateCheckIntent,
   type AppReleaseChannel,
 } from "../features/auto-updater.js";
 import { getCliInstallStatus, installCli } from "../integrations/cli-install/index.js";
@@ -79,6 +80,12 @@ function parseReleaseChannel(
     return "stable";
   }
   return undefined;
+}
+
+function parseAppUpdateCheckIntent(
+  args: Record<string, unknown> | undefined,
+): AppUpdateCheckIntent {
+  return args?.intent === "manual" ? "manual" : "automatic";
 }
 
 // ---------------------------------------------------------------------------
@@ -197,17 +204,29 @@ export async function resolveDesktopDaemonStatus(): Promise<DesktopDaemonStatus>
       unknown
     >;
     const localDaemon = typeof payload.localDaemon === "string" ? payload.localDaemon : "stopped";
-    const running = localDaemon === "running";
+    const connectedDaemon =
+      typeof payload.connectedDaemon === "string" ? payload.connectedDaemon : "not_probed";
+    const hasRunningLocalProcess = localDaemon === "running";
+    const hasLocalProcess = hasRunningLocalProcess || localDaemon === "unresponsive";
+    const desktopManaged = payload.desktopManaged === true;
+    const apiReachable = connectedDaemon === "reachable";
+    let status: DesktopDaemonState = "stopped";
+    if (apiReachable || hasRunningLocalProcess) {
+      status = "running";
+    } else if (localDaemon === "unresponsive") {
+      status = "errored";
+    }
 
     return {
       serverId: typeof payload.serverId === "string" ? payload.serverId : "",
-      status: running ? "running" : "stopped",
+      status,
       listen: typeof payload.listen === "string" ? payload.listen : null,
-      hostname: running && typeof payload.hostname === "string" ? payload.hostname : null,
-      pid: running && typeof payload.pid === "number" ? payload.pid : null,
+      hostname:
+        status === "running" && typeof payload.hostname === "string" ? payload.hostname : null,
+      pid: hasLocalProcess && typeof payload.pid === "number" ? payload.pid : null,
       home,
       version: typeof payload.daemonVersion === "string" ? payload.daemonVersion : null,
-      desktopManaged: payload.desktopManaged === true,
+      desktopManaged,
       error: null,
     };
   } catch (error) {
@@ -246,17 +265,15 @@ function assertBuiltInDaemonManagementEnabled(settings: DesktopSettings): void {
   }
 }
 
-function buildStartupFailureError(
-  result: { code: number | null; signal: string | null; error?: Error },
-  stdout: string,
-  stderr: string,
-): Error {
+function buildStartupFailureError(result: {
+  code: number | null;
+  signal: string | null;
+  error?: Error;
+}): Error {
   const reason = result.error
     ? result.error.message
     : `exit code ${result.code ?? "unknown"}${result.signal ? ` (${result.signal})` : ""}`;
   const parts = [`Daemon failed to start: ${reason}`];
-  if (stderr.trim()) parts.push(`stderr:\n${stderr.trim()}`);
-  if (stdout.trim()) parts.push(`stdout:\n${stdout.trim()}`);
   const logs = tailFile(logFilePath(), 15);
   if (logs) parts.push(`Recent logs (${logFilePath()}):\n${logs}`);
   return new Error(parts.join("\n\n"));
@@ -334,16 +351,7 @@ async function startDaemon(): Promise<DesktopDaemonStatus> {
     envMode: "internal",
     env: invocation.env,
     envOverlay: { PASEO_DESKTOP_MANAGED: "1" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  let stdout = "";
-  let stderr = "";
-  child.stdout!.on("data", (data: Buffer) => {
-    stdout += data.toString();
-  });
-  child.stderr!.on("data", (data: Buffer) => {
-    stderr += data.toString();
+    stdio: ["ignore", "ignore", "ignore"],
   });
 
   logDesktopDaemonLifecycle("detached spawn returned", {
@@ -381,8 +389,6 @@ async function startDaemon(): Promise<DesktopDaemonStatus> {
   logDesktopDaemonLifecycle("detached startup grace period completed", {
     childPid: child.pid ?? null,
     exitedEarly: result.exitedEarly,
-    stdout: stdout.slice(0, 2000),
-    stderr: stderr.slice(0, 2000),
     ...(result.exitedEarly
       ? {
           exitCode: result.code,
@@ -393,7 +399,7 @@ async function startDaemon(): Promise<DesktopDaemonStatus> {
   });
 
   if (result.exitedEarly) {
-    throw buildStartupFailureError(result, stdout, stderr);
+    throw buildStartupFailureError(result);
   }
 
   return pollForRunningDaemon();
@@ -401,7 +407,7 @@ async function startDaemon(): Promise<DesktopDaemonStatus> {
 
 export async function stopDesktopDaemon(): Promise<DesktopDaemonStatus> {
   const status = await resolveDesktopDaemonStatus();
-  if (status.status !== "running" || !status.pid) return status;
+  if (status.status !== "running") return status;
 
   await stopDesktopDaemonViaCli();
   return await resolveDesktopDaemonStatus();
@@ -518,6 +524,7 @@ export function createDaemonCommandHandlers(): Record<string, DesktopCommandHand
       return checkForAppUpdate({
         currentVersion,
         releaseChannel: await resolveRequestedReleaseChannel(args),
+        intent: parseAppUpdateCheckIntent(args),
       });
     },
     install_app_update: async (args) => {

@@ -1,8 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import { ScrollView, Switch, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import type { ScheduleSummary } from "@server/server/schedule/types";
-import type { WebhookTrigger } from "@server/server/trigger/types";
+import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 import { Button } from "@/components/ui/button";
 import {
   AutomationTextInput,

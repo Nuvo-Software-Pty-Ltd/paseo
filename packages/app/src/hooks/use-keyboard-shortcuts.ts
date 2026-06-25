@@ -3,12 +3,13 @@ import { usePathname, useRouter } from "expo-router";
 import { getIsElectronRuntime } from "@/constants/layout";
 import { useKeyboardShortcutsStore } from "@/stores/keyboard-shortcuts-store";
 import { setCommandCenterFocusRestoreElement } from "@/utils/command-center-focus-restore";
-import { navigateToWorkspace } from "@/hooks/use-workspace-navigation";
+import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { keyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher";
 import {
   type ChordState,
   resolveKeyboardShortcut,
   buildEffectiveBindings,
+  getWorkspaceIndexJumpModifierKey,
 } from "@/keyboard/keyboard-shortcuts";
 import { resolveKeyboardFocusScope } from "@/keyboard/focus-scope";
 import {
@@ -24,6 +25,7 @@ import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { useActiveServerId } from "@/hooks/use-active-server-id";
 import {
+  type ActiveWorkspaceSelection,
   navigateToLastWorkspace,
   useActiveWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
@@ -56,6 +58,13 @@ export function useKeyboardShortcuts({
   const activeServerId = useActiveServerId();
   const openProjectPickerAction = useOpenProjectPicker(activeServerId);
   const activeWorkspaceSelection = useActiveWorkspaceSelection();
+  const keyboardWorkspaceSelectionRef = useRef<ActiveWorkspaceSelection | null>(null);
+
+  useEffect(() => {
+    if (activeWorkspaceSelection) {
+      keyboardWorkspaceSelectionRef.current = activeWorkspaceSelection;
+    }
+  }, [activeWorkspaceSelection]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -64,6 +73,20 @@ export function useKeyboardShortcuts({
 
     const isDesktopApp = getIsElectronRuntime();
     const isMac = getShortcutOs() === "mac";
+
+    // Only the modifier that actually performs the workspace-index jump on this
+    // runtime should reveal the sidebar number badges (Alt on web, Cmd on
+    // desktop Mac, Ctrl on desktop non-Mac). The store ORs altDown/cmdOrCtrlDown
+    // to drive badge visibility, so we set the flag matching this runtime.
+    const badgeModifierKey = getWorkspaceIndexJumpModifierKey({ isMac, isDesktop: isDesktopApp });
+    const setBadgeModifierDown = (down: boolean) => {
+      const state = useKeyboardShortcutsStore.getState();
+      if (isDesktopApp) {
+        state.setCmdOrCtrlDown(down);
+      } else {
+        state.setAltDown(down);
+      }
+    };
 
     const shouldHandle = () => {
       if (typeof document === "undefined") return false;
@@ -95,6 +118,10 @@ export function useKeyboardShortcuts({
         case "dispatch":
           return keyboardActionDispatcher.dispatch(action.action);
         case "navigate-workspace":
+          keyboardWorkspaceSelectionRef.current = {
+            serverId: action.serverId,
+            workspaceId: action.workspaceId,
+          };
           navigateToWorkspace(action.serverId, action.workspaceId, { currentPathname: pathname });
           return true;
         case "navigate-last-workspace":
@@ -144,11 +171,8 @@ export function useKeyboardShortcuts({
       }
 
       const key = event.key ?? "";
-      if (key === "Alt" && !event.shiftKey) {
-        useKeyboardShortcutsStore.getState().setAltDown(true);
-      }
-      if (isDesktopApp && (key === "Meta" || key === "Control") && !event.shiftKey) {
-        useKeyboardShortcutsStore.getState().setCmdOrCtrlDown(true);
+      if (key === badgeModifierKey && !event.shiftKey) {
+        setBadgeModifierDown(true);
       }
       if (key === "Shift") {
         const state = useKeyboardShortcutsStore.getState();
@@ -197,7 +221,8 @@ export function useKeyboardShortcuts({
           pathname,
           isMobile,
           sidebarShortcutTargets: store.sidebarShortcutWorkspaceTargets,
-          navigationActiveWorkspace: activeWorkspaceSelection,
+          navigationActiveWorkspace:
+            keyboardWorkspaceSelectionRef.current ?? activeWorkspaceSelection,
           commandCenterOpen: store.commandCenterOpen,
           shortcutsDialogOpen: store.shortcutsDialogOpen,
         },
@@ -218,11 +243,8 @@ export function useKeyboardShortcuts({
 
     const handleKeyUp = (event: KeyboardEvent) => {
       const key = event.key ?? "";
-      if (key === "Alt") {
-        useKeyboardShortcutsStore.getState().setAltDown(false);
-      }
-      if (isDesktopApp && (key === "Meta" || key === "Control")) {
-        useKeyboardShortcutsStore.getState().setCmdOrCtrlDown(false);
+      if (key === badgeModifierKey) {
+        setBadgeModifierDown(false);
       }
     };
 

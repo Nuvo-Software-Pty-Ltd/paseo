@@ -4,6 +4,7 @@ import type {
   CreateTerminalRequest,
   KillTerminalRequest,
   ListTerminalsRequest,
+  RenameTerminalRequest,
   SessionInboundMessage,
   SessionOutboundMessage,
   SubscribeTerminalRequest,
@@ -12,17 +13,28 @@ import type {
   UnsubscribeTerminalRequest,
   UnsubscribeTerminalsRequest,
 } from "../server/messages.js";
-import { killTerminalsUnderPath as killWorktreeTerminalsUnderPath } from "../server/paseo-worktree-archive-service.js";
+import { killTerminalsForWorkspace as killWorkspaceTerminals } from "../server/workspace-archive-service.js";
 import {
   TerminalStreamOpcode,
   decodeTerminalResizePayload,
-  encodeTerminalSnapshotPayload,
   encodeTerminalStreamFrame,
   type TerminalStreamFrame,
-} from "../shared/binary-frames/index.js";
+} from "@getpaseo/protocol/binary-frames/index";
 import { TerminalOutputCoalescer } from "./terminal-output-coalescer.js";
+import {
+  MAX_CLIENT_BUFFERED_BYTES,
+  MAX_TERMINAL_OUTPUT_FRAME_BYTES,
+  encodeLegacyTerminalSnapshotFrame,
+  encodeTerminalRestoreFrame,
+  resolveRestoreAfterOutputOverflow,
+  resolveTerminalRestoreSnapshotOptions,
+  resolveTerminalSubscriptionSnapshotMode,
+  type TerminalRestoreOptions,
+} from "./terminal-restore.js";
 import type { TerminalSession } from "./terminal.js";
 import type { TerminalManager, TerminalsChangedEvent } from "./terminal-manager.js";
+import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
+import { terminalSubscriptionKey } from "@getpaseo/protocol/terminal-subscription-key";
 
 const MAX_TERMINAL_STREAM_SLOTS = 256;
 
@@ -37,8 +49,16 @@ interface ActiveTerminalStream {
   unsubscribe: () => void;
   needsSnapshot: boolean;
   snapshotInFlight: boolean;
+  readyRevision?: number;
+  restore?: TerminalRestoreOptions;
   bufferedOutputs: BufferedTerminalOutput[];
+  outputBytesSinceSnapshot: number;
   outputCoalescer: TerminalOutputCoalescer;
+}
+
+interface SnapshotSendResult {
+  shouldContinue: boolean;
+  replayRevision?: number;
 }
 
 export interface TerminalSessionControllerOptions {
@@ -55,6 +75,25 @@ export interface TerminalSessionControllerOptions {
   // backs the agent injection site, so a terminal and an agent in the same
   // project see byte-identical scoped env. Omitted → no scoped env (legacy).
   resolveScopedEnv?: (cwd: string) => Promise<Record<string, string>>;
+  listTerminalWorkspaceRefs?: () => Promise<readonly TerminalWorkspaceRef[]>;
+  listTerminalWorkspaceRoots?: () => Promise<readonly string[]>;
+  // Whether the connected client can reflow restored snapshots. When true the
+  // daemon attaches per-row soft-wrap flags to snapshots; otherwise it omits them
+  // so old (strict-schema) clients still parse the snapshot.
+  clientSupportsWrapReflow?: () => boolean;
+  // Current max bytes queued on the client's transport(s) but not yet sent.
+  // Drives the snapshot catch-up fallback: a keeping-up client reports ~0 and
+  // keeps streaming; a backed-up client trips the snapshot path. Defaults to a
+  // constant 0 (no backpressure signal) so callers without a transport always
+  // stream.
+  // Bytes queued on the client transport but not yet sent, or null when the
+  // transport exposes no backpressure signal (e.g. the multiplexed relay socket).
+  getClientBufferedAmount?: () => number | null;
+}
+
+interface TerminalWorkspaceRef {
+  workspaceId: string;
+  cwd: string;
 }
 
 export interface TerminalSessionControllerMetrics {
@@ -71,7 +110,8 @@ type TerminalDispatchableMessage =
   | UnsubscribeTerminalRequest
   | TerminalInput
   | KillTerminalRequest
-  | CaptureTerminalRequest;
+  | CaptureTerminalRequest
+  | RenameTerminalRequest;
 
 const TERMINAL_MESSAGE_TYPES: ReadonlySet<TerminalDispatchableMessage["type"]> = new Set([
   "subscribe_terminals_request",
@@ -83,6 +123,7 @@ const TERMINAL_MESSAGE_TYPES: ReadonlySet<TerminalDispatchableMessage["type"]> =
   "terminal_input",
   "kill_terminal_request",
   "capture_terminal_request",
+  "terminal.rename.request",
 ]);
 
 export class TerminalSessionController {
@@ -93,8 +134,19 @@ export class TerminalSessionController {
   private readonly isPathWithinRoot: (rootPath: string, candidatePath: string) => boolean;
   private readonly sessionLogger: pino.Logger;
   private readonly resolveScopedEnv: ((cwd: string) => Promise<Record<string, string>>) | null;
+  private readonly listTerminalWorkspaceRefs: () => Promise<readonly TerminalWorkspaceRef[]>;
+  private readonly listTerminalWorkspaceRoots: () => Promise<readonly string[]>;
+  private readonly clientSupportsWrapReflow: () => boolean;
+  private readonly getClientBufferedAmount: () => number | null;
 
-  private readonly subscribedDirectories = new Set<string>();
+  // A subscription is scoped to a (cwd, workspaceId) pair, keyed by
+  // terminalSubscriptionKey: two workspaces sharing a cwd subscribe and unsub
+  // independently, and each only receives its own workspace's terminals. The
+  // workspaceId is absent for old clients, which key to the cwd alone.
+  private readonly subscribedDirectories = new Map<
+    string,
+    { cwd: string; workspaceId: string | undefined }
+  >();
   private unsubscribeTerminalsChanged: (() => void) | null = null;
   private readonly exitSubscriptions = new Map<string, () => void>();
   private readonly activeStreams = new Map<number, ActiveTerminalStream>();
@@ -109,15 +161,21 @@ export class TerminalSessionController {
     this.isPathWithinRoot = options.isPathWithinRoot;
     this.sessionLogger = options.sessionLogger;
     this.resolveScopedEnv = options.resolveScopedEnv ?? null;
+    this.listTerminalWorkspaceRefs = options.listTerminalWorkspaceRefs ?? (async () => []);
+    this.listTerminalWorkspaceRoots =
+      options.listTerminalWorkspaceRoots ??
+      (async () => (await this.listTerminalWorkspaceRefs()).map((workspace) => workspace.cwd));
+    this.clientSupportsWrapReflow = options.clientSupportsWrapReflow ?? (() => false);
+    this.getClientBufferedAmount = options.getClientBufferedAmount ?? (() => 0);
   }
 
   start(): void {
     if (!this.terminalManager) {
       return;
     }
-    this.unsubscribeTerminalsChanged = this.terminalManager.subscribeTerminalsChanged((event) =>
-      this.handleTerminalsChanged(event),
-    );
+    this.unsubscribeTerminalsChanged = this.terminalManager.subscribeTerminalsChanged((event) => {
+      void this.handleTerminalsChanged(event);
+    });
   }
 
   getMetrics(): TerminalSessionControllerMetrics {
@@ -154,6 +212,8 @@ export class TerminalSessionController {
         return this.handleKillTerminalRequest(msg);
       case "capture_terminal_request":
         return this.handleCaptureTerminalRequest(msg);
+      case "terminal.rename.request":
+        return this.handleRenameTerminalRequest(msg);
       default:
         return undefined;
     }
@@ -205,17 +265,14 @@ export class TerminalSessionController {
     return { terminalId, success: true };
   }
 
-  async killTerminalsUnderPath(rootPath: string): Promise<void> {
-    return killWorktreeTerminalsUnderPath(
+  async killTerminalsForWorkspace(workspaceId: string): Promise<void> {
+    return killWorkspaceTerminals(
       {
-        isPathWithinRoot: (pathRoot, candidatePath) =>
-          this.isPathWithinRoot(pathRoot, candidatePath),
-        killTrackedTerminal: (terminalId, options) => this.killTracked(terminalId, options),
         detachTerminalStream: (terminalId, options) => void this.detachStream(terminalId, options),
         sessionLogger: this.sessionLogger,
         terminalManager: this.terminalManager,
       },
-      rootPath,
+      workspaceId,
     );
   }
 
@@ -257,7 +314,13 @@ export class TerminalSessionController {
 
   private emitTerminalsChangedSnapshot(input: {
     cwd: string;
-    terminals: Array<{ id: string; name: string; title?: string }>;
+    terminals: Array<{
+      id: string;
+      name: string;
+      workspaceId: string;
+      title?: string;
+      activity: TerminalActivity | null;
+    }>;
   }): void {
     this.emit({
       type: "terminals_changed",
@@ -268,61 +331,78 @@ export class TerminalSessionController {
     });
   }
 
-  private toTerminalInfo(terminal: Pick<TerminalSession, "id" | "name" | "getTitle">): {
+  private toTerminalInfo(
+    terminal: Pick<TerminalSession, "id" | "name" | "workspaceId" | "getTitle" | "getActivity">,
+  ): {
     id: string;
     name: string;
+    workspaceId: string;
     title?: string;
+    activity: TerminalActivity | null;
   } {
     const title = terminal.getTitle();
+    const activity = terminal.getActivity();
     return {
       id: terminal.id,
       name: terminal.name,
+      workspaceId: terminal.workspaceId,
       ...(title ? { title } : {}),
+      activity,
     };
   }
 
-  private handleTerminalsChanged(event: TerminalsChangedEvent): void {
-    if (!this.subscribedDirectories.has(event.cwd)) {
-      return;
+  private async handleTerminalsChanged(event: TerminalsChangedEvent): Promise<void> {
+    // A terminal can live in a subdirectory of a subscribed workspace root (an
+    // agent can open one there). Deliver the change to every subscribed root at
+    // or above the terminal's cwd, keyed by that root, carrying the full
+    // aggregated list — so the client's cache replacement doesn't drop the
+    // terminals that live directly at the root.
+    const matchingSubscriptions = Array.from(this.subscribedDirectories.values()).filter(
+      (subscription) => this.isPathWithinRoot(subscription.cwd, event.cwd),
+    );
+    for (const subscription of matchingSubscriptions) {
+      await this.emitTerminalsSnapshotForSubscription(subscription);
     }
-    this.emitTerminalsChangedSnapshot({
-      cwd: event.cwd,
-      terminals: event.terminals.map((terminal) =>
-        Object.assign(
-          { id: terminal.id, name: terminal.name },
-          terminal.title ? { title: terminal.title } : {},
-        ),
-      ),
-    });
   }
 
   private handleSubscribeTerminalsRequest(msg: SubscribeTerminalsRequest): void {
-    this.subscribedDirectories.add(msg.cwd);
-    void this.emitInitialTerminalsChangedSnapshot(msg.cwd);
+    const subscription = { cwd: msg.cwd, workspaceId: msg.workspaceId };
+    this.subscribedDirectories.set(terminalSubscriptionKey(msg.cwd, msg.workspaceId), subscription);
+    void this.emitTerminalsSnapshotForSubscription(subscription);
   }
 
   private handleUnsubscribeTerminalsRequest(msg: UnsubscribeTerminalsRequest): void {
-    this.subscribedDirectories.delete(msg.cwd);
+    this.subscribedDirectories.delete(terminalSubscriptionKey(msg.cwd, msg.workspaceId));
   }
 
-  private async emitInitialTerminalsChangedSnapshot(cwd: string): Promise<void> {
-    if (!this.terminalManager || !this.subscribedDirectories.has(cwd)) {
+  private async emitTerminalsSnapshotForSubscription(subscription: {
+    cwd: string;
+    workspaceId: string | undefined;
+  }): Promise<void> {
+    const key = terminalSubscriptionKey(subscription.cwd, subscription.workspaceId);
+    if (!this.terminalManager || !this.subscribedDirectories.has(key)) {
       return;
     }
     try {
-      const terminals = await this.terminalManager.getTerminals(cwd);
+      const terminals = await this.getTerminalsForWorkspaceRoot(
+        subscription.cwd,
+        subscription.workspaceId,
+      );
       for (const terminal of terminals) {
         this.ensureExitSubscription(terminal);
       }
-      if (!this.subscribedDirectories.has(cwd)) {
+      if (!this.subscribedDirectories.has(key)) {
         return;
       }
       this.emitTerminalsChangedSnapshot({
-        cwd,
+        cwd: subscription.cwd,
         terminals: terminals.map((terminal) => this.toTerminalInfo(terminal)),
       });
     } catch (error) {
-      this.sessionLogger.warn({ err: error, cwd }, "Failed to emit initial terminal snapshot");
+      this.sessionLogger.warn(
+        { err: error, cwd: subscription.cwd },
+        "Failed to emit initial terminal snapshot",
+      );
     }
   }
 
@@ -342,7 +422,7 @@ export class TerminalSessionController {
     try {
       const terminals =
         typeof msg.cwd === "string"
-          ? await this.terminalManager.getTerminals(msg.cwd)
+          ? await this.getTerminalsForWorkspaceRoot(msg.cwd, msg.workspaceId)
           : await this.getAllTerminalSessions();
       for (const terminal of terminals) {
         this.ensureExitSubscription(terminal);
@@ -380,6 +460,59 @@ export class TerminalSessionController {
     return terminalsByDirectory.flat();
   }
 
+  private async getTerminalsForWorkspaceRoot(
+    cwd: string,
+    workspaceId?: string,
+  ): Promise<TerminalSession[]> {
+    if (!this.terminalManager) {
+      return [];
+    }
+
+    const terminals = await this.terminalManager.getTerminals(cwd, { workspaceId });
+    const workspaceRoots = await this.listTerminalWorkspaceRoots();
+    if (workspaceRoots.length === 0) {
+      return terminals;
+    }
+
+    return terminals.filter((terminal) =>
+      this.terminalBelongsToRoot(cwd, terminal.cwd, workspaceRoots),
+    );
+  }
+
+  private terminalBelongsToRoot(
+    rootCwd: string,
+    terminalCwd: string,
+    workspaceRoots: readonly string[],
+  ): boolean {
+    const ownerRoot = this.resolveTerminalOwnerRoot(terminalCwd, workspaceRoots);
+    if (!ownerRoot) {
+      return this.isPathWithinRoot(rootCwd, terminalCwd);
+    }
+    return this.isSamePath(rootCwd, ownerRoot);
+  }
+
+  private resolveTerminalOwnerRoot(
+    terminalCwd: string,
+    workspaceRoots: readonly string[],
+  ): string | null {
+    let ownerRoot: string | null = null;
+    for (const workspaceRoot of workspaceRoots) {
+      if (!this.isPathWithinRoot(workspaceRoot, terminalCwd)) {
+        continue;
+      }
+      if (!ownerRoot || workspaceRoot.length > ownerRoot.length) {
+        ownerRoot = workspaceRoot;
+      }
+    }
+    return ownerRoot;
+  }
+
+  private isSamePath(firstPath: string, secondPath: string): boolean {
+    return (
+      this.isPathWithinRoot(firstPath, secondPath) && this.isPathWithinRoot(secondPath, firstPath)
+    );
+  }
+
   private async handleCreateTerminalRequest(msg: CreateTerminalRequest): Promise<void> {
     if (!this.terminalManager) {
       this.emit({
@@ -406,6 +539,19 @@ export class TerminalSessionController {
         return;
       }
 
+      const workspaceId = msg.workspaceId ?? (await this.resolveLegacyTerminalWorkspaceId(msg.cwd));
+      if (!workspaceId) {
+        this.emit({
+          type: "create_terminal_response",
+          payload: {
+            terminal: null,
+            error: "workspaceId is required",
+            requestId: msg.requestId,
+          },
+        });
+        return;
+      }
+
       // D-3.5c — resolve scoped env (workspace + project vars) server-side
       // from the terminal's cwd and inject it. The platform overlays
       // (TERM/ZDOTDIR) in buildTerminalEnvironment are applied AFTER this,
@@ -423,6 +569,7 @@ export class TerminalSessionController {
       }
       const session = await this.terminalManager.createTerminal({
         cwd: msg.cwd,
+        workspaceId,
         name: msg.name,
         command: msg.command,
         args: msg.args,
@@ -436,7 +583,9 @@ export class TerminalSessionController {
             id: session.id,
             name: session.name,
             cwd: session.cwd,
+            workspaceId: session.workspaceId,
             ...(session.getTitle() ? { title: session.getTitle() } : {}),
+            activity: session.getActivity(),
           },
           error: null,
           requestId: msg.requestId,
@@ -453,6 +602,57 @@ export class TerminalSessionController {
         },
       });
     }
+  }
+
+  private async resolveLegacyTerminalWorkspaceId(cwd: string): Promise<string | null> {
+    const workspaceRefs = await this.listTerminalWorkspaceRefs();
+    if (workspaceRefs.length === 0) {
+      return null;
+    }
+
+    const exactMatch = workspaceRefs.find((workspace) => this.isSamePath(workspace.cwd, cwd));
+    if (exactMatch) {
+      return exactMatch.workspaceId;
+    }
+
+    const ownerRoot = this.resolveTerminalOwnerRoot(
+      cwd,
+      workspaceRefs.map((workspace) => workspace.cwd),
+    );
+    if (!ownerRoot) {
+      return null;
+    }
+
+    return (
+      workspaceRefs.find((workspace) => this.isSamePath(workspace.cwd, ownerRoot))?.workspaceId ??
+      null
+    );
+  }
+
+  private async handleRenameTerminalRequest(msg: RenameTerminalRequest): Promise<void> {
+    const respond = (success: boolean, error: string | null): void => {
+      this.emit({
+        type: "terminal.rename.response",
+        payload: { requestId: msg.requestId, success, error },
+      });
+    };
+
+    const title = msg.title.trim();
+    if (title.length === 0) {
+      respond(false, "Title is required");
+      return;
+    }
+    if (title.length > 200) {
+      respond(false, "Title is too long");
+      return;
+    }
+    if (!this.terminalManager) {
+      respond(false, "Terminal manager not available");
+      return;
+    }
+
+    const renamed = this.terminalManager.setTerminalTitle(msg.terminalId, title);
+    respond(renamed, renamed ? null : "Terminal not found");
   }
 
   private async handleSubscribeTerminalRequest(msg: SubscribeTerminalRequest): Promise<void> {
@@ -482,7 +682,21 @@ export class TerminalSessionController {
     }
     this.ensureExitSubscription(session);
 
-    const slot = this.bindActiveStream(session);
+    if (msg.restore?.size) {
+      const currentSize = session.getSize();
+      if (
+        currentSize.rows !== msg.restore.size.rows ||
+        currentSize.cols !== msg.restore.size.cols
+      ) {
+        session.send({
+          type: "resize",
+          rows: msg.restore.size.rows,
+          cols: msg.restore.size.cols,
+        });
+      }
+    }
+
+    const slot = this.bindActiveStream(session, { restore: msg.restore });
     if (slot === null) {
       this.sessionLogger.warn(
         {
@@ -622,7 +836,10 @@ export class TerminalSessionController {
     }
   }
 
-  private bindActiveStream(terminal: TerminalSession): number | null {
+  private bindActiveStream(
+    terminal: TerminalSession,
+    options?: { restore?: TerminalRestoreOptions },
+  ): number | null {
     if (!this.hasBinaryChannel()) {
       return null;
     }
@@ -632,6 +849,7 @@ export class TerminalSessionController {
       const existingStream = this.activeStreams.get(existingSlot);
       if (existingStream) {
         existingStream.needsSnapshot = true;
+        existingStream.restore = options?.restore;
         return existingSlot;
       }
       this.idToSlot.delete(terminal.id);
@@ -648,11 +866,35 @@ export class TerminalSessionController {
       unsubscribe: () => {},
       needsSnapshot: true,
       snapshotInFlight: false,
+      readyRevision: undefined,
+      restore: options?.restore,
       bufferedOutputs: [],
+      outputBytesSinceSnapshot: 0,
       outputCoalescer: new TerminalOutputCoalescer({
         timers: { setTimeout, clearTimeout },
         onFlush: ({ payload }) => {
           if (this.activeStreams.get(slot) !== activeStream) {
+            return;
+          }
+          activeStream.outputBytesSinceSnapshot += payload.byteLength;
+          // Catch up via a snapshot only when the client is BOTH far behind in
+          // produced output AND actually backed up on the wire. A client that
+          // keeps draining reports ~0 buffered, so it streams continuously even
+          // past the byte threshold. outputBytesSinceSnapshot keeps accumulating
+          // in that case — it's harmless, it only gates the snapshot decision at
+          // the instant backpressure appears, and trySendSnapshot resets it to 0.
+          // A null reading means the transport exposes no backpressure signal
+          // (e.g. the multiplexed relay socket); there we can't tell a slow client
+          // from a fast one, so fall back unconditionally at the byte threshold to
+          // keep a slow relay client from falling unboundedly behind.
+          const clientBufferedAmount = this.getClientBufferedAmount();
+          if (
+            activeStream.outputBytesSinceSnapshot > MAX_TERMINAL_OUTPUT_FRAME_BYTES &&
+            (clientBufferedAmount === null || clientBufferedAmount > MAX_CLIENT_BUFFERED_BYTES)
+          ) {
+            activeStream.restore = resolveRestoreAfterOutputOverflow(activeStream.restore);
+            activeStream.needsSnapshot = true;
+            void this.trySendSnapshot(activeStream);
             return;
           }
           this.emitBinary(
@@ -669,31 +911,35 @@ export class TerminalSessionController {
     this.activeStreams.set(slot, activeStream);
     this.idToSlot.set(terminal.id, slot);
 
-    activeStream.unsubscribe = terminal.subscribe((message) => {
-      if (this.activeStreams.get(slot) !== activeStream) {
-        return;
-      }
-      if (message.type === "snapshot") {
-        activeStream.outputCoalescer.flush();
-        activeStream.needsSnapshot = true;
-        void this.trySendSnapshot(activeStream);
-        return;
-      }
-      if (message.type === "titleChange") {
-        return;
-      }
-      if (message.data.length === 0) {
-        return;
-      }
-      if (activeStream.needsSnapshot || activeStream.snapshotInFlight) {
-        activeStream.bufferedOutputs.push({
-          data: message.data,
-          revision: message.revision,
-        });
-        return;
-      }
-      activeStream.outputCoalescer.handle(message.data);
-    });
+    activeStream.unsubscribe = terminal.subscribe(
+      (message) => {
+        if (this.activeStreams.get(slot) !== activeStream) {
+          return;
+        }
+        if (message.type === "snapshot" || message.type === "snapshotReady") {
+          activeStream.readyRevision = message.revision;
+          activeStream.outputCoalescer.flush();
+          activeStream.needsSnapshot = true;
+          void this.trySendSnapshot(activeStream);
+          return;
+        }
+        if (message.type === "titleChange") {
+          return;
+        }
+        if (message.data.length === 0) {
+          return;
+        }
+        if (activeStream.needsSnapshot || activeStream.snapshotInFlight) {
+          activeStream.bufferedOutputs.push({
+            data: message.data,
+            revision: message.revision,
+          });
+          return;
+        }
+        activeStream.outputCoalescer.handle(message.data);
+      },
+      { initialSnapshot: resolveTerminalSubscriptionSnapshotMode(options?.restore) },
+    );
     return slot;
   }
 
@@ -706,42 +952,33 @@ export class TerminalSessionController {
       return;
     }
 
-    if (!this.terminalManager?.getTerminal(activeStream.terminalId)) {
+    const terminalManager = this.terminalManager;
+    if (!terminalManager) {
       this.detachStream(activeStream.terminalId, { emitExit: true });
+      return;
+    }
+    const terminal = terminalManager.getTerminal(activeStream.terminalId);
+    if (!terminal) {
+      this.detachStream(activeStream.terminalId, { emitExit: true });
+      return;
+    }
+    if (activeStream.restore && activeStream.readyRevision === undefined) {
       return;
     }
 
     activeStream.outputCoalescer.flush();
     activeStream.snapshotInFlight = true;
     try {
-      const snapshot = await this.terminalManager.getTerminalState(activeStream.terminalId);
-      if (this.activeStreams.get(activeStream.slot) !== activeStream) {
+      const restore = activeStream.restore;
+      const snapshotResult = restore
+        ? await this.emitRestoreSnapshot(activeStream, terminalManager, restore)
+        : await this.emitLegacySnapshot(activeStream, terminalManager);
+      if (!snapshotResult.shouldContinue) {
         return;
       }
-      if (!snapshot) {
-        this.detachStream(activeStream.terminalId, { emitExit: true });
-        return;
-      }
-
-      this.emitBinary(
-        encodeTerminalStreamFrame({
-          opcode: TerminalStreamOpcode.Snapshot,
-          slot: activeStream.slot,
-          payload: encodeTerminalSnapshotPayload(snapshot.state),
-        }),
-      );
-
-      const bufferedOutputs = activeStream.bufferedOutputs.splice(
-        0,
-        activeStream.bufferedOutputs.length,
-      );
-      for (const output of bufferedOutputs) {
-        if (output.revision !== undefined && output.revision <= snapshot.revision) {
-          continue;
-        }
-        activeStream.outputCoalescer.handle(output.data);
-      }
+      this.replayTerminalOutputAfterSnapshot(activeStream, terminal, snapshotResult.replayRevision);
       activeStream.needsSnapshot = false;
+      activeStream.outputBytesSinceSnapshot = 0;
     } catch (error) {
       this.sessionLogger.warn(
         { err: error, terminalId: activeStream.terminalId },
@@ -750,6 +987,93 @@ export class TerminalSessionController {
       activeStream.needsSnapshot = true;
     } finally {
       activeStream.snapshotInFlight = false;
+    }
+  }
+
+  private async emitLegacySnapshot(
+    activeStream: ActiveTerminalStream,
+    terminalManager: TerminalManager,
+  ): Promise<SnapshotSendResult> {
+    const snapshot = await terminalManager.getTerminalState(activeStream.terminalId, {
+      includeWrapFlags: this.clientSupportsWrapReflow(),
+    });
+    if (this.activeStreams.get(activeStream.slot) !== activeStream) {
+      return { shouldContinue: false };
+    }
+    if (!snapshot) {
+      this.detachStream(activeStream.terminalId, { emitExit: true });
+      return { shouldContinue: false };
+    }
+
+    this.emitBinary(
+      encodeLegacyTerminalSnapshotFrame({
+        slot: activeStream.slot,
+        snapshot,
+      }),
+    );
+    // The snapshot frame went out-of-band; keep the replay that follows on the
+    // coalescer's trailing path so it doesn't flush back-to-back with it.
+    activeStream.outputCoalescer.markFlushed();
+    return { shouldContinue: true, replayRevision: snapshot.revision };
+  }
+
+  private async emitRestoreSnapshot(
+    activeStream: ActiveTerminalStream,
+    terminalManager: TerminalManager,
+    restore: TerminalRestoreOptions,
+  ): Promise<SnapshotSendResult> {
+    const snapshotOptions = resolveTerminalRestoreSnapshotOptions(restore);
+    if (snapshotOptions === null) {
+      return { shouldContinue: true };
+    }
+
+    const snapshot = await terminalManager.getTerminalState(activeStream.terminalId, {
+      ...snapshotOptions,
+      includeWrapFlags: this.clientSupportsWrapReflow(),
+    });
+    if (this.activeStreams.get(activeStream.slot) !== activeStream) {
+      return { shouldContinue: false };
+    }
+    if (!snapshot) {
+      this.detachStream(activeStream.terminalId, { emitExit: true });
+      return { shouldContinue: false };
+    }
+
+    this.emitBinary(
+      encodeTerminalRestoreFrame({
+        slot: activeStream.slot,
+        snapshot,
+      }),
+    );
+    // The restore frame went out-of-band; keep the replay that follows on the
+    // coalescer's trailing path so it doesn't flush back-to-back with it.
+    activeStream.outputCoalescer.markFlushed();
+    return { shouldContinue: true, replayRevision: snapshot.revision };
+  }
+
+  private replayTerminalOutputAfterSnapshot(
+    activeStream: ActiveTerminalStream,
+    terminal: TerminalSession,
+    replayRevision: number | undefined,
+  ): void {
+    const replayPreamble = terminal.getReplayPreamble();
+    if (replayPreamble.length > 0) {
+      activeStream.outputCoalescer.handle(replayPreamble);
+    }
+
+    const bufferedOutputs = activeStream.bufferedOutputs.splice(
+      0,
+      activeStream.bufferedOutputs.length,
+    );
+    for (const output of bufferedOutputs) {
+      if (
+        replayRevision !== undefined &&
+        output.revision !== undefined &&
+        output.revision <= replayRevision
+      ) {
+        continue;
+      }
+      activeStream.outputCoalescer.handle(output.data);
     }
   }
 

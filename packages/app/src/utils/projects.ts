@@ -1,4 +1,6 @@
 import type { WorkspaceDescriptor } from "@/stores/session-store";
+import { buildHostProjectList, type HostProjectListItem } from "@/projects/host-project-model";
+import { buildWorkspaceStructureProjects } from "@/projects/workspace-structure";
 
 export interface WorkspaceSummary {
   id: string;
@@ -22,6 +24,7 @@ export interface ProjectHostEntry {
 export interface ProjectSummary {
   projectKey: string;
   projectName: string;
+  projectCustomName?: string | null;
   hosts: ProjectHostEntry[];
   totalWorkspaceCount: number;
   hostCount: number;
@@ -56,7 +59,33 @@ interface HostGroup {
 interface ProjectGroup {
   projectKey: string;
   projectName: string;
+  projectCustomName: string | null;
   hostsByServerId: Map<string, HostGroup>;
+}
+
+function findProjectCustomName(
+  workspaces: WorkspaceDescriptor[],
+  projectKey: string,
+): { customName: string; displayName: string } | null {
+  for (const workspace of workspaces) {
+    if (workspace.projectId === projectKey && workspace.projectCustomName) {
+      return {
+        customName: workspace.projectCustomName,
+        displayName: workspace.projectDisplayName,
+      };
+    }
+  }
+  return null;
+}
+
+function buildHostProjectEntries(host: ProjectHost): HostProjectListItem[] {
+  return buildHostProjectList({
+    serverId: host.serverId,
+    projects: buildWorkspaceStructureProjects({
+      serverId: host.serverId,
+      workspaces: host.workspaces,
+    }),
+  });
 }
 
 function deriveGithubUrl(projectKey: string): string | undefined {
@@ -119,6 +148,7 @@ function toProjectSummary(draft: ProjectGroup): ProjectSummary {
   return {
     projectKey: draft.projectKey,
     projectName: draft.projectName,
+    projectCustomName: draft.projectCustomName,
     hosts,
     totalWorkspaceCount,
     hostCount: hosts.length,
@@ -131,29 +161,37 @@ export function buildProjects(input: BuildProjectsInput): BuildProjectsResult {
   const groups = new Map<string, ProjectGroup>();
 
   for (const host of input.hosts) {
-    for (const workspace of host.workspaces) {
-      const projectKey = workspace.projectId;
-
-      let group = groups.get(projectKey);
+    const hostProjects = buildHostProjectEntries(host);
+    for (const hostProject of hostProjects) {
+      const customName = findProjectCustomName(host.workspaces, hostProject.projectKey);
+      let group = groups.get(hostProject.projectKey);
       if (!group) {
         group = {
-          projectKey,
-          projectName: workspace.projectDisplayName,
+          projectKey: hostProject.projectKey,
+          projectName: customName?.displayName ?? hostProject.projectName,
+          projectCustomName: customName?.customName ?? null,
           hostsByServerId: new Map(),
         };
-        groups.set(projectKey, group);
+        groups.set(hostProject.projectKey, group);
+      } else if (customName && !group.projectCustomName) {
+        group.projectCustomName = customName.customName;
+        group.projectName = customName.displayName;
       }
 
-      let hostGroup = group.hostsByServerId.get(host.serverId);
-      if (!hostGroup) {
-        hostGroup = {
+      if (!group.hostsByServerId.has(host.serverId)) {
+        group.hostsByServerId.set(host.serverId, {
           serverId: host.serverId,
           serverName: host.serverName,
           isOnline: host.isOnline,
           workspaces: [],
-        };
-        group.hostsByServerId.set(host.serverId, hostGroup);
+        });
       }
+    }
+
+    for (const workspace of host.workspaces) {
+      const group = groups.get(workspace.projectId);
+      const hostGroup = group?.hostsByServerId.get(host.serverId);
+      if (!hostGroup) continue;
       hostGroup.workspaces.push(workspace);
     }
   }

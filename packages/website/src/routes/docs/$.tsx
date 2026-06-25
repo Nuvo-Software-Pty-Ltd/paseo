@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { DocsMarkdown } from "~/components/docs-markdown";
+import { DocsMarkdownActions } from "~/components/docs-markdown-actions";
 import { DocsSourceFooter } from "~/components/docs-source-footer";
 import { getDoc } from "~/docs";
 import { pageMeta } from "~/meta";
@@ -7,11 +8,10 @@ import { pageMeta } from "~/meta";
 export const Route = createFileRoute("/docs/$")({
   head: ({ params }) => {
     const slug = params._splat ?? "";
+    const path = `/docs/${slug}`;
     const doc = getDoc(slug);
-    if (!doc) return { meta: pageMeta("Not Found - Paseo Docs", "Doc not found.") };
-    return {
-      meta: pageMeta(`${doc.frontmatter.title} - Paseo Docs`, doc.frontmatter.description),
-    };
+    if (!doc) return pageMeta("Not Found - Paseo Docs", "Doc not found.", path);
+    return pageMeta(`${doc.frontmatter.title} - Paseo Docs`, doc.frontmatter.description, path);
   },
   component: DocsPage,
 });
@@ -31,6 +31,7 @@ function RenderedDoc({ slug }: { slug: string }) {
 
   return (
     <>
+      <DocsMarkdownActions content={doc.content} markdownHref={`/docs/${slug}.md`} />
       <DocsMarkdown>{doc.content}</DocsMarkdown>
       <DocsSourceFooter doc={doc} />
     </>

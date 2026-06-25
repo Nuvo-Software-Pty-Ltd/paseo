@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { LoopRecord } from "@server/server/loop-types";
+import type { LoopRecord } from "@getpaseo/protocol/loop/rpc-schemas";
 import { buildLoopFailureSummaryModel } from "./loop-failure-summary-model";
 
 // Round-19 fixture verbatim, captured at:
@@ -99,8 +99,6 @@ const ROUND_19_CAP_LOOP: LoopRecord = {
   activeIteration: null,
   activeWorkerAgentId: null,
   activeVerifierAgentId: null,
-  cloudOwnerWorkspaceId: null,
-  cloudOwnerAccountId: null,
 };
 
 describe("buildLoopFailureSummaryModel", () => {

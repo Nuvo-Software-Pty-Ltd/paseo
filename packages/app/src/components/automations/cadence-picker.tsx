@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import type { ScheduleCadence } from "@server/server/schedule/types";
+import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
 import { AutomationTextInput, automationInputStyles } from "./automation-text-input";
 import { SegmentedTabs, type SegmentedTab } from "./segmented-tabs";
 

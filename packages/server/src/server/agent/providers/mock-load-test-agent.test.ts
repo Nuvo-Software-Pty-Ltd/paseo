@@ -11,6 +11,20 @@ import {
   MockLoadTestAgentClient,
 } from "./mock-load-test-agent.js";
 
+type PermissionRequestedEvent = Extract<AgentStreamEvent, { type: "permission_requested" }>;
+
+function expectSinglePermissionRequest(events: AgentStreamEvent[]): PermissionRequestedEvent {
+  const permissions = events.filter(
+    (event): event is PermissionRequestedEvent => event.type === "permission_requested",
+  );
+  expect(permissions).toHaveLength(1);
+  const [permission] = permissions;
+  if (!permission) {
+    throw new Error("permission request missing");
+  }
+  return permission;
+}
+
 describe("MockLoadTestAgentClient", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -19,7 +33,7 @@ describe("MockLoadTestAgentClient", () => {
   test("default model is a five minute foreground stream with token-rate intervals", async () => {
     const client = new MockLoadTestAgentClient();
 
-    const models = await client.listModels({ cwd: "/tmp/mock-models", force: false });
+    const { models } = await client.fetchCatalog({ cwd: "/tmp/mock-models", force: false });
 
     expect(models[0]).toMatchObject({
       id: MOCK_LOAD_TEST_DEFAULT_MODEL_ID,
@@ -28,6 +42,35 @@ describe("MockLoadTestAgentClient", () => {
         durationMs: 300_000,
         intervalMs: 40,
       },
+    });
+  });
+
+  test("returns schema-shaped JSON for structured branch-name generation", async () => {
+    vi.useFakeTimers();
+    const client = new MockLoadTestAgentClient();
+    const session = await client.createSession({
+      provider: "mock",
+      cwd: process.cwd(),
+      model: "ten-second-stream",
+    });
+
+    const resultPromise = session.run(
+      [
+        "Generate a git branch name for a coding agent based on the user prompt and attachments.",
+        "Title: a short human-readable sentence-case label for the task (no slug rules, max 80 characters).",
+        "Branch: concise lowercase slug using letters, numbers, hyphens, and slashes only.",
+        "Return JSON only with fields 'title' and 'branch'.",
+        "",
+        "User context:",
+        "Fix login bug",
+      ].join("\n"),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    await expect(resultPromise).resolves.toMatchObject({
+      sessionId: session.id,
+      finalText: JSON.stringify({ title: "Fix login bug", branch: "fix-login-bug" }),
+      canceled: false,
     });
   });
 
@@ -129,6 +172,60 @@ describe("MockLoadTestAgentClient", () => {
       reason: "Interrupted",
     });
     expect(events).toHaveLength(eventCountAfterInterrupt);
+  });
+
+  test("emits the free-write question scenario selected by prompt", async () => {
+    vi.useFakeTimers();
+    const client = new MockLoadTestAgentClient();
+    const session = await client.createSession({
+      provider: "mock",
+      cwd: process.cwd(),
+      model: "ten-second-stream",
+    });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+
+    const resultPromise = session.run("Emit synthetic questions: two free-write questions.");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const permission = expectSinglePermissionRequest(events);
+    expect(permission.request).toMatchObject({
+      provider: "mock",
+      name: "MockQuestions",
+      kind: "question",
+      input: {
+        questions: [
+          {
+            question: "What is the GitHub private repo URL to push to?",
+            header: "repoUrl",
+            options: [],
+            multiSelect: false,
+          },
+          {
+            question: "What should the first commit message be?",
+            header: "commitMessage",
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      },
+    });
+
+    await session.respondToPermission(permission.request.id, {
+      behavior: "allow",
+      updatedInput: {
+        answers: {
+          repoUrl: "git@github.com:user/private-repo.git",
+          commitMessage: "Initialize private repo",
+        },
+      },
+    });
+    await expect(resultPromise).resolves.toMatchObject({
+      sessionId: session.id,
+      finalText: "Synthetic questions resolved",
+      canceled: false,
+    });
+    unsubscribe();
   });
 
   test("agent manager coalesces adjacent assistant tokens into fewer messages", async () => {

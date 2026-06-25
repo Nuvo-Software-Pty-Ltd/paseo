@@ -1,5 +1,8 @@
 import type { Options as ClaudeAgentOptions } from "@anthropic-ai/claude-agent-sdk";
-import type { AgentAttachment } from "../../shared/messages.js";
+import type { AgentProviderNotice } from "@getpaseo/protocol/agent-types";
+import type { AgentAttachment } from "@getpaseo/protocol/messages";
+
+export type { AgentProviderNotice };
 
 export type AgentProvider = string;
 
@@ -15,6 +18,11 @@ export interface McpStdioServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -24,6 +32,11 @@ export interface McpHttpServerConfig {
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -33,6 +46,11 @@ export interface McpSseServerConfig {
   type: "sse";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * When true, all tools from this server are always included in the prompt
+   * and never deferred behind tool search. Honored by the Claude provider.
+   */
+  alwaysLoad?: boolean;
 }
 
 /**
@@ -48,6 +66,7 @@ export interface AgentMode {
   description?: string;
   icon?: string;
   colorTier?: string;
+  isUnattended?: boolean;
 }
 
 export type ProviderStatus = "ready" | "loading" | "error" | "unavailable";
@@ -71,6 +90,15 @@ export interface AgentSelectOption {
   metadata?: AgentMetadata;
 }
 
+export function normalizeAgentModelDefinition(model: AgentModelDefinition): AgentModelDefinition {
+  const defaultThinkingOptionId =
+    model.defaultThinkingOptionId ?? model.thinkingOptions?.find((option) => option.isDefault)?.id;
+  if (!defaultThinkingOptionId || defaultThinkingOptionId === model.defaultThinkingOptionId) {
+    return model;
+  }
+  return { ...model, defaultThinkingOptionId };
+}
+
 export interface ProviderSnapshotEntry {
   provider: AgentProvider;
   status: ProviderStatus;
@@ -82,6 +110,33 @@ export interface ProviderSnapshotEntry {
   label?: string;
   description?: string;
   defaultModeId?: string | null;
+}
+
+export interface AgentCreateConfigParent {
+  provider: AgentProvider;
+  modeId: string | null;
+  isUnattended: boolean;
+}
+
+export interface ResolveAgentCreateConfigInput {
+  provider: AgentProvider;
+  requestedMode: string | undefined;
+  featureValues: Record<string, unknown> | undefined;
+  parent: AgentCreateConfigParent | null;
+  unattended: boolean;
+  availableModes: AgentMode[] | undefined;
+}
+
+export interface ResolveAgentCreateConfigResult {
+  modeId: string | undefined;
+  featureValues: Record<string, unknown> | undefined;
+}
+
+export interface AgentCreateConfigUnattendedInput {
+  modeId: string | null;
+  config: AgentSessionConfig;
+  features?: AgentFeature[];
+  availableModes: AgentMode[];
 }
 
 export interface AgentFeatureToggle {
@@ -108,12 +163,17 @@ export interface AgentFeatureSelect {
 export type AgentFeature = AgentFeatureToggle | AgentFeatureSelect;
 
 export interface AgentCapabilityFlags {
+  [capability: string]: boolean | undefined;
   supportsStreaming: boolean;
   supportsSessionPersistence: boolean;
+  supportsSessionListing?: boolean;
   supportsDynamicModes: boolean;
   supportsMcpServers: boolean;
   supportsReasoningStream: boolean;
   supportsToolInvocations: boolean;
+  supportsRewindConversation?: boolean;
+  supportsRewindFiles?: boolean;
+  supportsRewindBoth?: boolean;
 }
 
 export interface AgentPersistenceHandle {
@@ -135,6 +195,7 @@ export interface AgentRunOptions {
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
+  messageId?: string;
 }
 
 export interface AgentUsage {
@@ -304,7 +365,7 @@ export interface CompactionTimelineItem {
 
 export type AgentTimelineItem =
   | { type: "user_message"; text: string; messageId?: string }
-  | { type: "assistant_message"; text: string }
+  | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem
   | { type: "todo"; items: { text: string; completed: boolean }[] }
@@ -337,7 +398,13 @@ export type AgentStreamEvent =
       turnId?: string;
     }
   | { type: "turn_canceled"; provider: AgentProvider; reason: string; turnId?: string }
-  | { type: "timeline"; item: AgentTimelineItem; provider: AgentProvider; turnId?: string }
+  | {
+      type: "timeline";
+      item: AgentTimelineItem;
+      provider: AgentProvider;
+      turnId?: string;
+      timestamp?: string;
+    }
   | {
       type: "permission_requested";
       provider: AgentProvider;
@@ -357,6 +424,10 @@ export type AgentStreamEvent =
       reason: "finished" | "error" | "permission";
       timestamp: string;
     };
+
+export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
+  return "turnId" in event ? event.turnId : undefined;
+}
 
 export type AgentPermissionRequestKind = "tool" | "plan" | "question" | "mode" | "other";
 
@@ -415,6 +486,8 @@ export interface AgentRuntimeInfo {
   extra?: AgentMetadata;
 }
 
+export type AgentSlashCommandKind = "command" | "skill";
+
 /**
  * Represents a slash command available in an agent session.
  * Commands are executed by sending them as prompts with / prefix.
@@ -423,27 +496,48 @@ export interface AgentSlashCommand {
   name: string;
   description: string;
   argumentHint: string;
+  kind?: AgentSlashCommandKind;
 }
 
-export interface ListPersistedAgentsOptions {
+export interface ListImportableSessionsOptions {
   limit?: number;
   /**
-   * Optional cwd hint. Providers that can cheaply pre-filter persisted
-   * sessions by working directory should do so before doing expensive
-   * work like fetching turn timelines. Providers that can't filter
-   * cheaply may ignore this hint.
+   * Optional cwd hint. Providers that can cheaply pre-filter importable
+   * sessions by working directory should do so before doing expensive work.
    */
   cwd?: string;
 }
 
-export interface PersistedAgentDescriptor {
-  provider: AgentProvider;
-  sessionId: string;
+export interface ImportableProviderSession {
+  providerHandleId: string;
   cwd: string;
   title: string | null;
+  firstPromptPreview: string | null;
+  lastPromptPreview: string | null;
   lastActivityAt: Date;
+}
+
+export interface ImportProviderSessionInput {
+  providerHandleId: string;
+  cwd: string;
+}
+
+export interface ImportProviderSessionContext {
+  config: AgentSessionConfig;
+  storedConfig: AgentSessionConfig;
+  launchContext?: AgentLaunchContext;
+}
+
+export interface ImportedTimelineEntry {
+  item: AgentTimelineItem;
+  timestamp?: string;
+}
+
+export interface ImportedProviderSession {
+  session: AgentSession;
+  config: AgentSessionConfig;
   persistence: AgentPersistenceHandle;
-  timeline: AgentTimelineItem[];
+  timeline: ImportedTimelineEntry[];
 }
 
 export interface AgentSessionConfig {
@@ -454,6 +548,11 @@ export interface AgentSessionConfig {
    * Mapped by each provider to its native instruction field.
    */
   systemPrompt?: string;
+  /**
+   * Daemon-level instructions appended at runtime. This is deliberately not
+   * persisted into agent config so daemon setting changes apply cleanly.
+   */
+  daemonAppendSystemPrompt?: string;
   modeId?: string;
   model?: string;
   thinkingOptionId?: string;
@@ -476,6 +575,7 @@ export interface AgentSessionConfig {
 }
 
 export interface AgentLaunchContext {
+  agentId?: string;
   env?: Record<string, string>;
 }
 
@@ -507,7 +607,7 @@ export interface AgentSession {
   getRuntimeInfo(): Promise<AgentRuntimeInfo>;
   getAvailableModes(): Promise<AgentMode[]>;
   getCurrentMode(): Promise<string | null>;
-  setMode(modeId: string): Promise<void>;
+  setMode(modeId: string): Promise<void | AgentProviderNotice>;
   getPendingPermissions(): AgentPermissionRequest[];
   respondToPermission(
     requestId: string,
@@ -525,8 +625,11 @@ export interface AgentSession {
   captureTranscriptSnapshot?(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
   setModel?(modelId: string | null): Promise<void>;
-  setThinkingOption?(thinkingOptionId: string | null): Promise<void>;
+  setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;
   setFeature?(featureId: string, value: unknown): Promise<void>;
+  revertConversation?(input: { messageId: string }): Promise<void>;
+  revertFiles?(input: { messageId: string }): Promise<void>;
+  revertBoth?(input: { messageId: string }): Promise<void>;
   /**
    * Out-of-band prompt handler. When non-null, the manager runs the returned
    * handler instead of allocating a turn. The handler emits stream events
@@ -540,14 +643,14 @@ export interface AgentSession {
   } | null;
 }
 
-export interface ListModelsOptions {
+export interface FetchCatalogOptions {
   cwd: string;
   force: boolean;
 }
 
-export interface ListModesOptions {
-  cwd: string;
-  force: boolean;
+export interface ProviderCatalog {
+  models: AgentModelDefinition[];
+  modes: AgentMode[];
 }
 
 export interface AgentClient {
@@ -563,9 +666,24 @@ export interface AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
   ): Promise<AgentSession>;
-  listModels(options: ListModelsOptions): Promise<AgentModelDefinition[]>;
-  listModes?(options: ListModesOptions): Promise<AgentMode[]>;
-  listPersistedAgents?(options?: ListPersistedAgentsOptions): Promise<PersistedAgentDescriptor[]>;
+  /**
+   * Discover models and modes together. Implementations may use one upstream
+   * process, separate upstream calls, static modes, or private helpers; callers
+   * outside the provider do not get separate runtime model/mode probes.
+   * The registry is responsible for merging configured model overrides.
+   */
+  fetchCatalog(options: FetchCatalogOptions): Promise<ProviderCatalog>;
+  resolveCreateConfig?(input: ResolveAgentCreateConfigInput): ResolveAgentCreateConfigResult;
+  isCreateConfigUnattended?(input: AgentCreateConfigUnattendedInput): boolean;
+  listCommands?(config: AgentSessionConfig): Promise<AgentSlashCommand[]>;
+  listFeatures?(config: AgentSessionConfig): Promise<AgentFeature[]>;
+  listImportableSessions?(
+    options?: ListImportableSessionsOptions,
+  ): Promise<ImportableProviderSession[]>;
+  importSession?(
+    input: ImportProviderSessionInput,
+    context: ImportProviderSessionContext,
+  ): Promise<ImportedProviderSession>;
   /**
    * Check if this provider is available (CLI binary is installed).
    * Returns true if available, false otherwise.
@@ -577,4 +695,15 @@ export interface AgentClient {
    * Called when Paseo archives an agent so the provider's own UI reflects the same state.
    */
   archiveNativeSession?(handle: AgentPersistenceHandle): Promise<void>;
+  /**
+   * Unarchive a persisted session in the native provider.
+   * Called before Paseo clears its archived flag so provider resume can succeed.
+   */
+  unarchiveNativeSession?(handle: AgentPersistenceHandle): Promise<void>;
+  /**
+   * Release any provider-owned resources held by this client (background
+   * processes, sockets, cached subprocesses, etc.). Called when the daemon
+   * shuts down. Must be idempotent.
+   */
+  shutdown?(): Promise<void>;
 }

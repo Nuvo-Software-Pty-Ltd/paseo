@@ -5,7 +5,7 @@
 // `logs[N].text` (e.g. "Reached max time (1000ms)." or
 // "Reached max iterations.") — there is NO top-level `failureReason` field
 // on LoopRecord. See PLAN-app.md Task 2.
-import type { LoopRecord, LoopIterationRecord } from "@server/server/loop-types";
+import type { LoopRecord, LoopIterationRecord } from "@getpaseo/protocol/loop/rpc-schemas";
 
 export interface LoopFailedIterationSummary {
   index: number;

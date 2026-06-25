@@ -4,12 +4,15 @@ import {
   type PersistedConfig,
 } from "./persisted-config.js";
 import { ProviderOverrideSchema } from "./agent/provider-launch-config.js";
-import { MutableDaemonConfigSchema, MutableDaemonConfigPatchSchema } from "../shared/messages.js";
+import {
+  MutableDaemonConfigSchema,
+  MutableDaemonConfigPatchSchema,
+} from "@getpaseo/protocol/messages";
 
-export type { MutableDaemonConfig, MutableDaemonConfigPatch } from "../shared/messages.js";
+export type { MutableDaemonConfig, MutableDaemonConfigPatch } from "@getpaseo/protocol/messages";
 
-type MutableDaemonConfig = import("../shared/messages.js").MutableDaemonConfig;
-type MutableDaemonConfigPatch = import("../shared/messages.js").MutableDaemonConfigPatch;
+type MutableDaemonConfig = import("@getpaseo/protocol/messages").MutableDaemonConfig;
+type MutableDaemonConfigPatch = import("@getpaseo/protocol/messages").MutableDaemonConfigPatch;
 type ProviderOverride = import("./agent/provider-launch-config.js").ProviderOverride;
 
 interface LoggerLike {
@@ -169,13 +172,33 @@ function mergeMutableConfigIntoPersistedConfig(params: {
   mutable: MutableDaemonConfig;
 }): PersistedConfig {
   const { persisted, mutable } = params;
+  const metadataGenerationProviders = readMetadataGenerationProviders(mutable);
   const providerOverrides = applyMutableProviderConfigToOverrides(
     persisted.agents?.providers as Record<string, ProviderOverride> | undefined,
     mutable.providers,
   );
-  const persistedAgents = persisted.agents as
-    | ({ providers?: Record<string, ProviderOverride> } & Record<string, unknown>)
-    | undefined;
+  const persistedAgents = persisted.agents as Record<string, unknown> | undefined;
+  const persistedMetadataGeneration = {
+    providers: metadataGenerationProviders,
+  };
+  const shouldPersistMetadataGeneration =
+    metadataGenerationProviders.length > 0 || persisted.agents?.metadataGeneration !== undefined;
+
+  let nextAgents = persisted.agents as PersistedConfig["agents"];
+  if (providerOverrides && Object.keys(providerOverrides).length > 0) {
+    nextAgents = {
+      ...persistedAgents,
+      providers: providerOverrides,
+      ...(shouldPersistMetadataGeneration
+        ? { metadataGeneration: persistedMetadataGeneration }
+        : {}),
+    } as PersistedConfig["agents"];
+  } else if (shouldPersistMetadataGeneration) {
+    nextAgents = {
+      ...persistedAgents,
+      metadataGeneration: persistedMetadataGeneration,
+    } as PersistedConfig["agents"];
+  }
 
   return {
     ...persisted,
@@ -185,13 +208,40 @@ function mergeMutableConfigIntoPersistedConfig(params: {
         ...persisted.daemon?.mcp,
         injectIntoAgents: mutable.mcp.injectIntoAgents,
       },
+      autoArchiveAfterMerge: mutable.autoArchiveAfterMerge,
+      enableTerminalAgentHooks: mutable.enableTerminalAgentHooks,
+      appendSystemPrompt: mutable.appendSystemPrompt,
+      ...(mutable.terminalProfiles !== undefined
+        ? { terminalProfiles: mutable.terminalProfiles }
+        : {}),
     },
-    agents:
-      providerOverrides && Object.keys(providerOverrides).length > 0
-        ? {
-            ...persistedAgents,
-            providers: providerOverrides,
-          }
-        : persisted.agents,
+    agents: nextAgents,
   } as PersistedConfig;
+}
+
+function readMetadataGenerationProviders(
+  mutable: MutableDaemonConfig,
+): Array<{ provider: string; model?: string; thinkingOptionId?: string }> {
+  const metadataGeneration = mutable.metadataGeneration;
+  if (!isRecord(metadataGeneration)) {
+    return [];
+  }
+  const providers = metadataGeneration["providers"];
+  if (!Array.isArray(providers)) {
+    return [];
+  }
+  return providers.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry["provider"] !== "string") {
+      return [];
+    }
+    return [
+      {
+        provider: entry["provider"],
+        ...(typeof entry["model"] === "string" ? { model: entry["model"] } : {}),
+        ...(typeof entry["thinkingOptionId"] === "string"
+          ? { thinkingOptionId: entry["thinkingOptionId"] }
+          : {}),
+      },
+    ];
+  });
 }

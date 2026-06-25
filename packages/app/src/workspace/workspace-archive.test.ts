@@ -1,4 +1,4 @@
-import type { DaemonClient } from "@server/client/daemon-client";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearWorkspaceArchivePending,
@@ -39,6 +39,7 @@ function workspace(input?: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
     name: "workspace-1",
     status: "done",
     archivingAt: null,
+    statusEnteredAt: null,
     diffStat: null,
     scripts: [],
     ...input,
@@ -50,7 +51,6 @@ function target(input?: Partial<WorkspaceArchiveTarget>): WorkspaceArchiveTarget
   return {
     serverId: SERVER_ID,
     workspaceId: base.id,
-    workspaceDirectory: base.workspaceDirectory,
     ...input,
   };
 }
@@ -106,7 +106,6 @@ describe("archiveWorkspaceOptimistically", () => {
       isWorkspaceArchivePending({
         serverId: SERVER_ID,
         workspaceId: archived.id,
-        workspaceDirectory: archived.workspaceDirectory,
       }),
     ).toBe(true);
 
@@ -177,10 +176,7 @@ describe("archiveWorkspacesOptimistically", () => {
 
     const failures = await archiveWorkspacesOptimistically({
       client,
-      workspaces: [
-        target({ workspaceId: first.id, workspaceDirectory: first.workspaceDirectory }),
-        target({ workspaceId: second.id, workspaceDirectory: second.workspaceDirectory }),
-      ],
+      workspaces: [target({ workspaceId: first.id }), target({ workspaceId: second.id })],
     });
 
     expect(failures).toHaveLength(1);

@@ -4,8 +4,8 @@ import type { AgentStore } from "../agent/agent-storage.js";
 import type { AgentSessionConfig } from "../agent/agent-sdk-types.js";
 import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
-import { getUnattendedModeId } from "../agent/provider-manifest.js";
-import type { ScheduleExecutionResult, ScheduleTarget } from "../schedule/types.js";
+import { getUnattendedModeId } from "@getpaseo/protocol/provider-manifest";
+import type { ScheduleExecutionResult, ScheduleTarget } from "@getpaseo/protocol/schedule/types";
 
 // D-3.5d — shared spawn core for automations (schedules + webhook
 // triggers). Extracted verbatim from `ScheduleService.executeSchedule`

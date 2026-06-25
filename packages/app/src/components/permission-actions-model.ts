@@ -17,7 +17,7 @@
 import type {
   AgentPermissionAction,
   AgentPermissionResponse,
-} from "@server/server/agent/agent-sdk-types";
+} from "@getpaseo/protocol/agent-types";
 
 // Canonical action IDs for the two default deny variants. Keep them stable
 // so e2e selectors and analytics keys don't drift.

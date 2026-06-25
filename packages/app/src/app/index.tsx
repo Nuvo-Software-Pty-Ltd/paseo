@@ -1,18 +1,20 @@
 import React from "react";
 import { Redirect, usePathname } from "expo-router";
+import { Platform } from "react-native";
 import { StartupSplashScreen } from "@/screens/startup-splash-screen";
+import { isAutoRoutableOnlineHost } from "@/components/welcome-redirect";
 import { useEarliestOnlineHostServerId, useHostRuntimeBootstrapState } from "@/app/_layout";
 import {
-  resolveStartupRedirectRoute,
-  resolveStartupWorkspaceSelection,
-} from "@/app/host-runtime-bootstrap";
+  resolveStartupRoute,
+  resolveWorkspaceSelectionStatus,
+} from "@/navigation/host-runtime-bootstrap";
+import { useHostRegistryStatus, useHosts } from "@/runtime/host-runtime";
+import { useHasHydratedWorkspaces, useWorkspaceExists } from "@/stores/session-store-hooks";
 import {
-  navigateToWorkspace,
-  useActiveWorkspaceSelection,
+  useIsLastWorkspaceSelectionHydrated,
+  useLastWorkspaceSelection,
 } from "@/stores/navigation-active-workspace-store";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
-import { useHosts } from "@/runtime/host-runtime";
-import { isWeb } from "@/constants/platform";
 
 const isDesktop = shouldUseDesktopDaemon();
 
@@ -20,43 +22,47 @@ export default function Index() {
   const pathname = usePathname();
   const bootstrapState = useHostRuntimeBootstrapState();
   const anyOnlineHostServerId = useEarliestOnlineHostServerId();
-  const workspaceSelection = useActiveWorkspaceSelection();
   const hosts = useHosts();
+  const hostRegistryStatus = useHostRegistryStatus();
+  const workspaceSelection = useLastWorkspaceSelection();
+  const isWorkspaceSelectionLoaded = useIsLastWorkspaceSelectionHydrated();
+  const workspaceSelectionServerId = workspaceSelection?.serverId ?? null;
+  const workspaceSelectionWorkspaceId = workspaceSelection?.workspaceId ?? null;
+  const hasHydratedWorkspaceSelectionHost = useHasHydratedWorkspaces(workspaceSelectionServerId);
+  const workspaceSelectionExists = useWorkspaceExists(
+    workspaceSelectionServerId,
+    workspaceSelectionWorkspaceId,
+  );
+  // Orchestra cold-load barrier: a cloud host on web must not be auto-entered on
+  // a cold load (it would bounce past the create-a-new-workspace wizard).
+  // Computed here where the full host profiles + platform are available; the
+  // pure startup resolver just consumes the boolean.
+  const canAutoRouteOnlineHost = anyOnlineHostServerId
+    ? isAutoRoutableOnlineHost({
+        serverId: anyOnlineHostServerId,
+        hosts,
+        isWeb: Platform.OS === "web",
+      })
+    : true;
 
-  const redirectRoute = resolveStartupRedirectRoute({
-    pathname,
+  const startupRoute = resolveStartupRoute({
+    route: { kind: "index", pathname },
+    startupBlocker: bootstrapState.startupBlocker,
+    hostRegistryStatus,
+    hosts,
     anyOnlineHostServerId,
     workspaceSelection,
-    isWorkspaceSelectionLoaded: true,
+    workspaceSelectionStatus: resolveWorkspaceSelectionStatus({
+      hasHydratedWorkspaces: hasHydratedWorkspaceSelectionHost,
+      workspaceExists: workspaceSelectionExists,
+    }),
+    isWorkspaceSelectionLoaded,
     hasGivenUpWaitingForHost: bootstrapState.hasGivenUpWaitingForHost,
-    hosts,
-    isWeb,
-  });
-  const startupWorkspaceSelection = resolveStartupWorkspaceSelection({
-    pathname,
-    anyOnlineHostServerId,
-    workspaceSelection,
-    isWorkspaceSelectionLoaded: true,
-    hasGivenUpWaitingForHost: bootstrapState.hasGivenUpWaitingForHost,
-    hosts,
-    isWeb,
+    canAutoRouteOnlineHost,
   });
 
-  React.useEffect(() => {
-    if (!startupWorkspaceSelection) {
-      return;
-    }
-    navigateToWorkspace(startupWorkspaceSelection.serverId, startupWorkspaceSelection.workspaceId, {
-      currentPathname: pathname,
-    });
-  }, [pathname, startupWorkspaceSelection]);
-
-  if (startupWorkspaceSelection) {
-    return <StartupSplashScreen bootstrapState={isDesktop ? bootstrapState : undefined} />;
-  }
-
-  if (redirectRoute) {
-    return <Redirect href={redirectRoute} />;
+  if (startupRoute.kind === "redirect") {
+    return <Redirect href={startupRoute.href} />;
   }
 
   return <StartupSplashScreen bootstrapState={isDesktop ? bootstrapState : undefined} />;

@@ -3,12 +3,11 @@ import {
   markWorkspaceArchivePending,
 } from "@/contexts/session-workspace-upserts";
 import { useSessionStore, type WorkspaceDescriptor } from "@/stores/session-store";
-import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-execution";
+import { resolveWorkspaceMapKeyByIdentity } from "@/utils/workspace-identity";
 
 export interface WorkspaceArchiveTarget {
   serverId: string;
   workspaceId: string;
-  workspaceDirectory?: string | null;
 }
 
 interface WorkspaceArchiveClient {
@@ -46,7 +45,6 @@ function hideWorkspaceOptimistically(
   markWorkspaceArchivePending({
     serverId: workspace.serverId,
     workspaceId: workspace.workspaceId,
-    workspaceDirectory: workspace.workspaceDirectory,
   });
   useSessionStore.getState().removeWorkspace(workspace.serverId, workspace.workspaceId);
   return { workspace: snapshot };

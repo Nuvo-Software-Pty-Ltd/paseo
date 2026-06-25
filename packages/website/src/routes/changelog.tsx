@@ -5,18 +5,18 @@ import { SiteShell } from "~/components/site-shell";
 import { pageMeta } from "~/meta";
 
 export const Route = createFileRoute("/changelog")({
-  head: () => ({
-    meta: pageMeta(
+  head: () =>
+    pageMeta(
       "Changelog - Paseo",
-      "Product updates, fixes, and improvements shipped in each Paseo release.",
+      "Product updates, bug fixes, and improvements shipped in each Paseo release. Track new agent providers, mobile features, and daemon changes over time.",
+      "/changelog",
     ),
-  }),
   component: Changelog,
 });
 
 function Changelog() {
   return (
-    <SiteShell>
+    <SiteShell width="default">
       <article className="changelog-markdown rounded-xl border border-border bg-card/40 p-6 md:p-8">
         <ReactMarkdown>{changelogMarkdown}</ReactMarkdown>
       </article>

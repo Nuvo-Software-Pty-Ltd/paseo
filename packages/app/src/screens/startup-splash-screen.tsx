@@ -11,16 +11,17 @@ import Animated, {
 import MaskedView from "@react-native-masked-view/masked-view";
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "react-native-svg";
 import * as Clipboard from "expo-clipboard";
+import { useTranslation } from "react-i18next";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { BookOpen, Copy, RotateCw, TriangleAlert } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
 import { Button } from "@/components/ui/button";
-import { Fonts } from "@/constants/theme";
 import { getDesktopDaemonLogs, type DesktopDaemonLogs } from "@/desktop/daemon/desktop-daemon";
 import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
 import { isNative, isWeb } from "@/constants/platform";
 import { useWebScrollbarStyle } from "@/hooks/use-web-scrollbar-style";
+import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 
 interface StartupSplashScreenProps {
   bootstrapState?: {
@@ -234,9 +235,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   errorMessage: {
     color: theme.colors.destructive,
-    fontSize: theme.fontSize.sm,
+    fontSize: theme.fontSize.code,
     lineHeight: 20,
-    fontFamily: Fonts.mono,
+    fontFamily: theme.fontFamily.mono,
   },
   logsMeta: {
     color: theme.colors.foregroundMuted,
@@ -257,8 +258,8 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[4],
   },
   logsText: {
-    fontFamily: Fonts.mono,
-    fontSize: theme.fontSize.xs,
+    fontFamily: theme.fontFamily.mono,
+    fontSize: theme.fontSize.code,
     color: theme.colors.foreground,
     lineHeight: 18,
     ...(isWeb
@@ -297,6 +298,7 @@ const styles = StyleSheet.create((theme) => ({
 }));
 
 export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps) {
+  const { t } = useTranslation();
   const { theme } = useUnistyles();
   const webScrollbarStyle = useWebScrollbarStyle();
   const errorScrollViewStyle = useMemo(
@@ -339,7 +341,7 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
         }
         const message = error instanceof Error ? error.message : String(error);
         setDaemonLogs(null);
-        setLogsError(`Unable to load daemon logs: ${message}`);
+        setLogsError(t("startup.logs.loadFailed", { message }));
       })
       .finally(() => {
         if (!isCancelled) {
@@ -350,11 +352,11 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
     return () => {
       isCancelled = true;
     };
-  }, [isError]);
+  }, [isError, t]);
 
   const logsText = useMemo(() => {
     if (isLoadingLogs) {
-      return "Loading daemon logs...";
+      return t("startup.logs.loading");
     }
     if (daemonLogs?.contents) {
       return daemonLogs.contents;
@@ -362,8 +364,8 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
     if (logsError) {
       return logsError;
     }
-    return "No daemon logs available.";
-  }, [daemonLogs?.contents, isLoadingLogs, logsError]);
+    return t("startup.logs.unavailable");
+  }, [daemonLogs?.contents, isLoadingLogs, logsError, t]);
 
   const handleCopyLogs = useCallback(() => {
     const payload = daemonLogs?.logPath
@@ -409,15 +411,14 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
         <View style={styles.errorContent}>
           <View style={styles.errorHeader}>
             <PaseoLogo size={64} />
-            <Text style={styles.title}>Something went wrong</Text>
+            <Text style={styles.title}>{t("startup.errorTitle")}</Text>
           </View>
 
-          <Text style={styles.errorDescription}>
-            The local server failed to start. If this keeps happening, please report the issue on
-            GitHub and include the logs below.
-          </Text>
+          <Text style={styles.errorDescription}>{t("startup.errorDescription")}</Text>
 
-          <Text style={styles.errorMessage}>{bootstrapState.splashError}</Text>
+          <Text dataSet={CODE_SURFACE_DATASET} style={styles.errorMessage}>
+            {bootstrapState.splashError}
+          </Text>
 
           {daemonLogs?.logPath ? <Text style={styles.logsMeta}>{daemonLogs.logPath}</Text> : null}
 
@@ -427,7 +428,7 @@ export function StartupSplashScreen({ bootstrapState }: StartupSplashScreenProps
               contentContainerStyle={styles.logsContent}
               showsVerticalScrollIndicator
             >
-              <Text selectable style={styles.logsText}>
+              <Text dataSet={CODE_SURFACE_DATASET} selectable style={styles.logsText}>
                 {logsText}
               </Text>
             </ScrollView>

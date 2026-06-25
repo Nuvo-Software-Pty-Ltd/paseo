@@ -6,7 +6,7 @@ import {
   type ConnectionState,
   type FetchAgentsEntry,
   type FetchAgentsOptions,
-} from "@server/client/daemon-client";
+} from "@getpaseo/client/internal/daemon-client";
 import {
   connectionFromListen,
   isCloudHostProfile,
@@ -24,7 +24,7 @@ import {
   shouldUseTlsForDefaultHostedRelay,
 } from "@/utils/daemon-endpoints";
 import { resolveAppVersion } from "@/utils/app-version";
-import { ConnectionOfferSchema, type ConnectionOffer } from "@server/shared/connection-offer";
+import { ConnectionOfferSchema, type ConnectionOffer } from "@getpaseo/protocol/connection-offer";
 import { shouldUseDesktopDaemon } from "@/desktop/daemon/desktop-daemon";
 import { connectToDaemon } from "@/utils/test-daemon-connection";
 import { getOrCreateClientId } from "@/utils/client-id";
@@ -41,8 +41,15 @@ import { replaceFetchedAgentDirectory } from "@/utils/agent-directory-sync";
 import { useSessionStore } from "@/stores/session-store";
 import { createWorkspaceTokenRefreshingTransportFactory } from "@/lib/orchestra-cloud-transport";
 import { mintWorkspaceToken } from "@/lib/orchestra-cloud-client";
+import {
+  fetchLegacyDaemonWorkspaceDirectory,
+  shouldUseLegacyDaemonWorkspaceDirectory,
+} from "@/workspace/legacy-daemon-workspaces";
+import { invalidateCheckoutGitQueriesForServer } from "@/git/query-keys";
+import { queryClient } from "@/query/query-client";
 
 export type HostRuntimeConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
+export type HostRegistryStatus = "loading" | "ready";
 
 export type ActiveConnection =
   | { type: "directTcp"; endpoint: string; display: string }
@@ -145,6 +152,7 @@ export interface HostRuntimeStartOptions {
 const PROBE_TICK_MS = 2_000;
 const PROBE_STEADY_MS = 10_000;
 const PROBE_MAX_BACKOFF_MS = 30_000;
+const PROBE_INACTIVE_WHILE_ONLINE_MS = 120_000;
 const ADAPTIVE_SWITCH_THRESHOLD_MS = 40;
 const ADAPTIVE_SWITCH_CONSECUTIVE_PROBES = 3;
 const DEFAULT_AGENT_DIRECTORY_PAGE_LIMIT = 200;
@@ -184,6 +192,54 @@ function readFetchAgentsNextCursor(
     return page.afterCursor;
   }
   return null;
+}
+
+interface AgentDirectoryFetchInput {
+  client: DaemonClient;
+  filter?: FetchAgentsOptions["filter"];
+  subscribe?: FetchAgentsOptions["subscribe"];
+  page?: FetchAgentsOptions["page"];
+}
+
+interface AgentDirectoryFetchResult {
+  entries: FetchAgentsEntry[];
+  subscriptionId: string | null;
+}
+
+async function fetchCurrentAgentDirectory(
+  input: AgentDirectoryFetchInput,
+): Promise<AgentDirectoryFetchResult> {
+  const pageLimit = input.page?.limit ?? DEFAULT_AGENT_DIRECTORY_PAGE_LIMIT;
+  let cursor = input.page?.cursor ?? null;
+  let includeSubscribe = true;
+  let subscriptionId: string | null = null;
+  const entries: FetchAgentsEntry[] = [];
+
+  while (true) {
+    const payload = await input.client.fetchAgents({
+      scope: input.filter ? undefined : "active",
+      ...(input.filter ? { filter: input.filter } : {}),
+      sort: DEFAULT_AGENT_DIRECTORY_SORT,
+      ...(includeSubscribe && input.subscribe ? { subscribe: input.subscribe } : {}),
+      page: cursor ? { limit: pageLimit, cursor } : { limit: pageLimit },
+    });
+
+    entries.push(...payload.entries);
+    subscriptionId = subscriptionId ?? payload.subscriptionId ?? null;
+    includeSubscribe = false;
+
+    if (!readFetchAgentsHasMore(payload.pageInfo)) {
+      break;
+    }
+
+    const nextCursor = readFetchAgentsNextCursor(payload.pageInfo);
+    if (!nextCursor) {
+      break;
+    }
+    cursor = nextCursor;
+  }
+
+  return { entries, subscriptionId };
 }
 
 function toActiveConnection(connection: HostConnection): ActiveConnection {
@@ -437,10 +493,14 @@ function findConnectionById(host: HostProfile, connectionId: string | null): Hos
 function probeIntervalForConnection(
   firstSeenAt: number,
   isActiveOnline: boolean,
+  hasActiveOnlineConnection: boolean,
   now: number,
 ): number {
   if (isActiveOnline) {
     return PROBE_STEADY_MS;
+  }
+  if (hasActiveOnlineConnection) {
+    return PROBE_INACTIVE_WHILE_ONLINE_MS;
   }
   const age = now - firstSeenAt;
   if (age < 10_000) return 2_000;
@@ -634,8 +694,20 @@ export class HostRuntimeController {
   }
 
   async updateHost(host: HostProfile): Promise<void> {
+    const activeConnectionId = this.snapshot.activeConnectionId;
+    const previousActiveConnection = findConnectionById(this.host, activeConnectionId);
     this.host = host;
     this.trackConnectionFirstSeen();
+    const nextActiveConnection = findConnectionById(this.host, activeConnectionId);
+    if (
+      activeConnectionId &&
+      previousActiveConnection &&
+      nextActiveConnection &&
+      !equal(previousActiveConnection, nextActiveConnection)
+    ) {
+      this.connectionLastProbedAt.delete(activeConnectionId);
+      await this.switchToConnection({ connectionId: activeConnectionId });
+    }
     await this.runProbeCycleNow();
   }
 
@@ -686,7 +758,7 @@ export class HostRuntimeController {
 
   async activateConnection(input: {
     connectionId: string;
-    existingClient: DaemonClient;
+    existingClient?: DaemonClient;
   }): Promise<void> {
     await this.switchToConnection(input);
   }
@@ -722,6 +794,7 @@ export class HostRuntimeController {
     const now = performance.now();
     const isOnline = this.snapshot.connectionStatus === "online";
     const activeConnectionId = this.snapshot.activeConnectionId;
+    const hasActiveOnlineConnection = isOnline && activeConnectionId !== null;
 
     const connectionsToProbe = this.host.connections.filter((connection) => {
       const lastProbed = this.connectionLastProbedAt.get(connection.id);
@@ -730,7 +803,12 @@ export class HostRuntimeController {
       }
       const firstSeen = this.connectionFirstSeenAt.get(connection.id) ?? now;
       const isActiveOnline = isOnline && connection.id === activeConnectionId;
-      const interval = probeIntervalForConnection(firstSeen, isActiveOnline, now);
+      const interval = probeIntervalForConnection(
+        firstSeen,
+        isActiveOnline,
+        hasActiveOnlineConnection,
+        now,
+      );
       return now - lastProbed >= interval;
     });
 
@@ -919,7 +997,22 @@ export class HostRuntimeController {
             const activated = await maybeActivateFirstAvailable(connection.id, connectedClient);
             shouldCloseClient = shouldCloseClient && !activated;
 
-            const { rttMs } = await connectedClient.ping({ timeoutMs: 5000 });
+            if (activeClient) {
+              const rttMs = activeClient.getLastLivenessRttMs();
+              if (!this.isCurrentProbeRequest(requestVersion)) {
+                return;
+              }
+              if (rttMs !== null) {
+                probeByConnectionId.set(connection.id, {
+                  status: "available",
+                  latencyMs: rttMs,
+                });
+                publishProbeState();
+              }
+              return;
+            }
+
+            const rttMs = await connectedClient.measureLatency({ timeoutMs: 5000 });
             if (!this.isCurrentProbeRequest(requestVersion)) {
               return;
             }
@@ -1247,6 +1340,7 @@ export class HostRuntimeStore {
   private version = 0;
   private hostListVersion = 0;
   private hosts: HostProfile[] = [];
+  private hostRegistryStatus: HostRegistryStatus = "loading";
   private deps: HostRuntimeControllerDeps;
   private lastConnectionStatusByServer = new Map<string, HostRuntimeConnectionStatus>();
   private agentDirectoryBootstrapInFlight = new Map<string, Promise<void>>();
@@ -1261,6 +1355,10 @@ export class HostRuntimeStore {
 
   getHosts(): HostProfile[] {
     return this.hosts;
+  }
+
+  getHostRegistryStatus(): HostRegistryStatus {
+    return this.hostRegistryStatus;
   }
 
   subscribeHostList(listener: () => void): () => void {
@@ -1308,6 +1406,7 @@ export class HostRuntimeStore {
   }
 
   private async loadFromStorage(): Promise<void> {
+    let shouldPersistHosts = false;
     try {
       const stored = await AsyncStorage.getItem(REGISTRY_STORAGE_KEY);
       if (!stored) {
@@ -1323,12 +1422,17 @@ export class HostRuntimeStore {
       const profiles = normalizedProfiles.filter((entry) => !isPlaceholderServerId(entry.serverId));
       this.hosts = profiles;
       this.syncHosts(profiles);
-      this.emitHostList();
       if (profiles.length !== normalizedProfiles.length) {
-        void this.persistHosts();
+        shouldPersistHosts = true;
       }
     } catch (error) {
       console.error("[HostRuntime] Failed to load host registry from storage", error);
+    } finally {
+      this.hostRegistryStatus = "ready";
+      this.emitHostList();
+      if (shouldPersistHosts) {
+        void this.persistHosts();
+      }
     }
   }
 
@@ -1767,6 +1871,10 @@ export class HostRuntimeStore {
       snapshot.connectionStatus === "online" && previousStatus !== "online";
     if (didTransitionOnline) {
       useSessionStore.getState().bumpHistorySyncGeneration(serverId);
+      // Checkout git data is push-driven; pushes emitted while disconnected are gone for
+      // good (the daemon dedupes by snapshot fingerprint). Mark the caches stale so active
+      // queries refetch now and evicted ones on their next mount.
+      void invalidateCheckoutGitQueriesForServer(queryClient, serverId);
     }
 
     // Runtime owns directory bootstrap policy, including reconnect and delayed
@@ -1891,46 +1999,37 @@ export class HostRuntimeStore {
 
     controller.markAgentDirectorySyncLoading();
     try {
-      const pageLimit = input.page?.limit ?? DEFAULT_AGENT_DIRECTORY_PAGE_LIMIT;
-      let cursor = input.page?.cursor ?? null;
-      let includeSubscribe = true;
-      let subscriptionId: string | null = null;
-      const allEntries: FetchAgentsEntry[] = [];
-
-      while (true) {
-        const payload = await client.fetchAgents({
-          scope: input.filter ? undefined : "active",
-          ...(input.filter ? { filter: input.filter } : {}),
-          sort: DEFAULT_AGENT_DIRECTORY_SORT,
-          ...(includeSubscribe && input.subscribe ? { subscribe: input.subscribe } : {}),
-          page: cursor ? { limit: pageLimit, cursor } : { limit: pageLimit },
+      const session = useSessionStore.getState().sessions[input.serverId];
+      if (!input.filter && shouldUseLegacyDaemonWorkspaceDirectory(session?.serverInfo)) {
+        const result = await fetchLegacyDaemonWorkspaceDirectory({
+          client,
+          serverId: input.serverId,
+          subscribe: input.subscribe,
+          page: input.page,
         });
-
-        allEntries.push(...payload.entries);
-
-        subscriptionId = subscriptionId ?? payload.subscriptionId ?? null;
-        includeSubscribe = false;
-
-        if (!readFetchAgentsHasMore(payload.pageInfo)) {
-          break;
-        }
-
-        const nextCursor = readFetchAgentsNextCursor(payload.pageInfo);
-        if (!nextCursor) {
-          break;
-        }
-        cursor = nextCursor;
+        controller.markAgentDirectorySyncReady();
+        return {
+          agents: result.agents,
+          subscriptionId: result.subscriptionId,
+        };
       }
+
+      const directory = await fetchCurrentAgentDirectory({
+        client,
+        filter: input.filter,
+        subscribe: input.subscribe,
+        page: input.page,
+      });
 
       const { agents } = replaceFetchedAgentDirectory({
         serverId: input.serverId,
-        entries: allEntries,
+        entries: directory.entries,
       });
 
       controller.markAgentDirectorySyncReady();
       return {
         agents,
-        subscriptionId,
+        subscriptionId: directory.subscriptionId,
       };
     } catch (error) {
       controller.markAgentDirectorySyncError(toErrorMessage(error));
@@ -2088,6 +2187,15 @@ export function useIsCloudHost(serverId: string | null | undefined): boolean {
     const host = hosts.find((entry) => entry.serverId === serverId);
     return isCloudHostProfile(host);
   }, [hosts, serverId]);
+}
+
+export function useHostRegistryStatus(): HostRegistryStatus {
+  const store = getHostRuntimeStore();
+  return useSyncExternalStore(
+    (onStoreChange) => store.subscribeHostList(onStoreChange),
+    () => store.getHostRegistryStatus(),
+    () => store.getHostRegistryStatus(),
+  );
 }
 
 export interface HostMutations {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { DaemonClient } from "@server/client/daemon-client";
-import type { WorkspaceDescriptorPayload } from "@server/shared/messages";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
 
 import {
   normalizeWorkspaceDescriptor,
@@ -23,6 +23,7 @@ function createWorkspace(
     workspaceKind: input.workspaceKind ?? "local_checkout",
     name: input.name ?? "main",
     status: input.status ?? "done",
+    statusEnteredAt: input.statusEnteredAt ?? null,
     archivingAt: input.archivingAt ?? null,
     diffStat: input.diffStat ?? null,
     scripts: input.scripts ?? [],
@@ -47,6 +48,7 @@ function getTestSessionReferences() {
     sessions: state.sessions,
     session,
     workspaces: session.workspaces,
+    emptyProjects: session.emptyProjects,
   };
 }
 
@@ -76,6 +78,7 @@ describe("normalizeWorkspaceDescriptor", () => {
       name: "main",
       archivingAt: null,
       status: "running",
+      statusEnteredAt: null,
       activityAt: "not-a-date",
       diffStat: null,
       scripts,
@@ -97,6 +100,44 @@ describe("normalizeWorkspaceDescriptor", () => {
     expect(workspace.scripts).not.toBe(scripts);
   });
 
+  it("canonicalizes the workspace directory and treats a blank one as empty", () => {
+    const canonical = normalizeWorkspaceDescriptor({
+      id: "1",
+      projectId: "1",
+      projectDisplayName: "Project 1",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo/app/",
+      projectKind: "git",
+      workspaceKind: "checkout",
+      name: "main",
+      archivingAt: null,
+      status: "done",
+      statusEnteredAt: null,
+      activityAt: null,
+      diffStat: null,
+      scripts: [],
+    });
+    expect(canonical.workspaceDirectory).toBe("/repo/app");
+
+    const blank = normalizeWorkspaceDescriptor({
+      id: "1",
+      projectId: "1",
+      projectDisplayName: "Project 1",
+      projectRootPath: "/repo",
+      workspaceDirectory: "   ",
+      projectKind: "git",
+      workspaceKind: "checkout",
+      name: "main",
+      archivingAt: null,
+      status: "done",
+      statusEnteredAt: null,
+      activityAt: null,
+      diffStat: null,
+      scripts: [],
+    });
+    expect(blank.workspaceDirectory).toBe("");
+  });
+
   it("defaults missing scripts to an empty array", () => {
     const payload = {
       id: "1",
@@ -109,6 +150,7 @@ describe("normalizeWorkspaceDescriptor", () => {
       name: "main",
       archivingAt: null,
       status: "done",
+      statusEnteredAt: null,
       activityAt: null,
       diffStat: null,
       scripts: [],
@@ -140,6 +182,42 @@ describe("normalizeWorkspaceDescriptor", () => {
     expect(workspace.archivingAt).toBeNull();
   });
 
+  it("normalizes statusEnteredAt strings to Date and missing or null values to null", () => {
+    const basePayload = {
+      id: "1",
+      projectId: "1",
+      projectDisplayName: "Project 1",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "checkout",
+      name: "main",
+      status: "running",
+      activityAt: null,
+      diffStat: null,
+      scripts: [],
+    } satisfies Omit<WorkspaceDescriptorPayload, "statusEnteredAt" | "archivingAt">;
+
+    const withString = normalizeWorkspaceDescriptor({
+      ...basePayload,
+      archivingAt: null,
+      statusEnteredAt: "2026-05-12T09:30:00.000Z",
+    });
+    const withNull = normalizeWorkspaceDescriptor({
+      ...basePayload,
+      archivingAt: null,
+      statusEnteredAt: null,
+    });
+    const missing = normalizeWorkspaceDescriptor({
+      ...basePayload,
+      archivingAt: null,
+    } as unknown as WorkspaceDescriptorPayload);
+
+    expect(withString.statusEnteredAt).toEqual(new Date("2026-05-12T09:30:00.000Z"));
+    expect(withNull.statusEnteredAt).toBeNull();
+    expect(missing.statusEnteredAt).toBeNull();
+  });
+
   it("preserves project placement from workspace descriptor payloads", () => {
     const workspace = normalizeWorkspaceDescriptor({
       id: "1",
@@ -152,6 +230,7 @@ describe("normalizeWorkspaceDescriptor", () => {
       name: "main",
       archivingAt: null,
       status: "done",
+      statusEnteredAt: null,
       activityAt: null,
       diffStat: null,
       scripts: [],
@@ -285,6 +364,51 @@ describe("mergeWorkspaces", () => {
     expect(after.workspaces).not.toBe(before.workspaces);
     expect(after.workspaces.get(workspace.id)?.diffStat).toBeNull();
   });
+
+  it("clears a pending restore status when the matching descriptor lands", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "restoring");
+    expect(getTestSessionReferences().session.restoringWorkspaces.get("/repo/main")).toBe(
+      "restoring",
+    );
+
+    store.mergeWorkspaces("test-server", [createWorkspace({ id: "/repo/main" })]);
+
+    expect(getTestSessionReferences().session.restoringWorkspaces.has("/repo/main")).toBe(false);
+  });
+});
+
+describe("setWorkspaceRestoreStatus", () => {
+  it("marks restoring then failed while the workspace is still absent", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "restoring");
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "failed");
+
+    expect(getTestSessionReferences().session.restoringWorkspaces.get("/repo/main")).toBe("failed");
+  });
+
+  it("ignores a late failed once the descriptor has landed (no-op)", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "restoring");
+    store.mergeWorkspaces("test-server", [createWorkspace({ id: "/repo/main" })]);
+
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "failed");
+
+    expect(getTestSessionReferences().session.restoringWorkspaces.has("/repo/main")).toBe(false);
+  });
+
+  it("ignores failed when no restore is in flight", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+
+    store.setWorkspaceRestoreStatus("test-server", "/repo/main", "failed");
+
+    expect(getTestSessionReferences().session.restoringWorkspaces.has("/repo/main")).toBe(false);
+  });
 });
 
 describe("setWorkspaces", () => {
@@ -322,6 +446,48 @@ describe("removeWorkspace", () => {
     expect(after.sessions).toBe(before.sessions);
     expect(after.session).toBe(before.session);
     expect(after.workspaces).toBe(before.workspaces);
+  });
+});
+
+describe("removeEmptyProject", () => {
+  it("removes an empty project by project id", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+    store.setEmptyProjects("test-server", [
+      {
+        projectId: "project-empty",
+        projectDisplayName: "Empty",
+        projectCustomName: null,
+        projectRootPath: "/repo/empty",
+        projectKind: "git",
+      },
+    ]);
+
+    store.removeEmptyProject("test-server", "project-empty");
+
+    expect(getTestSessionReferences().emptyProjects.has("project-empty")).toBe(false);
+  });
+
+  it("preserves identity when removing a missing empty project", () => {
+    const store = useSessionStore.getState();
+    initializeTestSession();
+    store.setEmptyProjects("test-server", [
+      {
+        projectId: "project-empty",
+        projectDisplayName: "Empty",
+        projectCustomName: null,
+        projectRootPath: "/repo/empty",
+        projectKind: "git",
+      },
+    ]);
+    const before = getTestSessionReferences();
+
+    store.removeEmptyProject("test-server", "project-missing");
+    const after = getTestSessionReferences();
+
+    expect(after.sessions).toBe(before.sessions);
+    expect(after.session).toBe(before.session);
+    expect(after.emptyProjects).toBe(before.emptyProjects);
   });
 });
 

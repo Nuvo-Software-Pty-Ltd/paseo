@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WebSocketLike } from "@server/client/daemon-client-transport-types";
+import type { WebSocketLike } from "@getpaseo/client/internal/daemon-client-transport-types";
 import { createWorkspaceTokenRefreshingTransportFactory } from "./orchestra-cloud-transport";
 
 class FakeWebSocket implements WebSocketLike {

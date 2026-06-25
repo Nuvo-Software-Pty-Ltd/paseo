@@ -1,22 +1,44 @@
 import { useCallback, useMemo } from "react";
-import { Image, Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
 import { router } from "expo-router";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { ChevronRight } from "lucide-react-native";
+import { useTranslation } from "react-i18next";
+import { ProjectIconView } from "@/components/project-icon-view";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { useProjectIconQuery } from "@/hooks/use-project-icon-query";
 import { useProjects, type ProjectHostError } from "@/hooks/use-projects";
+import { useProjectIconDataByProjectKey } from "@/projects/project-icons";
 import { settingsStyles } from "@/styles/settings";
 import { buildProjectSettingsRoute } from "@/utils/host-routes";
-import type { ProjectHostEntry, ProjectSummary } from "@/utils/projects";
+import type { ProjectSummary } from "@/utils/projects";
 
 interface ProjectsScreenProps {
   view: { kind: "projects" } | { kind: "project"; projectKey: string };
 }
 
 export default function ProjectsScreen({ view }: ProjectsScreenProps) {
+  const { t } = useTranslation();
   const { projects, hostErrors, isLoading } = useProjects();
   const selectedProjectKey = view.kind === "project" ? view.projectKey : null;
+  const iconTargets = useMemo(
+    () =>
+      projects.flatMap((project) => {
+        const host = project.hosts[0];
+        if (!host) return [];
+        return [
+          {
+            serverId: host.serverId,
+            projectKey: project.projectKey,
+            iconWorkingDir: host.repoRoot,
+          },
+        ];
+      }),
+    [projects],
+  );
+  const iconDataByProjectKey = useProjectIconDataByProjectKey({
+    serverId: null,
+    projects: iconTargets,
+  });
 
   if (isLoading && projects.length === 0) {
     return (
@@ -29,7 +51,7 @@ export default function ProjectsScreen({ view }: ProjectsScreenProps) {
   if (projects.length === 0) {
     return (
       <View style={styles.centered} testID="projects-list">
-        <Text style={styles.emptyText}>No projects yet</Text>
+        <Text style={styles.emptyText}>{t("sidebar.project.empty.title")}</Text>
       </View>
     );
   }
@@ -44,6 +66,7 @@ export default function ProjectsScreen({ view }: ProjectsScreenProps) {
             project={project}
             isFirst={index === 0}
             isSelected={selectedProjectKey === project.projectKey}
+            iconDataUri={iconDataByProjectKey.get(project.projectKey) ?? null}
           />
         ))}
       </View>
@@ -52,11 +75,15 @@ export default function ProjectsScreen({ view }: ProjectsScreenProps) {
 }
 
 function HostErrorsBanner({ errors }: { errors: ProjectHostError[] }) {
+  const { t } = useTranslation();
   return (
     <View style={styles.errorsBanner} testID="projects-host-errors">
       {errors.map((error) => (
         <Text key={error.serverId} style={styles.errorsBannerText}>
-          {`Couldn't load projects from host ${error.serverName}: ${error.message}`}
+          {t("settings.projectList.hostLoadFailed", {
+            hostName: error.serverName,
+            message: error.message,
+          })}
         </Text>
       ))}
     </View>
@@ -67,12 +94,13 @@ interface ProjectRowProps {
   project: ProjectSummary;
   isFirst: boolean;
   isSelected: boolean;
+  iconDataUri: string | null;
 }
 
-function ProjectRow({ project, isFirst, isSelected }: ProjectRowProps) {
+function ProjectRow({ project, isFirst, isSelected, iconDataUri }: ProjectRowProps) {
+  const { t } = useTranslation();
   const { theme } = useUnistyles();
-  const { hosts, projectKey, projectName } = project;
-  const leadingHost = hosts[0];
+  const { projectKey, projectName } = project;
 
   const handleNavigate = useCallback(() => {
     router.navigate(buildProjectSettingsRoute(projectKey));
@@ -95,13 +123,17 @@ function ProjectRow({ project, isFirst, isSelected }: ProjectRowProps) {
       style={rowStyle}
       onPress={handleNavigate}
       accessibilityRole="button"
-      accessibilityLabel={`Edit ${projectName}`}
+      accessibilityLabel={t("settings.projectList.editProject", { projectName })}
       testID={`project-row-${projectKey}`}
       data-selected={isSelected ? "true" : "false"}
     >
       <View style={styles.rowMain}>
         <View style={styles.leading}>
-          <ProjectRowIcon host={leadingHost} projectName={projectName} />
+          <ProjectRowIcon
+            iconDataUri={iconDataUri}
+            projectName={projectName}
+            projectKey={projectKey}
+          />
         </View>
         <Text style={settingsStyles.rowTitle} numberOfLines={1}>
           {projectName}
@@ -113,28 +145,24 @@ function ProjectRow({ project, isFirst, isSelected }: ProjectRowProps) {
 }
 
 function ProjectRowIcon({
-  host,
+  iconDataUri,
   projectName,
+  projectKey,
 }: {
-  host: ProjectHostEntry | undefined;
+  iconDataUri: string | null;
   projectName: string;
+  projectKey: string;
 }) {
   const initial = projectName.trim().charAt(0).toUpperCase() || "?";
-  const { icon } = useProjectIconQuery({
-    serverId: host?.serverId ?? "",
-    cwd: host?.repoRoot ?? "",
-  });
-  const iconDataUri =
-    icon && icon.data && icon.mimeType ? `data:${icon.mimeType};base64,${icon.data}` : null;
-  const imageSource = useMemo(() => ({ uri: iconDataUri ?? "" }), [iconDataUri]);
-
-  if (iconDataUri) {
-    return <Image source={imageSource} style={styles.iconImage} />;
-  }
   return (
-    <View style={styles.iconFallback}>
-      <Text style={styles.iconFallbackText}>{initial}</Text>
-    </View>
+    <ProjectIconView
+      iconDataUri={iconDataUri}
+      initial={initial}
+      projectKey={projectKey}
+      imageStyle={styles.iconImage}
+      fallbackStyle={styles.iconFallback}
+      textStyle={styles.iconFallbackText}
+    />
   );
 }
 
@@ -195,12 +223,10 @@ const styles = StyleSheet.create((theme) => ({
     width: 16,
     height: 16,
     borderRadius: theme.borderRadius.sm,
-    backgroundColor: theme.colors.surface2,
     alignItems: "center",
     justifyContent: "center",
   },
   iconFallbackText: {
-    color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.xs,
   },
   spinnerColor: {

@@ -1,3 +1,6 @@
+import { Platform } from "react-native";
+import { darkHighlightColors, lightHighlightColors } from "@getpaseo/highlight";
+
 export const baseColors = {
   // Base colors
   white: "#ffffff",
@@ -233,6 +236,7 @@ interface DarkThemeConfig {
   borderAccent: string;
   accent: string;
   accentBright: string;
+  accentForeground?: string;
   destructive: string;
 }
 
@@ -275,7 +279,7 @@ function buildDarkSemanticColors(tint: DarkThemeConfig) {
 
     accent: tint.accent,
     accentBright: tint.accentBright,
-    accentForeground: "#ffffff",
+    accentForeground: tint.accentForeground ?? "#ffffff",
 
     destructive: tint.destructive,
     destructiveForeground: "#ffffff",
@@ -350,8 +354,9 @@ const zincDarkColors = buildDarkSemanticColors({
   scrollbarHandle: "#71717a",
   border: "#27272a",
   borderAccent: "#303036",
-  accent: "#20744A",
-  accentBright: "#7ccba0",
+  accent: "#e4e4e7",
+  accentBright: "#fafafa",
+  accentForeground: "#18181b", // monochrome zinc accent is near-white — needs dark text
   destructive: "#c44a4a", // neutral red, hue 0 — clearly red without screaming
 });
 
@@ -430,6 +435,7 @@ export const SPACING = {
 
 export const FONT_SIZE = {
   xs: 12,
+  code: 12,
   sm: 14,
   base: 16,
   lg: 18,
@@ -480,16 +486,48 @@ export const OPACITY = {
   100: 1,
 } as const;
 
-const commonTheme = {
+// Platform default font stacks — copied verbatim from constants/theme.ts `Fonts`
+// (sans -> ui, mono -> mono). These seed the dynamic `fontFamily` theme token and
+// are the fallback an empty user-supplied family resolves to at apply time.
+export const DEFAULT_UI_FONT_STACK: string = Platform.select({
+  ios: "system-ui",
+  default: "normal",
+  web: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+});
+
+export const DEFAULT_MONO_FONT_STACK: string = Platform.select({
+  ios: "ui-monospace",
+  default: "monospace",
+  web: "SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+});
+
+// `fontSize`, `fontFamily`, and `lineHeight` are deliberately widened to plain
+// `number`/`string` (not narrowed by `as const`) so the appearance updater can patch
+// them at runtime via `UnistylesRuntime.updateTheme`. The remaining tokens keep their
+// literal types.
+interface CommonTheme {
+  spacing: typeof SPACING;
+  fontSize: Record<keyof typeof FONT_SIZE, number>;
+  fontFamily: { ui: string; mono: string };
+  lineHeight: Record<keyof typeof LINE_HEIGHT, number>;
+  iconSize: typeof ICON_SIZE;
+  fontWeight: typeof FONT_WEIGHT;
+  borderRadius: typeof BORDER_RADIUS;
+  borderWidth: typeof BORDER_WIDTH;
+  opacity: typeof OPACITY;
+}
+
+const commonTheme: CommonTheme = {
   spacing: SPACING,
   fontSize: FONT_SIZE,
+  fontFamily: { ui: DEFAULT_UI_FONT_STACK, mono: DEFAULT_MONO_FONT_STACK },
   lineHeight: LINE_HEIGHT,
   iconSize: ICON_SIZE,
   fontWeight: FONT_WEIGHT,
   borderRadius: BORDER_RADIUS,
   borderWidth: BORDER_WIDTH,
   opacity: OPACITY,
-} as const;
+};
 
 const darkShadow = {
   sm: {
@@ -518,6 +556,7 @@ function buildDarkTheme(semanticColors: ReturnType<typeof buildDarkSemanticColor
     colors: {
       ...semanticColors,
       palette: baseColors,
+      syntax: darkHighlightColors,
     },
     shadow: darkShadow,
     ...commonTheme,
@@ -535,6 +574,7 @@ export const lightTheme = {
   colors: {
     ...lightSemanticColors,
     palette: baseColors,
+    syntax: lightHighlightColors,
   },
   shadow: {
     sm: {

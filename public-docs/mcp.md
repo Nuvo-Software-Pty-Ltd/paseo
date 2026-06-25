@@ -2,7 +2,8 @@
 title: Paseo MCP
 description: Paseo MCP tools injected into agents.
 nav: Paseo MCP
-order: 7
+order: 30
+category: Automation
 ---
 
 # Paseo MCP
@@ -15,19 +16,19 @@ The MCP server itself is controlled by `daemon.mcp.enabled`. Existing agents may
 
 ### Agents
 
-| Tool                 | Function                                                                                              |
-| -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `create_agent`       | Create an agent tied to a working directory, optionally with an initial prompt or a new git worktree. |
-| `wait_for_agent`     | Block until an agent requests permission or finishes its current run.                                 |
-| `send_agent_prompt`  | Send a task to a running agent.                                                                       |
-| `get_agent_status`   | Return the latest snapshot for an agent.                                                              |
-| `list_agents`        | List recent agents as compact metadata.                                                               |
-| `cancel_agent`       | Abort an agent's current run but keep the agent alive.                                                |
-| `archive_agent`      | Soft-delete an agent and remove it from the active list.                                              |
-| `kill_agent`         | Terminate an agent session permanently.                                                               |
-| `update_agent`       | Update an agent name or labels.                                                                       |
-| `get_agent_activity` | Return recent agent timeline entries as a curated summary.                                            |
-| `set_agent_mode`     | Switch an agent's session mode.                                                                       |
+| Tool                 | Function                                                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------- |
+| `create_agent`       | Create an agent tied to a working directory, optionally with initial settings or a new git worktree. |
+| `wait_for_agent`     | Block until an agent requests permission or finishes its current run.                                |
+| `send_agent_prompt`  | Send a task to a running agent.                                                                      |
+| `get_agent_status`   | Return the latest snapshot for an agent.                                                             |
+| `list_agents`        | List recent agents as compact metadata.                                                              |
+| `cancel_agent`       | Abort an agent's current run but keep the agent alive.                                               |
+| `archive_agent`      | Soft-delete an agent and remove it from the active list.                                             |
+| `kill_agent`         | Terminate an agent session permanently.                                                              |
+| `update_agent`       | Update an agent name, labels, or runtime settings such as mode/model/thinking/features.              |
+| `get_agent_activity` | Return recent agent timeline entries as a curated summary.                                           |
+| `set_agent_mode`     | Switch an agent's session mode.                                                                      |
 
 ### Terminals
 
@@ -52,10 +53,11 @@ The MCP server itself is controlled by `daemon.mcp.enabled`. Existing agents may
 
 ### Providers
 
-| Tool             | Function                                                  |
-| ---------------- | --------------------------------------------------------- |
-| `list_providers` | List configured agent providers, availability, and modes. |
-| `list_models`    | List models for an agent provider.                        |
+| Tool               | Function                                                          |
+| ------------------ | ----------------------------------------------------------------- |
+| `list_providers`   | List configured agent providers, availability, and modes.         |
+| `list_models`      | List models for an agent provider.                                |
+| `inspect_provider` | Inspect compact provider capabilities and draft feature settings. |
 
 ### Worktrees
 

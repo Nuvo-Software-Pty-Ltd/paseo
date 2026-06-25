@@ -1,19 +1,22 @@
 /**
  * @vitest-environment jsdom
  */
+import { i18n as testI18n } from "@/i18n/i18next";
 import React, { type ReactElement } from "react";
 import { act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { WorkspaceScriptPayload } from "@server/shared/messages";
+import type { WorkspaceScriptPayload } from "@getpaseo/protocol/messages";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot } from "react-dom/client";
 import { WorkspaceScriptsButton } from "@/screens/workspace/workspace-scripts-button";
+
+void testI18n;
 
 const { theme, startWorkspaceScriptMock } = vi.hoisted(() => {
   const hoistedTheme = {
     spacing: { 1: 4, 1.5: 6, 2: 8, 3: 12 },
     borderWidth: { 1: 1 },
-    borderRadius: { md: 6 },
+    borderRadius: { md: 6, lg: 8 },
     fontSize: { xs: 11, sm: 13 },
     fontWeight: { normal: "400", medium: "500" },
     colors: {
@@ -150,7 +153,15 @@ function script(
 
 const LIVE_TERMINAL_IDS: string[] = ["terminal-script-1"];
 
-function renderScripts(scripts: WorkspaceScriptPayload[]): {
+interface RenderScriptsOptions {
+  hideLabels?: boolean;
+  presentation?: "split" | "ghost";
+}
+
+function renderScripts(
+  scripts: WorkspaceScriptPayload[],
+  options: RenderScriptsOptions = {},
+): {
   rerender: (nextScripts: WorkspaceScriptPayload[]) => Promise<void>;
   unmount: () => void;
 } {
@@ -172,6 +183,8 @@ function renderScripts(scripts: WorkspaceScriptPayload[]): {
           workspaceId="workspace-1"
           scripts={nextScripts}
           liveTerminalIds={LIVE_TERMINAL_IDS}
+          hideLabels={options.hideLabels}
+          presentation={options.presentation}
         />
       </QueryClientProvider>
     );
@@ -329,5 +342,23 @@ describe("WorkspaceScriptsButton", () => {
     expect(requirePrimaryIcon(requireRow("old-service")).dataset.color).toBe(
       theme.colors.foregroundMuted,
     );
+  });
+
+  it("removes the trigger caret in ghost presentation", () => {
+    current = renderScripts([script({ scriptName: "dev" })], {
+      hideLabels: true,
+      presentation: "ghost",
+    });
+
+    const trigger = document.querySelector('[data-testid="workspace-scripts-button"]');
+    expect(trigger?.querySelector('[data-icon="Play"]')?.getAttribute("data-size")).toBe("16");
+    expect(trigger?.querySelector('[data-icon="ChevronDown"]')).toBeNull();
+  });
+
+  it("keeps the trigger caret in split presentation", () => {
+    current = renderScripts([script({ scriptName: "dev" })]);
+
+    const trigger = document.querySelector('[data-testid="workspace-scripts-button"]');
+    expect(trigger?.querySelector('[data-icon="ChevronDown"]')).not.toBeNull();
   });
 });

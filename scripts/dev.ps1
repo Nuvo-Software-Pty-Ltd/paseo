@@ -38,29 +38,24 @@ Write-Host @"
 ======================================================
   Home:    $($env:PASEO_HOME)
   Models:  $($env:PASEO_LOCAL_MODELS_DIR)
-  Daemon:  localhost:6767
+  Daemon:  localhost:6768
 ======================================================
 "@
 
 # Allow any origin in dev so Electron on random ports all work.
 # SECURITY: wildcard CORS is unsafe in production — only acceptable here because
 # the daemon binds to localhost and this script is never used for production.
-# Build dependencies required by the daemon (they only ship dist/)
-Write-Host "Building @getpaseo/highlight..."
-npm run build --workspace=@getpaseo/highlight
-Write-Host "Building @getpaseo/relay..."
-npm run build --workspace=@getpaseo/relay
-
 $env:PASEO_CORS_ORIGINS = "*"
 
 # Configure the app to auto-connect to this daemon on localhost
 $env:APP_VARIANT = "development"
-$env:EXPO_PUBLIC_LOCAL_DAEMON = "localhost:6767"
+$env:EXPO_PUBLIC_LOCAL_DAEMON = "localhost:6768"
+$env:PASEO_LISTEN = "127.0.0.1:6768"
 $env:BROWSER = "none"
 
 # Run both with concurrently
 concurrently `
     --names "daemon,metro" `
     --prefix-colors "cyan,magenta" `
-    "npm run dev:server" `
+    "npm run dev:server:watch" `
     "cd packages/app && npx expo start"

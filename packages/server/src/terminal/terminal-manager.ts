@@ -1,12 +1,24 @@
-import { createTerminal, type TerminalSession, type TerminalStateSnapshot } from "./terminal.js";
+import {
+  createTerminal,
+  type TerminalActivityTransition,
+  type TerminalSession,
+  type TerminalStateSnapshot,
+  type TerminalStateSnapshotOptions,
+} from "./terminal.js";
 import { captureTerminalLines, type CaptureTerminalLinesResult } from "./terminal-capture.js";
-import { resolve, sep, win32, posix } from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import { resolve, sep } from "node:path";
+import { assertAbsolutePath, isSameOrDescendantPath } from "../server/path-utils.js";
+import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
+import { deriveTerminalActivityStatusBucket } from "@getpaseo/protocol/terminal-activity";
 
 export interface TerminalListItem {
   id: string;
   name: string;
   cwd: string;
+  workspaceId: string;
   title?: string;
+  activity: TerminalActivity | null;
 }
 
 export interface TerminalsChangedEvent {
@@ -16,20 +28,51 @@ export interface TerminalsChangedEvent {
 
 export type TerminalsChangedListener = (input: TerminalsChangedEvent) => void;
 
+export interface TerminalActivityTransitionEvent {
+  terminalId: string;
+  name: string;
+  cwd: string;
+  workspaceId: string;
+  activity: TerminalActivity | null;
+  previous: TerminalActivity | null;
+}
+
+export type TerminalActivityListener = (event: TerminalActivityTransitionEvent) => void;
+
+export interface TerminalWorkspaceContributionChangedEvent {
+  terminalId: string;
+  cwd: string;
+  workspaceId: string;
+}
+
+export type TerminalWorkspaceContributionChangedListener = (
+  event: TerminalWorkspaceContributionChangedEvent,
+) => void;
+
 export interface TerminalManager {
-  getTerminals(cwd: string): Promise<TerminalSession[]>;
+  getTerminals(cwd: string, options?: { workspaceId?: string }): Promise<TerminalSession[]>;
   createTerminal(options: {
     id?: string;
     cwd: string;
+    workspaceId: string;
     name?: string;
     title?: string;
     env?: Record<string, string>;
     command?: string;
     args?: string[];
+    activityToken?: string;
+    activityUrl?: string | null;
   }): Promise<TerminalSession>;
   registerCwdEnv(options: { cwd: string; env: Record<string, string> }): void;
+  validateTerminalActivityToken(terminalId: string, token: string): "valid" | "unknown" | "invalid";
   getTerminal(id: string): TerminalSession | undefined;
-  getTerminalState(id: string): Promise<TerminalStateSnapshot | null>;
+  getTerminalState(
+    id: string,
+    options?: TerminalStateSnapshotOptions,
+  ): Promise<TerminalStateSnapshot | null>;
+  setTerminalTitle(id: string, title: string): boolean;
+  setTerminalActivity(id: string, state: TerminalActivityState): Promise<boolean>;
+  clearTerminalAttention(id: string): Promise<boolean>;
   killTerminal(id: string): void;
   killTerminalAndWait(
     id: string,
@@ -42,21 +85,34 @@ export interface TerminalManager {
   listDirectories(): string[];
   killAll(): void;
   subscribeTerminalsChanged(listener: TerminalsChangedListener): () => void;
+  subscribeTerminalActivity(listener: TerminalActivityListener): () => void;
+  subscribeTerminalWorkspaceContributionChanged(
+    listener: TerminalWorkspaceContributionChangedListener,
+  ): () => void;
 }
 
-export function createTerminalManager(): TerminalManager {
+export interface TerminalManagerOptions {
+  getTerminalActivityUrl?: () => string | null;
+}
+
+function createActivityToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+export function createTerminalManager(
+  managerOptions: TerminalManagerOptions = {},
+): TerminalManager {
   const terminalsByCwd = new Map<string, TerminalSession[]>();
   const terminalsById = new Map<string, TerminalSession>();
   const terminalExitUnsubscribeById = new Map<string, () => void>();
   const terminalTitleUnsubscribeById = new Map<string, () => void>();
+  const terminalActivityUnsubscribeById = new Map<string, () => void>();
+  const terminalActivityTokenById = new Map<string, string>();
   const terminalsChangedListeners = new Set<TerminalsChangedListener>();
+  const terminalActivityListeners = new Set<TerminalActivityListener>();
+  const terminalWorkspaceContributionChangedListeners =
+    new Set<TerminalWorkspaceContributionChangedListener>();
   const defaultEnvByRootCwd = new Map<string, Record<string, string>>();
-
-  function assertAbsolutePath(cwd: string): void {
-    if (!posix.isAbsolute(cwd) && !win32.isAbsolute(cwd)) {
-      throw new Error("cwd must be absolute path");
-    }
-  }
 
   function removeSessionById(id: string, options: { kill: boolean }): void {
     const session = terminalsById.get(id);
@@ -74,8 +130,14 @@ export function createTerminalManager(): TerminalManager {
       unsubscribeTitle();
       terminalTitleUnsubscribeById.delete(id);
     }
+    const unsubscribeActivity = terminalActivityUnsubscribeById.get(id);
+    if (unsubscribeActivity) {
+      unsubscribeActivity();
+      terminalActivityUnsubscribeById.delete(id);
+    }
 
     terminalsById.delete(id);
+    terminalActivityTokenById.delete(id);
 
     const terminals = terminalsByCwd.get(session.cwd);
     if (terminals) {
@@ -90,6 +152,16 @@ export function createTerminalManager(): TerminalManager {
 
     if (options.kill) {
       session.kill();
+    }
+
+    const previousActivity = session.getActivity();
+    const previousBucket = deriveTerminalActivityStatusBucket(previousActivity);
+    if (previousBucket !== null) {
+      emitTerminalWorkspaceContributionChanged({
+        terminalId: session.id,
+        cwd: session.cwd,
+        workspaceId: session.workspaceId,
+      });
     }
 
     emitTerminalsChanged({ cwd: session.cwd });
@@ -120,8 +192,22 @@ export function createTerminalManager(): TerminalManager {
     const unsubscribeTitle = session.onTitleChange(() => {
       emitTerminalsChanged({ cwd: session.cwd });
     });
+    const unsubscribeActivity = session.onActivityChange((transition) => {
+      emitTerminalActivityTransition({ session, transition });
+      emitTerminalsChanged({ cwd: session.cwd });
+      const previousBucket = deriveTerminalActivityStatusBucket(transition.previous);
+      const nextBucket = deriveTerminalActivityStatusBucket(transition.activity);
+      if (previousBucket !== nextBucket) {
+        emitTerminalWorkspaceContributionChanged({
+          terminalId: session.id,
+          cwd: session.cwd,
+          workspaceId: session.workspaceId,
+        });
+      }
+    });
     terminalExitUnsubscribeById.set(session.id, unsubscribeExit);
     terminalTitleUnsubscribeById.set(session.id, unsubscribeTitle);
+    terminalActivityUnsubscribeById.set(session.id, unsubscribeActivity);
     return session;
   }
 
@@ -130,7 +216,9 @@ export function createTerminalManager(): TerminalManager {
       id: input.session.id,
       name: input.session.name,
       cwd: input.session.cwd,
+      workspaceId: input.session.workspaceId,
       title: input.session.getTitle(),
+      activity: input.session.getActivity(),
     };
   }
 
@@ -156,21 +244,79 @@ export function createTerminalManager(): TerminalManager {
     }
   }
 
+  function emitTerminalActivityTransition(input: {
+    session: TerminalSession;
+    transition: TerminalActivityTransition;
+  }): void {
+    if (terminalActivityListeners.size === 0) {
+      return;
+    }
+    const event: TerminalActivityTransitionEvent = {
+      terminalId: input.session.id,
+      name: input.session.name,
+      cwd: input.session.cwd,
+      workspaceId: input.session.workspaceId,
+      activity: input.transition.activity,
+      previous: input.transition.previous,
+    };
+    for (const listener of terminalActivityListeners) {
+      try {
+        listener(event);
+      } catch {
+        // no-op
+      }
+    }
+  }
+
+  function emitTerminalWorkspaceContributionChanged(
+    event: TerminalWorkspaceContributionChangedEvent,
+  ): void {
+    for (const listener of terminalWorkspaceContributionChangedListeners) {
+      try {
+        listener(event);
+      } catch {
+        // no-op
+      }
+    }
+  }
+
   return {
-    async getTerminals(cwd: string): Promise<TerminalSession[]> {
+    async getTerminals(
+      cwd: string,
+      options?: { workspaceId?: string },
+    ): Promise<TerminalSession[]> {
       assertAbsolutePath(cwd);
 
-      return terminalsByCwd.get(cwd) ?? [];
+      // Terminals are bucketed by exact cwd, but an agent can open a terminal in
+      // a subdirectory of the workspace. A query for the workspace root must
+      // surface those too, so aggregate every bucket at or below `cwd`.
+      const sessions: TerminalSession[] = [];
+      for (const [bucketCwd, bucketSessions] of terminalsByCwd) {
+        if (isSameOrDescendantPath(cwd, bucketCwd)) {
+          sessions.push(...bucketSessions);
+        }
+      }
+
+      // When the query carries a workspaceId, two workspaces sharing a cwd must
+      // not see each other's terminals. A missing owner is not workspace
+      // membership; unscoped callers can still list those legacy terminals.
+      if (options?.workspaceId !== undefined) {
+        return sessions.filter((session) => session.workspaceId === options.workspaceId);
+      }
+      return sessions;
     },
 
     async createTerminal(options: {
       id?: string;
       cwd: string;
+      workspaceId: string;
       name?: string;
       title?: string;
       env?: Record<string, string>;
       command?: string;
       args?: string[];
+      activityToken?: string;
+      activityUrl?: string | null;
     }): Promise<TerminalSession> {
       assertAbsolutePath(options.cwd);
 
@@ -179,17 +325,37 @@ export function createTerminalManager(): TerminalManager {
       const inheritedEnv = resolveDefaultEnvForCwd(options.cwd);
       const mergedEnv =
         inheritedEnv || options.env ? { ...inheritedEnv, ...options.env } : undefined;
-      const session = registerSession(
-        await createTerminal({
-          ...(options.id ? { id: options.id } : {}),
-          cwd: options.cwd,
-          name: options.name ?? defaultName,
-          ...(options.title ? { title: options.title } : {}),
-          ...(options.command ? { command: options.command } : {}),
-          ...(options.args ? { args: options.args } : {}),
-          ...(mergedEnv ? { env: mergedEnv } : {}),
-        }),
-      );
+      const terminalId = options.id ?? randomUUID();
+      const activityToken = options.activityToken ?? createActivityToken();
+      const terminalActivityUrl =
+        options.activityUrl === undefined
+          ? (managerOptions.getTerminalActivityUrl?.() ?? null)
+          : options.activityUrl;
+      const activityEnv = {
+        PASEO_TERMINAL_ID: terminalId,
+        PASEO_ACTIVITY_TOKEN: activityToken,
+        ...(terminalActivityUrl ? { PASEO_TERMINAL_ACTIVITY_URL: terminalActivityUrl } : {}),
+      };
+      terminalActivityTokenById.set(terminalId, activityToken);
+      let session: TerminalSession;
+      try {
+        session = registerSession(
+          await createTerminal({
+            id: terminalId,
+            cwd: options.cwd,
+            workspaceId: options.workspaceId,
+            name: options.name ?? defaultName,
+            ...(options.title ? { title: options.title } : {}),
+            ...(options.command ? { command: options.command } : {}),
+            ...(options.args ? { args: options.args } : {}),
+            ...(mergedEnv ? { env: mergedEnv } : {}),
+            activityEnv,
+          }),
+        );
+      } catch (error) {
+        terminalActivityTokenById.delete(terminalId);
+        throw error;
+      }
 
       terminals.push(session);
       terminalsByCwd.set(options.cwd, terminals);
@@ -203,12 +369,55 @@ export function createTerminalManager(): TerminalManager {
       defaultEnvByRootCwd.set(resolve(options.cwd), { ...options.env });
     },
 
+    validateTerminalActivityToken(
+      terminalId: string,
+      token: string,
+    ): "valid" | "unknown" | "invalid" {
+      const expected = terminalActivityTokenById.get(terminalId);
+      if (!expected) {
+        return "unknown";
+      }
+      return expected === token ? "valid" : "invalid";
+    },
+
     getTerminal(id: string): TerminalSession | undefined {
       return terminalsById.get(id);
     },
 
-    async getTerminalState(id: string): Promise<TerminalStateSnapshot | null> {
-      return terminalsById.get(id)?.getStateSnapshot() ?? null;
+    async getTerminalState(
+      id: string,
+      options?: TerminalStateSnapshotOptions,
+    ): Promise<TerminalStateSnapshot | null> {
+      return terminalsById.get(id)?.getStateSnapshot(options) ?? null;
+    },
+
+    setTerminalTitle(id: string, title: string): boolean {
+      const session = terminalsById.get(id);
+      if (!session) {
+        return false;
+      }
+
+      session.setTitle(title);
+      return true;
+    },
+
+    async setTerminalActivity(id: string, state: TerminalActivityState): Promise<boolean> {
+      const session = terminalsById.get(id);
+      if (!session) {
+        return false;
+      }
+
+      session.setActivity(state);
+      return true;
+    },
+
+    async clearTerminalAttention(id: string): Promise<boolean> {
+      const session = terminalsById.get(id);
+      if (!session) {
+        return false;
+      }
+
+      return session.clearActivityAttention();
     },
 
     killTerminal(id: string): void {
@@ -258,6 +467,22 @@ export function createTerminalManager(): TerminalManager {
       terminalsChangedListeners.add(listener);
       return () => {
         terminalsChangedListeners.delete(listener);
+      };
+    },
+
+    subscribeTerminalActivity(listener: TerminalActivityListener): () => void {
+      terminalActivityListeners.add(listener);
+      return () => {
+        terminalActivityListeners.delete(listener);
+      };
+    },
+
+    subscribeTerminalWorkspaceContributionChanged(
+      listener: TerminalWorkspaceContributionChangedListener,
+    ): () => void {
+      terminalWorkspaceContributionChangedListeners.add(listener);
+      return () => {
+        terminalWorkspaceContributionChangedListeners.delete(listener);
       };
     },
   };

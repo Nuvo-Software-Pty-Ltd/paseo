@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { StoredSchedule } from "@server/server/schedule/types";
-import type { WebhookTrigger } from "@server/server/trigger/types";
+import type { StoredSchedule } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 import {
   type AutomationDetailClient,
   isAutomationNotFoundError,

@@ -3,25 +3,45 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { WebSocket } from "ws";
-import { DaemonClient } from "../../client/daemon-client.js";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import {
   WSOutboundMessageSchema,
   type TerminalState,
   type WSOutboundMessage,
-} from "../../shared/messages.js";
+} from "@getpaseo/protocol/messages";
 import {
   decodeTerminalSnapshotPayload,
   decodeTerminalStreamFrame,
   encodeTerminalStreamFrame,
   TerminalStreamOpcode,
   type TerminalStreamFrame,
-} from "../../shared/terminal-stream-protocol.js";
+} from "@getpaseo/protocol/terminal-stream-protocol";
 import { createDaemonTestContext, type DaemonTestContext } from "../test-utils/index.js";
 
 type RawSessionEnvelope = Extract<WSOutboundMessage, { type: "session" }>;
 
 function tmpCwd(): string {
   return mkdtempSync(path.join(tmpdir(), "daemon-terminal-e2e-"));
+}
+
+interface CreateTerminalInWorkspaceInput {
+  cwd: string;
+  name?: string;
+  options?: { command?: string; args?: string[] };
+}
+
+async function createTerminalInWorkspace(
+  client: DaemonClient,
+  input: CreateTerminalInWorkspaceInput,
+) {
+  const opened = await client.openProject(input.cwd);
+  if (!opened.workspace) {
+    throw new Error(opened.error ?? `Failed to open workspace for ${input.cwd}`);
+  }
+  return client.createTerminal(input.cwd, input.name, undefined, {
+    ...input.options,
+    workspaceId: opened.workspace.id,
+  });
 }
 
 function createLogger() {
@@ -46,13 +66,13 @@ function extractStateText(state: Pick<TerminalState, "grid" | "scrollback">): st
 }
 
 async function waitForCondition(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs: number,
   intervalMs = 25,
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -377,6 +397,9 @@ function getFrameText(frame: TerminalStreamFrame): string {
     }
     return extractStateText(state);
   }
+  if (frame.opcode === TerminalStreamOpcode.Restore) {
+    return new TextDecoder().decode(frame.payload);
+  }
   return "";
 }
 
@@ -455,6 +478,29 @@ function sendRawTerminalInput(ws: WebSocket, slot: number, data: string): void {
       payload: data,
     }),
   );
+}
+
+function createInputModeProbeOptions(): { command: string; args: string[] } {
+  return {
+    command: process.execPath,
+    args: [
+      "-e",
+      `
+process.stdin.setRawMode?.(true);
+process.stdin.resume();
+process.stdin.on("data", (chunk) => {
+  const text = chunk.toString("utf8");
+  if (text.includes("e")) {
+    process.stdout.write("\\x1b[>7uKITTY\\n");
+  }
+  if (text.includes("w")) {
+    process.stdout.write("\\x1b[?9001hWIN32\\n");
+  }
+});
+setInterval(() => {}, 1000);
+`,
+    ],
+  };
 }
 
 async function repeatRawTerminalInput(input: {
@@ -576,7 +622,11 @@ async function measureRepeatCadenceForTerminal(input: {
   options?: { command?: string; args?: string[] };
   setupInput?: string;
 }): Promise<TerminalRepeatCadenceMeasurement> {
-  const created = await ctx.client.createTerminal(input.cwd, input.name, undefined, input.options);
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd: input.cwd,
+    name: input.name,
+    options: input.options,
+  });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -649,6 +699,11 @@ async function subscribeRawTerminal(
   ws: WebSocket,
   terminalId: string,
   requestId: string,
+  restore?: {
+    mode: "live" | "visible-snapshot" | "full-snapshot";
+    scrollbackLines?: number;
+    size?: { rows: number; cols: number };
+  },
 ): Promise<number> {
   const ready = waitForRawSessionMessage(
     ws,
@@ -665,6 +720,7 @@ async function subscribeRawTerminal(
         type: "subscribe_terminal_request",
         terminalId,
         requestId,
+        ...(restore ? { restore } : {}),
       },
     }),
   );
@@ -710,7 +766,7 @@ test("lists terminals for a directory", async () => {
 
 test("client connects and receives a snapshot of the current terminal state", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
 
   ctx.client.sendTerminalInput(terminalId, {
@@ -730,11 +786,106 @@ test("client connects and receives a snapshot of the current terminal state", as
   rmSync(cwd, { recursive: true, force: true });
 }, 30000);
 
+test("live terminal restore skips the initial snapshot", async () => {
+  const cwd = tmpCwd();
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
+  const terminalId = created.terminal!.id;
+  const ws = await connectRawWebSocket(ctx.daemon.port);
+
+  try {
+    ctx.client.sendTerminalInput(terminalId, {
+      type: "input",
+      data: "printf 'before-live\\n'\r",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const slot = await subscribeRawTerminal(ws, terminalId, "subscribe-live", { mode: "live" });
+    const outputFramesPromise = collectRawBinaryFrames(
+      ws,
+      (frames) => frames.some((frame) => getFrameText(frame).includes("after-live")),
+      10000,
+    );
+    ws.send(
+      encodeTerminalStreamFrame({
+        opcode: TerminalStreamOpcode.Input,
+        slot,
+        payload: "printf 'after-live\\n'\r",
+      }),
+    );
+    const outputFrames = await outputFramesPromise;
+    const outputText = outputFrames.map((frame) => getFrameText(frame)).join("");
+
+    expect(outputText).toContain("after-live");
+    expect(outputText).not.toContain("before-live");
+    expect(
+      outputFrames.some(
+        (frame) =>
+          frame.opcode === TerminalStreamOpcode.Snapshot ||
+          frame.opcode === TerminalStreamOpcode.Restore,
+      ),
+    ).toBe(false);
+  } finally {
+    await closeWebSocket(ws);
+  }
+
+  rmSync(cwd, { recursive: true, force: true });
+}, 30000);
+
+test("visible terminal restore sends bounded ANSI history", async () => {
+  const cwd = tmpCwd();
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd,
+    options: {
+      command: "/bin/sh",
+      args: [
+        "-lc",
+        "i=1; while [ $i -le 1200 ]; do printf 'restore-line-%04d\\n' $i; i=$((i+1)); done; sleep 30",
+      ],
+    },
+  });
+  const terminalId = created.terminal!.id;
+  const ws = await connectRawWebSocket(ctx.daemon.port);
+
+  try {
+    await waitForCondition(async () => {
+      const capture = await ctx.client.captureTerminal(terminalId);
+      return capture.lines.join("\n").includes("restore-line-1200");
+    }, 10000);
+
+    const restoreFramePromise = waitForRawBinaryFrame(
+      ws,
+      (frame) => frame.opcode === TerminalStreamOpcode.Restore,
+      10000,
+    );
+    await subscribeRawTerminal(ws, terminalId, "subscribe-visible", {
+      mode: "visible-snapshot",
+      scrollbackLines: 5,
+      size: { rows: 10, cols: 80 },
+    });
+    const restoreFrame = await restoreFramePromise;
+    const restoreText = getFrameText(restoreFrame);
+    const restoredLines = restoreText.match(/restore-line-\d{4}/g) ?? [];
+
+    expect(restoredLines[0]).toBe("restore-line-1187");
+    expect(restoredLines.at(-1)).toBe("restore-line-1200");
+    expect(restoreText).not.toContain("restore-line-1186");
+    expect(restoreText).not.toContain("restore-line-0001");
+    expect(restoredLines.length).toBeLessThanOrEqual(15);
+  } finally {
+    await closeWebSocket(ws);
+  }
+
+  rmSync(cwd, { recursive: true, force: true });
+}, 30000);
+
 test("propagates debounced terminal titles through list responses and snapshots", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd, undefined, undefined, {
-    command: "/bin/sh",
-    args: ["-lc", "printf '\\033]0;Build Output\\007'; sleep 2"],
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd,
+    options: {
+      command: "/bin/sh",
+      args: ["-lc", "printf '\\033]0;Build Output\\007'; sleep 2"],
+    },
   });
   const terminalId = created.terminal!.id;
 
@@ -765,7 +916,7 @@ test("propagates debounced terminal titles through list responses and snapshots"
 
 test("subscribe response is sent before the initial snapshot frame", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -861,7 +1012,7 @@ test("subscribe response is sent before the initial snapshot frame", async () =>
 
 test("client sends input and receives output as raw bytes", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
 
   const outputPromise = waitForTerminalOutput(ctx.client, terminalId, (text) =>
@@ -887,8 +1038,8 @@ test("default zsh terminal does not eagerly flush full state during repeat burst
 
 test("one client can stream two terminals concurrently", async () => {
   const cwd = tmpCwd();
-  const firstCreated = await ctx.client.createTerminal(cwd, "first");
-  const secondCreated = await ctx.client.createTerminal(cwd, "second");
+  const firstCreated = await createTerminalInWorkspace(ctx.client, { cwd, name: "first" });
+  const secondCreated = await createTerminalInWorkspace(ctx.client, { cwd, name: "second" });
   const firstTerminalId = firstCreated.terminal!.id;
   const secondTerminalId = secondCreated.terminal!.id;
 
@@ -923,7 +1074,7 @@ test("one client can stream two terminals concurrently", async () => {
 
 test("disconnect and reconnect both receive the current snapshot", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
 
   await ctx.client.subscribeTerminal(terminalId);
@@ -945,9 +1096,91 @@ test("disconnect and reconnect both receive the current snapshot", async () => {
   rmSync(cwd, { recursive: true, force: true });
 }, 30000);
 
+test("reconnected terminal streams replay active input modes after the snapshot", async () => {
+  const cwd = tmpCwd();
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd,
+    name: "input-mode-probe",
+    options: createInputModeProbeOptions(),
+  });
+  const terminalId = created.terminal!.id;
+  const firstWs = await connectRawWebSocket(ctx.daemon.port);
+
+  try {
+    const firstSlot = await subscribeRawTerminal(firstWs, terminalId, "sub-input-mode-first");
+    await waitForRawBinaryFrame(
+      firstWs,
+      (frame) => frame.slot === firstSlot && frame.opcode === TerminalStreamOpcode.Snapshot,
+    );
+    sendRawTerminalInput(firstWs, firstSlot, "e");
+    await waitForRawBinaryFrame(
+      firstWs,
+      (frame) =>
+        frame.slot === firstSlot &&
+        frame.opcode === TerminalStreamOpcode.Output &&
+        getFrameText(frame).includes("KITTY"),
+    );
+    sendRawTerminalInput(firstWs, firstSlot, "w");
+    await waitForRawBinaryFrame(
+      firstWs,
+      (frame) =>
+        frame.slot === firstSlot &&
+        frame.opcode === TerminalStreamOpcode.Output &&
+        getFrameText(frame).includes("WIN32"),
+    );
+  } finally {
+    await closeWebSocket(firstWs);
+  }
+
+  const secondWs = await connectRawWebSocket(ctx.daemon.port);
+  try {
+    const secondSlot = await subscribeRawTerminal(secondWs, terminalId, "sub-input-mode-second");
+    await waitForRawBinaryFrame(
+      secondWs,
+      (frame) => frame.slot === secondSlot && frame.opcode === TerminalStreamOpcode.Snapshot,
+    );
+    const replay = await waitForRawBinaryFrame(
+      secondWs,
+      (frame) =>
+        frame.slot === secondSlot &&
+        frame.opcode === TerminalStreamOpcode.Output &&
+        getFrameText(frame).includes("\x1b[=7;1u"),
+    );
+
+    expect(getFrameText(replay)).toContain("\x1b[=7;1u");
+    expect(getFrameText(replay)).toContain("\x1b[?9001h");
+  } finally {
+    await closeWebSocket(secondWs);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("reconnected terminal streams do not replay input modes before they are enabled", async () => {
+  const cwd = tmpCwd();
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd,
+    name: "input-mode-inactive-probe",
+    options: createInputModeProbeOptions(),
+  });
+  const terminalId = created.terminal!.id;
+  const ws = await connectRawWebSocket(ctx.daemon.port);
+
+  try {
+    const slot = await subscribeRawTerminal(ws, terminalId, "sub-input-mode-inactive");
+    await waitForRawBinaryFrame(
+      ws,
+      (frame) => frame.slot === slot && frame.opcode === TerminalStreamOpcode.Snapshot,
+    );
+    await waitForNoRawBinaryFrame(ws, 300);
+  } finally {
+    await closeWebSocket(ws);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}, 30000);
+
 test("fast output to a slow websocket client falls back to a snapshot", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -965,13 +1198,13 @@ test("fast output to a slow websocket client falls back to a snapshot", async ()
   });
 
   await new Promise((resolve) => setTimeout(resolve, 750));
-  rawSocket!.resume();
-
-  const catchUpFrame = await waitForRawBinaryFrame(
+  const catchUpFramePromise = waitForRawBinaryFrame(
     ws,
     (frame) => frame.opcode === TerminalStreamOpcode.Snapshot,
     15000,
   );
+  rawSocket!.resume();
+  const catchUpFrame = await catchUpFramePromise;
   expect(catchUpFrame.opcode).toBe(TerminalStreamOpcode.Snapshot);
 
   await closeWebSocket(ws);
@@ -980,7 +1213,7 @@ test("fast output to a slow websocket client falls back to a snapshot", async ()
 
 test("multiple clients on the same terminal each receive output independently", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const secondClient = await connectClient(
     ctx.daemon.port,
@@ -1013,7 +1246,7 @@ test("multiple clients on the same terminal each receive output independently", 
 
 test("resize updates server dimensions without sending a live snapshot", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   await ctx.client.subscribeTerminal(terminalId);
   ctx.client.sendTerminalInput(terminalId, {
@@ -1033,7 +1266,7 @@ test("resize updates server dimensions without sending a live snapshot", async (
 
 test("resize does not stall streamed output for an attached client", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const secondClient = await connectClient(
     ctx.daemon.port,
@@ -1072,7 +1305,7 @@ test("resize does not stall streamed output for an attached client", async () =>
 
 test("terminal exits notify the client", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
 
   let sawExit = false;
@@ -1097,7 +1330,7 @@ test("terminal exits notify the client", async () => {
 
 test("websocket terminate then new connection gets snapshot with all prior output", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const firstSocket = await connectRawWebSocket(ctx.daemon.port);
 
@@ -1160,7 +1393,7 @@ test("websocket terminate then new connection gets snapshot with all prior outpu
 
 test("two clients can both send input and each sees its own output", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const secondClient = await connectClient(
     ctx.daemon.port,
@@ -1198,7 +1431,10 @@ test("two clients can both send input and each sees its own output", async () =>
 
 test("snapshot fidelity through websocket decode preserves dimensions and visible text", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd, "Snapshot Fidelity");
+  const created = await createTerminalInWorkspace(ctx.client, {
+    cwd,
+    name: "Snapshot Fidelity",
+  });
   const terminalId = created.terminal!.id;
 
   ctx.client.sendTerminalInput(terminalId, {
@@ -1236,7 +1472,7 @@ test("snapshot fidelity through websocket decode preserves dimensions and visibl
 
 test("terminal exit prevents resubscribe and sends no frames after exit", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -1271,7 +1507,7 @@ test("terminal exit prevents resubscribe and sends no frames after exit", async 
 
 test("empty input frame does not crash the server", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -1310,7 +1546,7 @@ test("empty input frame does not crash the server", async () => {
 
 test("1MB output burst keeps frames decodable and terminal usable afterward", async () => {
   const cwd = tmpCwd();
-  const created = await ctx.client.createTerminal(cwd);
+  const created = await createTerminalInWorkspace(ctx.client, { cwd });
   const terminalId = created.terminal!.id;
   const ws = await connectRawWebSocket(ctx.daemon.port);
 
@@ -1369,7 +1605,7 @@ describe("capture", () => {
   test("captures visible terminal output as plain text", async () => {
     const cwd = tmpCwd();
     tempDirs.push(cwd);
-    const created = await ctx.client.createTerminal(cwd);
+    const created = await createTerminalInWorkspace(ctx.client, { cwd });
     const terminalId = created.terminal!.id;
 
     await ctx.client.subscribeTerminal(terminalId);
@@ -1393,7 +1629,7 @@ describe("capture", () => {
   test("captures with start/end line range", async () => {
     const cwd = tmpCwd();
     tempDirs.push(cwd);
-    const created = await ctx.client.createTerminal(cwd);
+    const created = await createTerminalInWorkspace(ctx.client, { cwd });
     const terminalId = created.terminal!.id;
 
     await ctx.client.subscribeTerminal(terminalId);
@@ -1426,7 +1662,7 @@ describe("capture", () => {
   test("supports negative line indices", async () => {
     const cwd = tmpCwd();
     tempDirs.push(cwd);
-    const created = await ctx.client.createTerminal(cwd);
+    const created = await createTerminalInWorkspace(ctx.client, { cwd });
     const terminalId = created.terminal!.id;
 
     await ctx.client.subscribeTerminal(terminalId);
@@ -1456,7 +1692,7 @@ describe("capture", () => {
   test("strips ANSI by default", async () => {
     const cwd = tmpCwd();
     tempDirs.push(cwd);
-    const created = await ctx.client.createTerminal(cwd);
+    const created = await createTerminalInWorkspace(ctx.client, { cwd });
     const terminalId = created.terminal!.id;
 
     await ctx.client.subscribeTerminal(terminalId);
@@ -1487,8 +1723,14 @@ describe("list terminals across directories", () => {
     const cwd2 = tmpCwd();
     tempDirs.push(cwd1, cwd2);
 
-    const firstCreated = await ctx.client.createTerminal(cwd1, "first-terminal");
-    const secondCreated = await ctx.client.createTerminal(cwd2, "second-terminal");
+    const firstCreated = await createTerminalInWorkspace(ctx.client, {
+      cwd: cwd1,
+      name: "first-terminal",
+    });
+    const secondCreated = await createTerminalInWorkspace(ctx.client, {
+      cwd: cwd2,
+      name: "second-terminal",
+    });
 
     const list = await ctx.client.listTerminals();
 
@@ -1512,8 +1754,11 @@ describe("list terminals across directories", () => {
     const cwd2 = tmpCwd();
     tempDirs.push(cwd1, cwd2);
 
-    const firstCreated = await ctx.client.createTerminal(cwd1, "cwd-one-terminal");
-    await ctx.client.createTerminal(cwd2, "cwd-two-terminal");
+    const firstCreated = await createTerminalInWorkspace(ctx.client, {
+      cwd: cwd1,
+      name: "cwd-one-terminal",
+    });
+    await createTerminalInWorkspace(ctx.client, { cwd: cwd2, name: "cwd-two-terminal" });
 
     const list = await ctx.client.listTerminals(cwd1);
 

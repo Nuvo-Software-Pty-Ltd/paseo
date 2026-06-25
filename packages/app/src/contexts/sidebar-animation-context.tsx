@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
 import { Keyboard, useWindowDimensions } from "react-native";
@@ -15,11 +16,28 @@ import { isNative } from "@/constants/platform";
 import { selectIsAgentListOpen, usePanelStore } from "@/stores/panel-store";
 import {
   getLeftSidebarAnimationTargets,
+  MOBILE_PANEL_STATE_AGENT,
+  MOBILE_PANEL_STATE_AGENT_LIST_CLOSING,
+  MOBILE_PANEL_STATE_AGENT_LIST_OPEN,
+  MOBILE_PANEL_STATE_AGENT_LIST_OPENING,
+  MOBILE_PANEL_STATE_FILE_EXPLORER_CLOSING,
+  MOBILE_PANEL_STATE_FILE_EXPLORER_OPEN,
+  MOBILE_PANEL_STATE_FILE_EXPLORER_OPENING,
+  MOBILE_PANEL_TARGET_AGENT,
+  MOBILE_PANEL_TARGET_AGENT_LIST,
+  MOBILE_PANEL_TARGET_FILE_EXPLORER,
+  shouldSettleMobilePanelTransition,
   shouldSyncSidebarAnimation,
 } from "@/utils/sidebar-animation-state";
 
 const ANIMATION_DURATION = 220;
 const ANIMATION_EASING = Easing.bezier(0.25, 0.1, 0.25, 1);
+// Keeps the overlay displayed long enough for the close animation to finish
+// before React hides it.
+const OVERLAY_CLOSE_GRACE_MS = 300;
+export const MOBILE_VISUAL_PANEL_AGENT = 0;
+export const MOBILE_VISUAL_PANEL_AGENT_LIST = 1;
+export const MOBILE_VISUAL_PANEL_FILE_EXPLORER = 2;
 
 interface SidebarAnimationContextValue {
   translateX: SharedValue<number>;
@@ -27,7 +45,13 @@ interface SidebarAnimationContextValue {
   windowWidth: number;
   animateToOpen: () => void;
   animateToClose: () => void;
+  startMobilePanelTransition: (mobileView: "agent" | "agent-list" | "file-explorer") => void;
+  settleMobilePanel: (mobileView: "agent" | "agent-list" | "file-explorer") => void;
+  overlayVisible: boolean;
+  setOverlayPeek: (peek: boolean) => void;
   isGesturing: SharedValue<boolean>;
+  mobileVisualPanel: SharedValue<number>;
+  mobilePanelState: SharedValue<number>;
   gestureAnimatingRef: React.MutableRefObject<boolean>;
   openGestureRef: React.MutableRefObject<GestureType | undefined>;
   closeGestureRef: React.MutableRefObject<GestureType | undefined>;
@@ -35,9 +59,30 @@ interface SidebarAnimationContextValue {
 
 const SidebarAnimationContext = createContext<SidebarAnimationContextValue | null>(null);
 
+function getMobileVisualPanel(mobileView: "agent" | "agent-list" | "file-explorer"): number {
+  if (mobileView === "agent-list") {
+    return MOBILE_VISUAL_PANEL_AGENT_LIST;
+  }
+  if (mobileView === "file-explorer") {
+    return MOBILE_VISUAL_PANEL_FILE_EXPLORER;
+  }
+  return MOBILE_VISUAL_PANEL_AGENT;
+}
+
+function getSettledMobilePanelState(mobileView: "agent" | "agent-list" | "file-explorer"): number {
+  if (mobileView === "agent-list") {
+    return MOBILE_PANEL_STATE_AGENT_LIST_OPEN;
+  }
+  if (mobileView === "file-explorer") {
+    return MOBILE_PANEL_STATE_FILE_EXPLORER_OPEN;
+  }
+  return MOBILE_PANEL_STATE_AGENT;
+}
+
 export function SidebarAnimationProvider({ children }: { children: ReactNode }) {
   const { width: windowWidth } = useWindowDimensions();
   const isCompactLayout = useIsCompactFormFactor();
+  const mobileView = usePanelStore((state) => state.mobileView);
   const isOpen = usePanelStore((state) =>
     selectIsAgentListOpen(state, { isCompact: isCompactLayout }),
   );
@@ -47,13 +92,104 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
   const translateX = useSharedValue(initialTargets.translateX);
   const backdropOpacity = useSharedValue(initialTargets.backdropOpacity);
   const isGesturing = useSharedValue(false);
+  const mobileVisualPanel = useSharedValue(getMobileVisualPanel(mobileView));
+  const mobilePanelState = useSharedValue(getSettledMobilePanelState(mobileView));
+  const mobilePanelTarget = useSharedValue(getMobileVisualPanel(mobileView));
   const gestureAnimatingRef = useRef(false);
   const openGestureRef = useRef<GestureType | undefined>(undefined);
   const closeGestureRef = useRef<GestureType | undefined>(undefined);
 
+  // React owns whether the overlay is displayed at all; the worklet owns its
+  // motion. On Fabric, Reanimated re-applies its own (possibly stale) animated
+  // props over React's committed props on every commit, so a settled-closed
+  // overlay can ghost back on screen after a heavy commit (reanimated#9635) —
+  // no committed transform/opacity value can prevent that. display lives on
+  // the plain wrapper View that Reanimated never touches, so React's value is
+  // authoritative: a hidden overlay stays hidden no matter what the animated
+  // props revert to. overlayPeek shows the overlay during an open gesture
+  // before the store flips; the close grace keeps it displayed while the
+  // close animation plays.
+  const [overlayPeek, setOverlayPeek] = useState(false);
+  const overlayTarget = isOpen || overlayPeek;
+  const [overlayVisible, setOverlayVisible] = useState(overlayTarget);
+  useEffect(() => {
+    if (overlayTarget) {
+      setOverlayVisible(true);
+      return;
+    }
+    const timer = setTimeout(() => setOverlayVisible(false), OVERLAY_CLOSE_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [overlayTarget]);
+
   // Track previous isOpen to detect changes
   const prevIsOpen = useRef(isOpen);
+  const prevMobileView = useRef(mobileView);
   const prevWindowWidth = useRef(windowWidth);
+
+  const startMobilePanelTransition = useCallback(
+    (nextMobileView: "agent" | "agent-list" | "file-explorer") => {
+      "worklet";
+      if (nextMobileView === "agent-list") {
+        mobilePanelTarget.value = MOBILE_PANEL_TARGET_AGENT_LIST;
+        mobilePanelState.value = MOBILE_PANEL_STATE_AGENT_LIST_OPENING;
+        return;
+      }
+      if (nextMobileView === "file-explorer") {
+        mobilePanelTarget.value = MOBILE_PANEL_TARGET_FILE_EXPLORER;
+        mobilePanelState.value = MOBILE_PANEL_STATE_FILE_EXPLORER_OPENING;
+        return;
+      }
+      mobilePanelTarget.value = MOBILE_PANEL_TARGET_AGENT;
+      if (mobilePanelState.value === MOBILE_PANEL_STATE_FILE_EXPLORER_OPEN) {
+        mobilePanelState.value = MOBILE_PANEL_STATE_FILE_EXPLORER_CLOSING;
+        return;
+      }
+      if (mobilePanelState.value === MOBILE_PANEL_STATE_AGENT_LIST_OPEN) {
+        mobilePanelState.value = MOBILE_PANEL_STATE_AGENT_LIST_CLOSING;
+        return;
+      }
+      mobilePanelState.value = MOBILE_PANEL_STATE_AGENT;
+    },
+    [mobilePanelState, mobilePanelTarget],
+  );
+
+  const settleMobilePanel = useCallback(
+    (nextMobileView: "agent" | "agent-list" | "file-explorer") => {
+      "worklet";
+      if (nextMobileView === "agent-list") {
+        if (
+          !shouldSettleMobilePanelTransition(
+            mobilePanelTarget.value,
+            MOBILE_PANEL_TARGET_AGENT_LIST,
+          )
+        ) {
+          return;
+        }
+        mobileVisualPanel.value = MOBILE_VISUAL_PANEL_AGENT_LIST;
+        mobilePanelState.value = MOBILE_PANEL_STATE_AGENT_LIST_OPEN;
+        return;
+      }
+      if (nextMobileView === "file-explorer") {
+        if (
+          !shouldSettleMobilePanelTransition(
+            mobilePanelTarget.value,
+            MOBILE_PANEL_TARGET_FILE_EXPLORER,
+          )
+        ) {
+          return;
+        }
+        mobileVisualPanel.value = MOBILE_VISUAL_PANEL_FILE_EXPLORER;
+        mobilePanelState.value = MOBILE_PANEL_STATE_FILE_EXPLORER_OPEN;
+        return;
+      }
+      if (!shouldSettleMobilePanelTransition(mobilePanelTarget.value, MOBILE_PANEL_TARGET_AGENT)) {
+        return;
+      }
+      mobileVisualPanel.value = MOBILE_VISUAL_PANEL_AGENT;
+      mobilePanelState.value = MOBILE_PANEL_STATE_AGENT;
+    },
+    [mobileVisualPanel, mobilePanelState, mobilePanelTarget],
+  );
 
   // Sync animation with store state changes (e.g., backdrop tap, programmatic open/close)
   useEffect(() => {
@@ -63,12 +199,16 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
       previousWindowWidth: prevWindowWidth.current,
       nextWindowWidth: windowWidth,
     });
+    const didMobileViewChange = prevMobileView.current !== mobileView;
     const previousIsOpen = prevIsOpen.current;
+    const previousMobileView = prevMobileView.current;
+    const ownsMobileViewChange = previousMobileView === "agent-list" || mobileView === "agent-list";
     prevIsOpen.current = isOpen;
+    prevMobileView.current = mobileView;
     prevWindowWidth.current = windowWidth;
     const didOpen = !previousIsOpen && isOpen;
 
-    if (!didStateChange) {
+    if (!didStateChange && !didMobileViewChange) {
       return;
     }
 
@@ -92,10 +232,46 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
     const targets = getLeftSidebarAnimationTargets({ isOpen, windowWidth });
 
     if (previousIsOpen !== isOpen) {
-      translateX.value = withTiming(targets.translateX, {
-        duration: ANIMATION_DURATION,
-        easing: ANIMATION_EASING,
-      });
+      if (isOpen) {
+        if (isCompactLayout) {
+          startMobilePanelTransition("agent-list");
+        }
+        translateX.value = withTiming(
+          targets.translateX,
+          {
+            duration: ANIMATION_DURATION,
+            easing: ANIMATION_EASING,
+          },
+          (finished) => {
+            if (!finished) return;
+            if (isCompactLayout) {
+              settleMobilePanel("agent-list");
+            }
+          },
+        );
+        backdropOpacity.value = withTiming(targets.backdropOpacity, {
+          duration: ANIMATION_DURATION,
+          easing: ANIMATION_EASING,
+        });
+        return;
+      }
+
+      if (isCompactLayout && mobileView === "agent") {
+        startMobilePanelTransition("agent");
+      }
+      translateX.value = withTiming(
+        targets.translateX,
+        {
+          duration: ANIMATION_DURATION,
+          easing: ANIMATION_EASING,
+        },
+        (finished) => {
+          if (!finished) return;
+          if (isCompactLayout && mobileView === "agent") {
+            settleMobilePanel("agent");
+          }
+        },
+      );
       backdropOpacity.value = withTiming(targets.backdropOpacity, {
         duration: ANIMATION_DURATION,
         easing: ANIMATION_EASING,
@@ -105,31 +281,62 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
 
     translateX.value = targets.translateX;
     backdropOpacity.value = targets.backdropOpacity;
-  }, [isOpen, translateX, backdropOpacity, windowWidth, isGesturing, isCompactLayout]);
+    if (isCompactLayout && ownsMobileViewChange) {
+      settleMobilePanel(mobileView);
+    }
+  }, [
+    isOpen,
+    mobileView,
+    translateX,
+    backdropOpacity,
+    windowWidth,
+    isGesturing,
+    isCompactLayout,
+    mobileVisualPanel,
+    mobilePanelState,
+    startMobilePanelTransition,
+    settleMobilePanel,
+  ]);
 
   const animateToOpen = useCallback(() => {
     "worklet";
-    translateX.value = withTiming(0, {
-      duration: ANIMATION_DURATION,
-      easing: ANIMATION_EASING,
-    });
+    startMobilePanelTransition("agent-list");
+    translateX.value = withTiming(
+      0,
+      {
+        duration: ANIMATION_DURATION,
+        easing: ANIMATION_EASING,
+      },
+      (finished) => {
+        if (!finished) return;
+        settleMobilePanel("agent-list");
+      },
+    );
     backdropOpacity.value = withTiming(1, {
       duration: ANIMATION_DURATION,
       easing: ANIMATION_EASING,
     });
-  }, [translateX, backdropOpacity]);
+  }, [translateX, backdropOpacity, startMobilePanelTransition, settleMobilePanel]);
 
   const animateToClose = useCallback(() => {
     "worklet";
-    translateX.value = withTiming(-windowWidth, {
-      duration: ANIMATION_DURATION,
-      easing: ANIMATION_EASING,
-    });
+    startMobilePanelTransition("agent");
+    translateX.value = withTiming(
+      -windowWidth,
+      {
+        duration: ANIMATION_DURATION,
+        easing: ANIMATION_EASING,
+      },
+      (finished) => {
+        if (!finished) return;
+        settleMobilePanel("agent");
+      },
+    );
     backdropOpacity.value = withTiming(0, {
       duration: ANIMATION_DURATION,
       easing: ANIMATION_EASING,
     });
-  }, [translateX, backdropOpacity, windowWidth]);
+  }, [translateX, backdropOpacity, windowWidth, startMobilePanelTransition, settleMobilePanel]);
 
   const value = useMemo<SidebarAnimationContextValue>(
     () => ({
@@ -138,7 +345,13 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
       windowWidth,
       animateToOpen,
       animateToClose,
+      startMobilePanelTransition,
+      settleMobilePanel,
+      overlayVisible,
+      setOverlayPeek,
       isGesturing,
+      mobileVisualPanel,
+      mobilePanelState,
       gestureAnimatingRef,
       openGestureRef,
       closeGestureRef,
@@ -149,7 +362,12 @@ export function SidebarAnimationProvider({ children }: { children: ReactNode }) 
       windowWidth,
       animateToOpen,
       animateToClose,
+      startMobilePanelTransition,
+      settleMobilePanel,
+      overlayVisible,
       isGesturing,
+      mobileVisualPanel,
+      mobilePanelState,
       gestureAnimatingRef,
       openGestureRef,
       closeGestureRef,

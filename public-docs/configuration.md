@@ -2,7 +2,8 @@
 title: Configuration
 description: Configure Paseo via config.json, environment variables, and CLI overrides.
 nav: Configuration
-order: 10
+order: 40
+category: Configuration
 ---
 
 # Configuration
@@ -53,6 +54,20 @@ Minimal example that configures listening address, hostnames, and MCP:
 Agent providers, both the first-class ones Paseo ships with and custom entries you add under `agents.providers`, are documented on their own page.
 
 See [Providers](/docs/providers) for the mental model and [Supported providers](/docs/supported-providers) for the full list of agents Paseo can launch. For pointing Claude at Anthropic-compatible endpoints (Z.AI, Alibaba/Qwen), multiple profiles, custom binaries, ACP agents, and the `additionalModels` merge behavior, see [Custom providers](/docs/custom-providers). The full field reference lives on GitHub at [docs/custom-providers.md](https://github.com/getpaseo/paseo/blob/main/docs/custom-providers.md).
+
+## Worktrees
+
+New worktrees are created under `$PASEO_HOME/worktrees` by default. To place new worktrees somewhere else, set `worktrees.root`:
+
+```json
+{
+  "worktrees": {
+    "root": "/mnt/fast/paseo-worktrees"
+  }
+}
+```
+
+Relative paths are resolved against `PASEO_HOME`. Existing worktrees remain where they are; changing this setting only changes where Paseo creates and discovers Paseo-managed worktrees going forward.
 
 ## Voice
 
@@ -161,6 +176,7 @@ In the mobile app, enter the password in the direct connection setup screen.
 - `PASEO_LOCAL_MODELS_DIR`, control local model directory
 - `PASEO_DICTATION_LOCAL_STT_MODEL`, override local dictation STT model
 - `PASEO_VOICE_LOCAL_STT_MODEL`, `PASEO_VOICE_LOCAL_TTS_MODEL`, override local voice STT/TTS models
+- `PASEO_DICTATION_LANGUAGE`, `PASEO_VOICE_LANGUAGE`, override dictation and voice STT language
 - `PASEO_VOICE_LOCAL_TTS_SPEAKER_ID`, `PASEO_VOICE_LOCAL_TTS_SPEED`, optional local voice TTS tuning
 
 ## Schema

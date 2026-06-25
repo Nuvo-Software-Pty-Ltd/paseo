@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { Logger } from "pino";
 
+import { writeJsonFileAtomic } from "../atomic-file.js";
 import { AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
@@ -11,14 +11,13 @@ import type { AgentSessionConfig } from "./agent-sdk-types.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
-    title: z.string().nullable().optional(),
     modeId: z.string().nullable().optional(),
     model: z.string().nullable().optional(),
     thinkingOptionId: z.string().nullable().optional(),
-    featureValues: z.record(z.unknown()).nullable().optional(),
-    extra: z.record(z.any()).nullable().optional(),
+    featureValues: z.record(z.string(), z.unknown()).nullable().optional(),
+    extra: z.record(z.string(), z.any()).nullable().optional(),
     systemPrompt: z.string().nullable().optional(),
-    mcpServers: z.record(z.any()).nullable().optional(),
+    mcpServers: z.record(z.string(), z.any()).nullable().optional(),
   })
   .nullable()
   .optional();
@@ -28,7 +27,7 @@ const PERSISTENCE_HANDLE_SCHEMA = z
     provider: z.string(),
     sessionId: z.string(),
     nativeHandle: z.any().optional(),
-    metadata: z.record(z.any()).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
   })
   .nullable()
   .optional();
@@ -37,12 +36,13 @@ const STORED_AGENT_SCHEMA = z.object({
   id: z.string(),
   provider: z.string(),
   cwd: z.string(),
+  workspaceId: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastActivityAt: z.string().optional(),
   lastUserMessageAt: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
-  labels: z.record(z.string()).default({}),
+  labels: z.record(z.string(), z.string()).default({}),
   lastStatus: AgentStatusSchema.default("closed"),
   lastModeId: z.string().nullable().optional(),
   config: SERIALIZABLE_CONFIG_SCHEMA,
@@ -53,7 +53,7 @@ const STORED_AGENT_SCHEMA = z.object({
       model: z.string().nullable().optional(),
       thinkingOptionId: z.string().nullable().optional(),
       modeId: z.string().nullable().optional(),
-      extra: z.record(z.unknown()).optional(),
+      extra: z.record(z.string(), z.unknown()).optional(),
     })
     .optional(),
   features: z.array(AgentFeatureSchema).optional(),
@@ -68,7 +68,6 @@ const STORED_AGENT_SCHEMA = z.object({
 
 export type SerializableAgentConfig = Pick<
   AgentSessionConfig,
-  | "title"
   | "modeId"
   | "model"
   | "thinkingOptionId"
@@ -134,44 +133,50 @@ export class AgentStorage {
 
   async upsert(record: StoredAgentRecord): Promise<void> {
     await this.load();
+    await this.queueRecordWrite(record);
+  }
+
+  private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
     const agentId = record.id;
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
       if (this.deleting.has(agentId)) {
-        return;
+        return undefined;
       }
 
-      const nextPath = this.buildRecordPath(record);
-      const previousPath = this.pathById.get(agentId);
-
-      await fs.mkdir(path.dirname(nextPath), { recursive: true });
-      await writeFileAtomically(nextPath, JSON.stringify(record, null, 2));
-      this.addIndexedPath(agentId, nextPath);
-
-      if (previousPath && previousPath !== nextPath) {
-        try {
-          await fs.unlink(previousPath);
-        } catch {
-          // ignore cleanup errors
-        }
-        this.removeIndexedPath(agentId, previousPath);
-      }
-
-      this.cache.set(agentId, record);
-      this.pathById.set(agentId, nextPath);
-      return;
+      await this.writeRecord(record);
+      return undefined;
     });
 
-    this.pendingWrites.set(
-      agentId,
-      next.finally(() => {
-        if (this.pendingWrites.get(agentId) === next) {
-          this.pendingWrites.delete(agentId);
-        }
-      }),
-    );
+    const tracked = next.finally(() => {
+      if (this.pendingWrites.get(agentId) === tracked) {
+        this.pendingWrites.delete(agentId);
+      }
+    });
 
-    await next;
+    this.pendingWrites.set(agentId, tracked);
+    return tracked;
+  }
+
+  private async writeRecord(record: StoredAgentRecord): Promise<void> {
+    const agentId = record.id;
+    const nextPath = this.buildRecordPath(record);
+    const previousPath = this.pathById.get(agentId);
+
+    await writeJsonFileAtomic(nextPath, record);
+    this.addIndexedPath(agentId, nextPath);
+
+    if (previousPath && previousPath !== nextPath) {
+      try {
+        await fs.unlink(previousPath);
+      } catch {
+        // ignore cleanup errors
+      }
+      this.removeIndexedPath(agentId, previousPath);
+    }
+
+    this.cache.set(agentId, record);
+    this.pathById.set(agentId, nextPath);
   }
 
   beginDelete(agentId: string): void {
@@ -206,23 +211,19 @@ export class AgentStorage {
 
   async applySnapshot(
     agent: ManagedAgent,
-    workspaceIdOrOptions?: string | { title?: string | null; internal?: boolean },
     options?: { title?: string | null; internal?: boolean },
   ): Promise<void> {
-    const nextOptions = typeof workspaceIdOrOptions === "string" ? options : workspaceIdOrOptions;
     await this.load();
     await this.waitForPendingWrite(agent.id);
     const existing = (await this.get(agent.id)) ?? null;
     const hasTitleOverride =
-      nextOptions !== undefined && Object.prototype.hasOwnProperty.call(nextOptions, "title");
+      options !== undefined && Object.prototype.hasOwnProperty.call(options, "title");
     const hasInternalOverride =
-      nextOptions !== undefined && Object.prototype.hasOwnProperty.call(nextOptions, "internal");
+      options !== undefined && Object.prototype.hasOwnProperty.call(options, "internal");
     const record = toStoredAgentRecord(agent, {
-      title: hasTitleOverride ? (nextOptions?.title ?? null) : (existing?.title ?? null),
+      title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
       createdAt: existing?.createdAt,
-      internal: hasInternalOverride
-        ? nextOptions?.internal
-        : (agent.internal ?? existing?.internal),
+      internal: hasInternalOverride ? options?.internal : (agent.internal ?? existing?.internal),
     });
 
     // Preserve soft-delete/archive status across snapshot flushes.
@@ -384,11 +385,4 @@ function projectDirNameFromCwd(cwd: string): string {
     return sanitizedRoot || "root";
   }
   return prefix + withoutRoot.replace(/[\\/]+/g, "-");
-}
-
-async function writeFileAtomically(targetPath: string, payload: string) {
-  const directory = path.dirname(targetPath);
-  const tempPath = path.join(directory, `.agent.tmp-${process.pid}-${Date.now()}-${randomUUID()}`);
-  await fs.writeFile(tempPath, payload, "utf8");
-  await fs.rename(tempPath, targetPath);
 }

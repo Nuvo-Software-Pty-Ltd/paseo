@@ -13,17 +13,19 @@ import {
   type ResolveWorktreeCreationIntentInput,
   type WorktreeCreationIntent,
 } from "./resolve-worktree-creation-intent.js";
-import type { FirstAgentContext } from "../shared/messages.js";
+import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 
 export interface CreateWorktreeCoreInput {
   cwd: string;
   worktreeSlug?: string;
+  branchName?: string;
   refName?: string;
   action?: "branch-off" | "checkout";
   githubPrNumber?: number;
   firstAgentContext?: FirstAgentContext;
   paseoHome?: string;
+  worktreesRoot?: string;
   runSetup?: boolean;
 }
 
@@ -48,6 +50,9 @@ export async function createWorktreeCore(
   const requestedWorktreeSlug = input.worktreeSlug
     ? normalizeWorktreeSlug(input.worktreeSlug)
     : undefined;
+  const requestedBranchName = input.branchName
+    ? validateWorktreeSlug(input.branchName.trim())
+    : undefined;
 
   let intentInput: ResolveWorktreeCreationIntentInput;
   if (input.action === "checkout") {
@@ -68,6 +73,7 @@ export async function createWorktreeCore(
     intentInput = {
       action: "branch-off",
       refName: input.refName,
+      branchName: requestedBranchName,
       worktreeSlug,
     };
   }
@@ -80,7 +86,7 @@ export async function createWorktreeCore(
 
   switch (intent.kind) {
     case "branch-off": {
-      normalizedSlug = intent.branchName;
+      normalizedSlug = requestedWorktreeSlug ?? normalizeWorktreeSlug(intent.branchName);
       break;
     }
     case "checkout-branch": {
@@ -98,6 +104,7 @@ export async function createWorktreeCore(
     slug: normalizedSlug,
     repoRoot,
     paseoHome: input.paseoHome,
+    worktreesRoot: input.worktreesRoot,
   });
   if (existingWorktree) {
     return { worktree: existingWorktree, intent, repoRoot, created: false };
@@ -110,6 +117,7 @@ export async function createWorktreeCore(
       source: intent,
       runSetup: input.runSetup ?? true,
       paseoHome: input.paseoHome,
+      worktreesRoot: input.worktreesRoot,
     }),
     intent,
     repoRoot,

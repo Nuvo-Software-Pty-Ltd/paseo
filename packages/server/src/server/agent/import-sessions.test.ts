@@ -1,14 +1,23 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import type { AgentManager, ManagedAgent } from "./agent-manager.js";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import type {
+  AgentManager,
+  ManagedAgent,
+  ManagedImportableProviderSession,
+} from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
-import type { FetchRecentProviderSessionsRequestMessage } from "../../shared/messages.js";
-import type { AgentTimelineItem, PersistedAgentDescriptor } from "./agent-sdk-types.js";
+import type { FetchRecentProviderSessionsRequestMessage } from "@getpaseo/protocol/messages";
+import type { AgentTimelineItem } from "./agent-sdk-types.js";
 import {
   ImportSessionsRequestError,
   importProviderSession,
   listImportableProviderSessions,
   normalizeImportAgentRequest,
 } from "./import-sessions.js";
+
+const directorySymlinkType = process.platform === "win32" ? "junction" : "dir";
 
 const TEST_CAPABILITIES = {
   supportsStreaming: true,
@@ -23,7 +32,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-function makeDescriptor(args: {
+function makeImportableSession(args: {
   provider?: string;
   sessionId: string;
   nativeHandle?: string;
@@ -32,25 +41,17 @@ function makeDescriptor(args: {
   lastActivityAt: string;
   firstPrompt?: string;
   lastPrompt?: string;
-}): PersistedAgentDescriptor {
+}): ManagedImportableProviderSession {
   const provider = args.provider ?? "codex";
   const cwd = args.cwd ?? "/tmp/project";
   return {
     provider,
-    sessionId: args.sessionId,
+    providerHandleId: args.nativeHandle ?? args.sessionId,
     cwd,
     title: args.title ?? null,
     lastActivityAt: new Date(args.lastActivityAt),
-    persistence: {
-      provider,
-      sessionId: args.sessionId,
-      ...(args.nativeHandle ? { nativeHandle: args.nativeHandle } : {}),
-      metadata: { provider, cwd },
-    },
-    timeline: [
-      ...(args.firstPrompt ? [{ type: "user_message" as const, text: args.firstPrompt }] : []),
-      ...(args.lastPrompt ? [{ type: "user_message" as const, text: args.lastPrompt }] : []),
-    ],
+    firstPromptPreview: args.firstPrompt ?? null,
+    lastPromptPreview: args.lastPrompt ?? args.firstPrompt ?? null,
   };
 }
 
@@ -109,29 +110,30 @@ function makeRequest(
 
 test("listImportableProviderSessions filters, sorts, limits, and projects importable sessions", async () => {
   const cwd = "/tmp/project";
-  const descriptors = [
-    makeDescriptor({
+  const sessions = [
+    makeImportableSession({
       sessionId: "outside-cwd",
       nativeHandle: "outside-cwd-handle",
       cwd: "/tmp/elsewhere",
       title: "Outside cwd",
       lastActivityAt: "2026-04-30T12:05:00.000Z",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "stored-session",
       nativeHandle: "stored-handle",
       cwd,
       title: "Already stored",
       lastActivityAt: "2026-04-30T12:04:00.000Z",
+      firstPrompt: "stored prompt",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "older-session",
       nativeHandle: "older-handle",
       cwd,
       title: "Older than since",
       lastActivityAt: "2026-04-29T23:59:59.000Z",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "newer-session",
       nativeHandle: "newer-handle",
       cwd,
@@ -140,7 +142,7 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
       firstPrompt: "newer first prompt",
       lastPrompt: "newer last prompt",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "second-session",
       nativeHandle: "second-handle",
       cwd,
@@ -148,7 +150,7 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
       lastActivityAt: "2026-04-30T12:00:00.000Z",
       firstPrompt: "second prompt",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "third-session",
       nativeHandle: "third-handle",
       cwd,
@@ -156,15 +158,16 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
       lastActivityAt: "2026-04-30T11:59:00.000Z",
       firstPrompt: "third prompt",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "live-session",
       nativeHandle: "live-handle",
       cwd,
       title: "Already live",
       lastActivityAt: "2026-04-30T12:01:00.000Z",
+      firstPrompt: "live prompt",
     }),
   ];
-  const listImportablePersistedAgents = vi.fn(async () => descriptors);
+  const listImportableSessions = vi.fn(async () => sessions);
   const agentManager = {
     listAgents: () =>
       [
@@ -177,8 +180,8 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
           },
         },
       ] as ManagedAgent[],
-    listImportablePersistedAgents,
-  } satisfies Pick<AgentManager, "listAgents" | "listImportablePersistedAgents">;
+    listImportableSessions,
+  } satisfies Pick<AgentManager, "listAgents" | "listImportableSessions">;
   const agentStorage = {
     list: async () => [
       {
@@ -201,11 +204,11 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
     }),
     agentManager,
     agentStorage,
-    providerRegistry: { codex: { label: "Codex" } },
+    providerSnapshotManager: { getProviderLabel: () => "Codex" },
   });
 
-  expect(listImportablePersistedAgents).toHaveBeenCalledWith({
-    limit: 200,
+  expect(listImportableSessions).toHaveBeenCalledWith({
+    limit: 2,
     providerFilter: new Set(["codex"]),
     cwd,
   });
@@ -238,8 +241,8 @@ test("listImportableProviderSessions filters, sorts, limits, and projects import
 
 test("listImportableProviderSessions filters out metadata generation sessions", async () => {
   const cwd = "/tmp/project";
-  const descriptors = [
-    makeDescriptor({
+  const sessions = [
+    makeImportableSession({
       sessionId: "metadata-session",
       nativeHandle: "metadata-handle",
       cwd,
@@ -248,7 +251,7 @@ test("listImportableProviderSessions filters out metadata generation sessions", 
       firstPrompt:
         "Generate metadata for a coding agent based on the user prompt.\nTitle: short descriptive label (<= 40 chars).",
     }),
-    makeDescriptor({
+    makeImportableSession({
       sessionId: "real-session",
       nativeHandle: "real-handle",
       cwd,
@@ -262,17 +265,50 @@ test("listImportableProviderSessions filters out metadata generation sessions", 
     request: makeRequest({ cwd, providers: ["codex"] }),
     agentManager: {
       listAgents: () => [],
-      listImportablePersistedAgents: async () => descriptors,
-    } satisfies Pick<AgentManager, "listAgents" | "listImportablePersistedAgents">,
+      listImportableSessions: async () => sessions,
+    } satisfies Pick<AgentManager, "listAgents" | "listImportableSessions">,
     agentStorage: {
       list: async () => [],
     } satisfies Pick<AgentStorage, "list">,
-    providerRegistry: { codex: { label: "Codex" } },
+    providerSnapshotManager: { getProviderLabel: () => "Codex" },
   });
 
   expect(result.entries).toHaveLength(1);
   expect(result.entries[0].providerHandleId).toBe("real-handle");
   expect(result.filteredAlreadyImportedCount).toBe(0);
+});
+
+test("listImportableProviderSessions keeps realpath-equivalent cwd matches", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "paseo-import-cwd-"));
+  const realCwd = path.join(root, "real-project");
+  const linkedCwd = path.join(root, "linked-project");
+  mkdirSync(realCwd, { recursive: true });
+  symlinkSync(realCwd, linkedCwd, directorySymlinkType);
+  const persistedCwd = realpathSync(linkedCwd);
+
+  const result = await listImportableProviderSessions({
+    request: makeRequest({ cwd: linkedCwd, providers: ["pi"] }),
+    agentManager: {
+      listAgents: () => [],
+      listImportableSessions: async () => [
+        makeImportableSession({
+          provider: "pi",
+          sessionId: "pi-session",
+          nativeHandle: "pi-handle",
+          cwd: persistedCwd,
+          title: "Pi session",
+          lastActivityAt: "2026-04-30T12:00:00.000Z",
+          firstPrompt: "remember this",
+        }),
+      ],
+    } satisfies Pick<AgentManager, "listAgents" | "listImportableSessions">,
+    agentStorage: {
+      list: async () => [],
+    } satisfies Pick<AgentStorage, "list">,
+    providerSnapshotManager: { getProviderLabel: () => "Pi" },
+  });
+
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual(["pi-handle"]);
 });
 
 test("listImportableProviderSessions rejects invalid since values", async () => {
@@ -281,12 +317,12 @@ test("listImportableProviderSessions rejects invalid since values", async () => 
       request: makeRequest({ since: "not-a-date" }),
       agentManager: {
         listAgents: () => [],
-        listImportablePersistedAgents: async () => [],
-      } satisfies Pick<AgentManager, "listAgents" | "listImportablePersistedAgents">,
+        listImportableSessions: async () => [],
+      } satisfies Pick<AgentManager, "listAgents" | "listImportableSessions">,
       agentStorage: {
         list: async () => [],
       } satisfies Pick<AgentStorage, "list">,
-      providerRegistry: {},
+      providerSnapshotManager: { getProviderLabel: () => "" },
     }),
   ).rejects.toMatchObject(
     new ImportSessionsRequestError("invalid_since", "Invalid recent provider sessions since"),
@@ -321,7 +357,7 @@ test("normalizeImportAgentRequest accepts new and legacy import handle shapes", 
   });
 });
 
-test("importProviderSession resumes by provider handle, hydrates the timeline, and applies title metadata", async () => {
+test("importProviderSession imports a selected provider session without listing", async () => {
   const cwd = "/tmp/imported-agent";
   const timeline: AgentTimelineItem[] = [
     { type: "user_message", text: "Trace recent provider sessions\n\nkeep it tight" },
@@ -335,28 +371,15 @@ test("importProviderSession resumes by provider handle, hydrates the timeline, a
     nativeHandle: "provider-thread-imported",
     title: null,
   });
-  const descriptor = makeDescriptor({
-    provider: "custom-codex",
-    sessionId: "thread-imported",
-    nativeHandle: "provider-thread-imported",
-    cwd,
-    title: null,
-    firstPrompt: "Trace recent provider sessions",
-    lastActivityAt: "2026-04-30T00:00:00.000Z",
-  });
   const agentManager = {
-    findPersistedAgent: vi.fn().mockResolvedValue(descriptor),
-    resumeAgentFromPersistence: vi.fn().mockResolvedValue(snapshot),
-    hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
+    importProviderSession: vi.fn().mockResolvedValue(snapshot),
     getTimeline: vi.fn().mockReturnValue(timeline),
-    setTitle: vi.fn().mockResolvedValue(undefined),
-    notifyAgentState: vi.fn(),
+    unarchiveSnapshot: vi.fn().mockResolvedValue(false),
   } as unknown as AgentManager;
   const agentStorage = {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
   } as unknown as AgentStorage;
-  const scheduleAgentMetadataGeneration = vi.fn();
 
   const result = await importProviderSession({
     request: {
@@ -365,37 +388,23 @@ test("importProviderSession resumes by provider handle, hydrates the timeline, a
       providerHandleId: "provider-thread-imported",
       cwd,
     },
+    workspaceId: "ws-imported",
     agentManager,
     agentStorage,
     logger: { warn: vi.fn(), error: vi.fn() } as never,
-    deps: { scheduleAgentMetadataGeneration },
   });
 
-  expect(agentManager.findPersistedAgent).toHaveBeenCalledWith(
-    "custom-codex",
-    "provider-thread-imported",
-  );
-  expect(agentManager.resumeAgentFromPersistence).toHaveBeenCalledWith(
-    descriptor.persistence,
-    { cwd },
-    undefined,
-    { labels: undefined },
-  );
-  expect(agentManager.hydrateTimelineFromProvider).toHaveBeenCalledWith(snapshot.id);
-  expect(agentManager.setTitle).toHaveBeenCalledWith(snapshot.id, "Trace recent provider sessions");
-  expect(scheduleAgentMetadataGeneration).toHaveBeenCalledWith(
-    expect.objectContaining({
-      agentManager,
-      agentId: snapshot.id,
-      cwd,
-      initialPrompt: "Trace recent provider sessions\n\nkeep it tight",
-      explicitTitle: null,
-    }),
-  );
+  expect(agentManager.importProviderSession).toHaveBeenCalledWith({
+    provider: "custom-codex",
+    providerHandleId: "provider-thread-imported",
+    cwd,
+    workspaceId: "ws-imported",
+    labels: undefined,
+  });
   expect(result).toEqual({ snapshot, timelineSize: 2 });
 });
 
-test("importProviderSession builds a fallback handle when a non-OpenCode provider has no descriptor", async () => {
+test("importProviderSession passes labels through the manager import operation", async () => {
   const cwd = "/tmp/imported-agent";
   const snapshot = makeManagedAgent({
     provider: "codex",
@@ -404,12 +413,9 @@ test("importProviderSession builds a fallback handle when a non-OpenCode provide
     nativeHandle: "thread-imported",
   });
   const agentManager = {
-    findPersistedAgent: vi.fn().mockResolvedValue(null),
-    resumeAgentFromPersistence: vi.fn().mockResolvedValue(snapshot),
-    hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
+    importProviderSession: vi.fn().mockResolvedValue(snapshot),
     getTimeline: vi.fn().mockReturnValue([]),
-    setTitle: vi.fn().mockResolvedValue(undefined),
-    notifyAgentState: vi.fn(),
+    unarchiveSnapshot: vi.fn().mockResolvedValue(false),
   } as unknown as AgentManager;
   const agentStorage = {
     list: vi.fn().mockResolvedValue([]),
@@ -422,29 +428,25 @@ test("importProviderSession builds a fallback handle when a non-OpenCode provide
       provider: "codex",
       providerHandleId: "thread-imported",
       cwd,
+      labels: { source: "import" },
     },
+    workspaceId: "ws-imported",
     agentManager,
     agentStorage,
     logger: { warn: vi.fn(), error: vi.fn() } as never,
   });
 
-  expect(agentManager.resumeAgentFromPersistence).toHaveBeenCalledWith(
-    {
-      provider: "codex",
-      sessionId: "thread-imported",
-      nativeHandle: "thread-imported",
-      metadata: { provider: "codex", cwd },
-    },
-    { cwd },
-    undefined,
-    { labels: undefined },
-  );
+  expect(agentManager.importProviderSession).toHaveBeenCalledWith({
+    provider: "codex",
+    providerHandleId: "thread-imported",
+    cwd,
+    workspaceId: "ws-imported",
+    labels: { source: "import" },
+  });
 });
 
-test("importProviderSession requires cwd for missing OpenCode descriptors", async () => {
-  const agentManager = {
-    findPersistedAgent: vi.fn().mockResolvedValue(null),
-  } as unknown as AgentManager;
+test("importProviderSession requires cwd from the selected provider row", async () => {
+  const agentManager = {} as unknown as AgentManager;
 
   await expect(
     importProviderSession({
@@ -453,11 +455,10 @@ test("importProviderSession requires cwd for missing OpenCode descriptors", asyn
         provider: "opencode",
         providerHandleId: "thread-imported",
       },
+      workspaceId: "ws-imported",
       agentManager,
       agentStorage: { list: vi.fn() } as unknown as AgentStorage,
       logger: { warn: vi.fn(), error: vi.fn() } as never,
     }),
-  ).rejects.toThrow(
-    "OpenCode sessions require --cwd when the session cannot be found in persisted agents",
-  );
+  ).rejects.toThrow("Import requires cwd from the selected provider session");
 });

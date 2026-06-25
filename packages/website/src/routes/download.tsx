@@ -18,12 +18,12 @@ import { useRelease } from "~/routes/__root";
 import "~/styles.css";
 
 export const Route = createFileRoute("/download")({
-  head: () => ({
-    meta: pageMeta(
-      "Download - Paseo",
-      "Download Paseo for macOS, Windows, Linux, iOS, and Android. Your dev environment, in your pocket.",
+  head: () =>
+    pageMeta(
+      "Download Paseo for macOS, Windows, Linux, iOS, and Android",
+      "Install Paseo on every platform. Native desktop apps for macOS, Windows, and Linux. Mobile apps for iOS and Android. Self-hosted, open source, free to download.",
+      "/download",
     ),
-  }),
   component: Download,
 });
 
@@ -33,7 +33,7 @@ function Download() {
   const urls = downloadUrls(release);
 
   return (
-    <SiteShell>
+    <SiteShell width="default">
       <h1 className="text-3xl md:text-4xl font-semibold tracking-tight mb-2">Download</h1>
       <p className="text-muted-foreground mb-10">v{version}</p>
 

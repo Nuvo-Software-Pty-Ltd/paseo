@@ -142,7 +142,6 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: "row",
     alignItems: "stretch",
-    maxWidth: "100%",
     backgroundColor: theme.colors.surface2,
     borderRadius: theme.borderRadius.lg,
     gap: 2,

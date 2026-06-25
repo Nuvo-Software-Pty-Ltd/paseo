@@ -1,4 +1,4 @@
-import type { ProjectPlacementPayload } from "@server/shared/messages";
+import type { ProjectPlacementPayload } from "@getpaseo/protocol/messages";
 import { deriveProjectKey, deriveProjectName } from "@/utils/agent-grouping";
 
 function normalizeWorkingDirectory(cwd: string): string {
@@ -13,6 +13,7 @@ export function deriveProjectPlacementFromCwd(cwd: string): ProjectPlacementPayl
   return {
     projectKey,
     projectName: deriveProjectName(projectKey),
+    workspaceName: null,
     checkout: {
       cwd: normalizedCwd,
       isGit: false,

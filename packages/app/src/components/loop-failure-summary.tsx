@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { View, Text } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import type { LoopRecord } from "@server/server/loop-types";
+import type { LoopRecord } from "@getpaseo/protocol/loop/rpc-schemas";
 import type { Theme } from "@/styles/theme";
 import { buildLoopFailureSummaryModel } from "./loop-failure-summary-model";
 

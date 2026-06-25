@@ -4,6 +4,9 @@
     "PaseoConfigV1": {
       "type": "object",
       "properties": {
+        "$schema": {
+          "type": "string"
+        },
         "version": {
           "type": "number",
           "const": 1
@@ -54,6 +57,15 @@
               },
               "additionalProperties": true
             },
+            "autoArchiveAfterMerge": {
+              "type": "boolean"
+            },
+            "enableTerminalAgentHooks": {
+              "type": "boolean"
+            },
+            "appendSystemPrompt": {
+              "type": "string"
+            },
             "cors": {
               "type": "object",
               "properties": {
@@ -77,6 +89,41 @@
                 },
                 "publicEndpoint": {
                   "type": "string"
+                },
+                "useTls": {
+                  "type": "boolean"
+                },
+                "publicUseTls": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "serviceProxy": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "description": "Compatibility shim. false suppresses optional service proxy listen/public layers only; localhost proxying remains enabled.",
+                  "type": "boolean"
+                },
+                "listen": {
+                  "description": "Optional service-only listener address. Presence enables the standalone service proxy listener.",
+                  "type": "string"
+                },
+                "publicBaseUrl": {
+                  "description": "Optional public base URL for service host aliases.",
+                  "type": "string",
+                  "format": "uri"
+                }
+              },
+              "additionalProperties": false
+            },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "password": {
+                  "type": "string",
+                  "pattern": "^\\$2[aby]\\$\\d{2}\\$[./A-Za-z0-9]{53}$"
                 }
               },
               "additionalProperties": false
@@ -89,6 +136,16 @@
           "properties": {
             "baseUrl": {
               "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "worktrees": {
+          "type": "object",
+          "properties": {
+            "root": {
+              "type": "string",
+              "minLength": 1
             }
           },
           "additionalProperties": false
@@ -248,6 +305,10 @@
                       "type": "string",
                       "minLength": 1
                     },
+                    "language": {
+                      "type": "string",
+                      "minLength": 1
+                    },
                     "confidenceThreshold": {
                       "type": "number"
                     }
@@ -283,6 +344,10 @@
                       "$ref": "#/definitions/PaseoConfigV1/properties/features/properties/dictation/properties/stt/properties/provider"
                     },
                     "model": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "language": {
                       "type": "string",
                       "minLength": 1
                     }

@@ -14,14 +14,16 @@ The purpose is to step back, not double down. The committee may propose a comple
 
 ## Prerequisites
 
-Read the **paseo** skill. Contrast is the point of a committee, so pick across providers deliberately rather than using whatever the default category would resolve to.
+Read the **paseo** skill. Before choosing committee members, read `~/.paseo/orchestration-preferences.json` unless the user explicitly named providers in this request. Do not create committee agents until you have read it.
+
+Contrast is the point of a committee, so pick across providers deliberately using the configured preferences rather than hardcoded defaults.
 
 ## Composition
 
-Two members with different reasoning styles:
+Two members with different reasoning styles, selected from orchestration preferences:
 
-- **Claude Opus** with extended thinking on
-- **Codex GPT-5.4** with thinking on
+- one planning/research-strength provider
+- one contrasting high-reasoning provider
 
 Override only when the user explicitly asks for different members.
 
@@ -45,7 +47,7 @@ Write a problem-level prompt:
 - Symptoms (if a bug)
 - What you tried and why it failed
 - Explicit: "do root cause analysis"
-- Explicit: "use think-harder — state assumptions, ask why three levels deep, check whether you're patching a symptom or removing the problem"
+- Explicit: "state assumptions, ask why three levels deep, check whether you're patching a symptom or removing the problem"
 
 Create both agents in parallel via Paseo with `[Committee] <task>` titles and the same prompt. Wait for both — not just whichever finishes first.
 

@@ -3,11 +3,15 @@ import { Gesture } from "react-native-gesture-handler";
 import { Extrapolation, interpolate, runOnJS, useSharedValue } from "react-native-reanimated";
 import { useExplorerSidebarAnimation } from "@/contexts/explorer-sidebar-animation-context";
 import { useSidebarAnimation } from "@/contexts/sidebar-animation-context";
+import { isWeb } from "@/constants/platform";
+import { canOpenRightSidebarGesture } from "@/utils/sidebar-animation-state";
 
 interface UseExplorerOpenGestureParams {
   enabled: boolean;
   onOpen: () => void;
 }
+
+const MOBILE_WEB_EDGE_SWIPE_WIDTH = 32;
 
 export function useExplorerOpenGesture({ enabled, onOpen }: UseExplorerOpenGestureParams) {
   const {
@@ -16,18 +20,24 @@ export function useExplorerOpenGesture({ enabled, onOpen }: UseExplorerOpenGestu
     windowWidth,
     animateToOpen,
     animateToClose,
+    setOverlayPeek,
     isGesturing,
     gestureAnimatingRef,
     openGestureRef,
   } = useExplorerSidebarAnimation();
-  const { openGestureRef: leftOpenGestureRef } = useSidebarAnimation();
+  const {
+    mobilePanelState,
+    gestureAnimatingRef: mobilePanelGestureAnimatingRef,
+    openGestureRef: leftOpenGestureRef,
+  } = useSidebarAnimation();
   const touchStartX = useSharedValue(0);
   const touchStartY = useSharedValue(0);
 
   const handleGestureOpen = useCallback(() => {
     gestureAnimatingRef.current = true;
+    mobilePanelGestureAnimatingRef.current = true;
     onOpen();
-  }, [onOpen, gestureAnimatingRef]);
+  }, [onOpen, gestureAnimatingRef, mobilePanelGestureAnimatingRef]);
 
   return useMemo(
     () =>
@@ -56,6 +66,17 @@ export function useExplorerOpenGesture({ enabled, onOpen }: UseExplorerOpenGestu
           const absDeltaX = Math.abs(deltaX);
           const absDeltaY = Math.abs(deltaY);
 
+          if (!canOpenRightSidebarGesture(mobilePanelState.value, translateX.value, windowWidth)) {
+            stateManager.fail();
+            return;
+          }
+
+          // Browser back-swipe owns most of the viewport; keep this gesture on the right edge.
+          if (isWeb && touchStartX.value < windowWidth - MOBILE_WEB_EDGE_SWIPE_WIDTH) {
+            stateManager.fail();
+            return;
+          }
+
           // Fail quickly on rightward or clearly vertical intent.
           if (deltaX >= 10) {
             stateManager.fail();
@@ -73,6 +94,8 @@ export function useExplorerOpenGesture({ enabled, onOpen }: UseExplorerOpenGestu
         })
         .onStart(() => {
           isGesturing.value = true;
+          // The overlay is display:none while closed; reveal it for the drag.
+          runOnJS(setOverlayPeek)(true);
         })
         .onUpdate((event) => {
           // Right sidebar: start from closed position (+windowWidth) and move towards 0.
@@ -102,14 +125,17 @@ export function useExplorerOpenGesture({ enabled, onOpen }: UseExplorerOpenGestu
         })
         .onFinalize(() => {
           isGesturing.value = false;
+          runOnJS(setOverlayPeek)(false);
         }),
     [
       enabled,
       windowWidth,
       translateX,
       backdropOpacity,
+      mobilePanelState,
       animateToOpen,
       animateToClose,
+      setOverlayPeek,
       isGesturing,
       openGestureRef,
       leftOpenGestureRef,

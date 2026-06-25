@@ -3,15 +3,13 @@ import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import { collectMultiple } from "../../utils/command-options.js";
 import type { CommandError, CommandOptions, SingleResult } from "../../output/index.js";
 import { agentRunSchema, type AgentRunResult } from "./run.js";
-import type { AgentSnapshotPayload } from "@getpaseo/server";
-
-const IMPORT_PROVIDERS = new Set(["claude", "codex", "opencode", "acp"]);
+import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
 
 export function addImportOptions(cmd: Command): Command {
   return cmd
     .description("Import an existing provider session as a Paseo agent")
     .argument("<id>", "Provider session/thread ID to import")
-    .requiredOption("--provider <provider>", "Agent provider: claude, codex, opencode, or acp")
+    .requiredOption("--provider <provider>", "Agent provider id")
     .option("--cwd <path>", "Working directory for providers that require it")
     .option(
       "--label <key=value>",
@@ -47,14 +45,6 @@ function parseImportProvider(provider: string | undefined): string {
       code: "MISSING_PROVIDER",
       message: "Provider is required",
       details: "Usage: paseo import --provider <provider> <id>",
-    } satisfies CommandError;
-  }
-
-  if (!IMPORT_PROVIDERS.has(normalizedProvider)) {
-    throw {
-      code: "INVALID_PROVIDER",
-      message: `Unsupported provider: ${normalizedProvider}`,
-      details: "Supported providers: claude, codex, opencode, acp",
     } satisfies CommandError;
   }
 

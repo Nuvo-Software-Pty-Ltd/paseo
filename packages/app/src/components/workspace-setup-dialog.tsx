@@ -1,25 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Image, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
+import { useTranslation } from "react-i18next";
 import { createNameId } from "mnemonic-id";
-import { AdaptiveModalSheet } from "@/components/adaptive-modal-sheet";
-import { Composer } from "@/components/composer";
+import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
+import { Composer } from "@/composer";
+import { DraftAgentModeControl } from "@/composer/agent-controls/mode-control";
 import { useToast } from "@/contexts/toast-context";
-import { useAgentInputDraft } from "@/hooks/use-agent-input-draft";
+import { useAgentInputDraft } from "@/composer/draft/input-draft";
 import { useProjectIconQuery } from "@/hooks/use-project-icon-query";
+import { useIsCompactFormFactor } from "@/constants/layout";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { normalizeWorkspaceDescriptor, useSessionStore } from "@/stores/session-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import { normalizeAgentSnapshot } from "@/utils/agent-snapshots";
+import { applyLegacyDaemonWorkspaceOwnership } from "@/workspace/legacy-daemon-workspaces";
 import { encodeImages } from "@/utils/encode-images";
 import { toErrorMessage } from "@/utils/error-messages";
-import { splitComposerAttachmentsForSubmit } from "@/components/composer-attachments";
-import type { CreateAgentRequestOptions, DaemonClient } from "@server/client/daemon-client";
+import { splitComposerAttachmentsForSubmit } from "@/composer/attachments/submit";
+import type {
+  CreateAgentRequestOptions,
+  DaemonClient,
+} from "@getpaseo/client/internal/daemon-client";
 import { projectIconPlaceholderLabelFromDisplayName } from "@/utils/project-display-name";
-import { requireWorkspaceExecutionAuthority } from "@/utils/workspace-execution";
+import { requireWorkspaceDirectory } from "@/utils/workspace-directory";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { navigateToPreparedWorkspaceTab } from "@/utils/workspace-navigation";
-import type { ImageAttachment, MessagePayload } from "./message-input";
+import type { ImageAttachment, MessagePayload } from "@/composer/types";
 
 function toProjectIconDataUri(icon: { mimeType: string; data: string } | null): string | null {
   if (!icon) {
@@ -63,7 +70,10 @@ function buildChatDraftComposerArgs({
 }) {
   return {
     initialServerId: serverId || null,
-    initialValues: workspaceDirectory ? { workingDir: workspaceDirectory } : undefined,
+    initialValues:
+      workspaceDirectory || sourceDirectory
+        ? { workingDir: workspaceDirectory || sourceDirectory }
+        : undefined,
     isVisible: pendingWorkspaceSetup !== null,
     onlineServerIds: isConnected && serverId ? [serverId] : [],
     lockedWorkingDir: workspaceDirectory || sourceDirectory || undefined,
@@ -85,11 +95,18 @@ async function callWorkspaceCreation({
       worktreeSlug: createNameId(),
     });
   }
-  return connectedClient.openProject(input.cwd);
+  return connectedClient.createWorkspace({
+    source: { kind: "directory", path: input.cwd },
+  });
 }
 
-function failureMessageForCreationMethod(method: "create_worktree" | "open_project") {
-  return method === "create_worktree" ? "Failed to create worktree" : "Failed to open project";
+function failureMessageForCreationMethod(
+  method: "create_worktree" | "open_project",
+  t: ReturnType<typeof useTranslation>["t"],
+) {
+  return method === "create_worktree"
+    ? t("workspaceSetup.errors.failedCreateWorktree")
+    : t("workspaceSetup.errors.failedOpenProject");
 }
 
 function buildCreateAgentOptions({
@@ -132,6 +149,7 @@ function buildCreateAgentOptions({
 }
 
 export function WorkspaceSetupDialog() {
+  const { t } = useTranslation();
   const toast = useToast();
   const pendingWorkspaceSetup = useWorkspaceSetupStore((state) => state.pendingWorkspaceSetup);
   const clearWorkspaceSetup = useWorkspaceSetupStore((state) => state.clearWorkspaceSetup);
@@ -162,7 +180,7 @@ export function WorkspaceSetupDialog() {
   });
   const composerState = chatDraft.composerState;
   if (!composerState && pendingWorkspaceSetup) {
-    throw new Error("Workspace setup composer state is required");
+    throw new Error(t("workspaceSetup.errors.composerStateRequired"));
   }
 
   const { icon: projectIcon } = useProjectIconQuery({
@@ -210,15 +228,15 @@ export function WorkspaceSetupDialog() {
 
   const withConnectedClient = useCallback(() => {
     if (!client || !isConnected) {
-      throw new Error("Host is not connected");
+      throw new Error(t("workspaceSetup.errors.hostDisconnected"));
     }
     return client;
-  }, [client, isConnected]);
+  }, [client, isConnected, t]);
 
   const ensureWorkspace = useCallback(
     async (input: { cwd: string; attachments: MessagePayload["attachments"] }) => {
       if (!pendingWorkspaceSetup) {
-        throw new Error("No workspace setup is pending");
+        throw new Error(t("workspaceSetup.errors.pendingRequired"));
       }
 
       if (createdWorkspace) {
@@ -234,7 +252,7 @@ export function WorkspaceSetupDialog() {
 
       if (payload.error || !payload.workspace) {
         throw new Error(
-          payload.error ?? failureMessageForCreationMethod(pendingWorkspaceSetup.creationMethod),
+          payload.error ?? failureMessageForCreationMethod(pendingWorkspaceSetup.creationMethod, t),
         );
       }
 
@@ -251,6 +269,7 @@ export function WorkspaceSetupDialog() {
       mergeWorkspaces,
       pendingWorkspaceSetup,
       setHasHydratedWorkspaces,
+      t,
       withConnectedClient,
     ],
   );
@@ -276,17 +295,18 @@ export function WorkspaceSetupDialog() {
         const ensuredWorkspace = await ensureWorkspace({ cwd, attachments });
         const connectedClient = withConnectedClient();
         if (!composerState) {
-          throw new Error("Workspace setup composer state is required");
+          throw new Error(t("workspaceSetup.errors.composerStateRequired"));
         }
         if (!composerState.selectedProvider) {
-          throw new Error("Select a model");
+          throw new Error(t("workspaceSetup.errors.selectModel"));
         }
 
         const wirePayload = splitComposerAttachmentsForSubmit(attachments);
         const encodedImages = await encodeImages(wirePayload.images);
-        const workspaceDirectory = requireWorkspaceExecutionAuthority({
-          workspace: ensuredWorkspace,
-        }).workspaceDirectory;
+        const workspaceDirectory = requireWorkspaceDirectory({
+          workspaceId: ensuredWorkspace.id,
+          workspaceDirectory: ensuredWorkspace.workspaceDirectory,
+        });
         const agent = await connectedClient.createAgent(
           buildCreateAgentOptions({
             composerState,
@@ -305,7 +325,13 @@ export function WorkspaceSetupDialog() {
 
         setAgents(serverId, (previous) => {
           const next = new Map(previous);
-          next.set(agent.id, normalizeAgentSnapshot(agent, serverId));
+          next.set(
+            agent.id,
+            applyLegacyDaemonWorkspaceOwnership({
+              serverId,
+              agent: normalizeAgentSnapshot(agent, serverId),
+            }),
+          );
           return next;
         });
         navigateAfterCreation(ensuredWorkspace.id, { kind: "agent", agentId: agent.id });
@@ -326,6 +352,7 @@ export function WorkspaceSetupDialog() {
       serverId,
       setAgents,
       ensureWorkspace,
+      t,
       toast,
       withConnectedClient,
     ],
@@ -344,16 +371,25 @@ export function WorkspaceSetupDialog() {
     addImagesRef.current = addImages;
   }, []);
 
+  const isCompact = useIsCompactFormFactor();
   const iconSource = useMemo(() => (iconDataUri ? { uri: iconDataUri } : null), [iconDataUri]);
-  const statusControlsWithDisabled = useMemo(
+  const agentControlsWithDisabled = useMemo(
     () =>
       composerState
         ? {
-            ...composerState.statusControls,
+            ...composerState.agentControls,
             disabled: pendingAction !== null,
           }
         : undefined,
     [composerState, pendingAction],
+  );
+
+  const composerFooter = useMemo(
+    () =>
+      isCompact && agentControlsWithDisabled ? (
+        <DraftAgentModeControl placement="footer" {...agentControlsWithDisabled} />
+      ) : undefined,
+    [isCompact, agentControlsWithDisabled],
   );
 
   const subtitleContent = useMemo(
@@ -374,14 +410,18 @@ export function WorkspaceSetupDialog() {
     [iconSource, placeholderInitial, workspaceTitle],
   );
 
+  const sheetHeader = useMemo<SheetHeader>(
+    () => ({ title: t("workspaceSetup.title"), subtitle: subtitleContent }),
+    [subtitleContent, t],
+  );
+
   if (!pendingWorkspaceSetup || !sourceDirectory) {
     return null;
   }
 
   return (
     <AdaptiveModalSheet
-      title="Create workspace"
-      subtitle={subtitleContent}
+      header={sheetHeader}
       visible={true}
       onClose={handleClose}
       snapPoints={SNAP_POINTS}
@@ -405,9 +445,10 @@ export function WorkspaceSetupDialog() {
           clearDraft={chatDraft.clear}
           autoFocus
           commandDraftConfig={composerState?.commandDraftConfig}
-          statusControls={statusControlsWithDisabled}
+          agentControls={agentControlsWithDisabled}
           inputWrapperStyle={styles.composerInputWrapper}
           onAddImages={handleAddImagesCallback}
+          footer={composerFooter}
         />
       </View>
 

@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import path from "node:path";
 
 import type { Logger } from "pino";
 import { z } from "zod";
 
+import { writeJsonFileAtomic } from "./atomic-file.js";
 import type { PersistedProjectKind, PersistedWorkspaceKind } from "./workspace-registry-model.js";
 
 const PersistedProjectRecordSchema = z.object({
@@ -12,6 +11,13 @@ const PersistedProjectRecordSchema = z.object({
   rootPath: z.string(),
   kind: z.enum(["git", "non_git"]),
   displayName: z.string(),
+  // User-set override layered over the derived displayName. Reconciliation
+  // never touches this. Null means "use the derived name". Added for #987.
+  customName: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
@@ -45,6 +51,30 @@ const PersistedWorkspaceRecordSchema = z.object({
   cwd: z.string(),
   kind: z.enum(["local_checkout", "worktree", "directory"]),
   displayName: z.string(),
+  // User-set title layered over the derived displayName. In Model B the title is
+  // the workspace identity; branch/directory are backing metadata. Reconciliation
+  // never touches this. Null means "use the derived displayName".
+  title: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
+  // The worktree's git branch. Decoupled from displayName/title by construction:
+  // displayName holds the human name (title), branch holds the git branch. Only
+  // worktree workspaces carry a branch; directory/local_checkout leave it null.
+  branch: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
+  // The base branch the worktree was created from (normalized like worktree.json's
+  // baseRefName). Only worktree workspaces carry a base branch; checkout-branch
+  // worktrees and directory/local_checkout workspaces leave it null.
+  baseBranch: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   createdAt: z.string(),
   updatedAt: z.string(),
   archivedAt: z.string().nullable(),
@@ -113,7 +143,7 @@ type RegistryRecord = PersistedProjectRecord | PersistedWorkspaceRecord | Worksp
 class FileBackedRegistry<TRecord extends RegistryRecord> {
   private readonly filePath: string;
   private readonly logger: Logger;
-  private readonly schema: z.ZodSchema<TRecord>;
+  private readonly schema: z.ZodType<TRecord, unknown>;
   private readonly getId: (record: TRecord) => string;
   private loaded = false;
   private readonly cache = new Map<string, TRecord>();
@@ -122,7 +152,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
   constructor(options: {
     filePath: string;
     logger: Logger;
-    schema: z.ZodSchema<TRecord>;
+    schema: z.ZodType<TRecord, unknown>;
     getId: (record: TRecord) => string;
     component: string;
   }) {
@@ -211,10 +241,7 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
 
   private async persist(): Promise<void> {
     const records = Array.from(this.cache.values());
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(records, null, 2), "utf8");
-    await fs.rename(tempPath, this.filePath);
+    await writeJsonFileAtomic(this.filePath, records);
   }
 
   private async enqueuePersist(): Promise<void> {
@@ -367,6 +394,7 @@ export function createPersistedProjectRecord(input: {
   rootPath: string;
   kind: PersistedProjectKind;
   displayName: string;
+  customName?: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
@@ -378,6 +406,7 @@ export function createPersistedProjectRecord(input: {
 }): PersistedProjectRecord {
   return PersistedProjectRecordSchema.parse({
     ...input,
+    customName: input.customName ?? null,
     archivedAt: input.archivedAt ?? null,
   });
 }
@@ -395,18 +424,42 @@ export function createWorkspaceContainerRecord(input: {
   });
 }
 
+export function resolveProjectDisplayName(record: PersistedProjectRecord): string {
+  return record.customName ?? record.displayName;
+}
+
 export function createPersistedWorkspaceRecord(input: {
   workspaceId: string;
   projectId: string;
   cwd: string;
   kind: PersistedWorkspaceKind;
   displayName: string;
+  title?: string | null;
+  branch?: string | null;
+  baseBranch?: string | null;
   createdAt: string;
   updatedAt: string;
   archivedAt?: string | null;
 }): PersistedWorkspaceRecord {
   return PersistedWorkspaceRecordSchema.parse({
     ...input,
+    title: input.title ?? null,
+    branch: input.branch ?? null,
+    baseBranch: input.baseBranch ?? null,
     archivedAt: input.archivedAt ?? null,
   });
+}
+
+// The single workspace-name rule: the title always wins; otherwise fall back to
+// the freshest available derived display name (a live branch snapshot when the
+// caller has one, the persisted displayName otherwise).
+export function resolveWorkspaceName(input: {
+  title: string | null;
+  derivedDisplayName: string;
+}): string {
+  return input.title ?? input.derivedDisplayName;
+}
+
+export function resolveWorkspaceDisplayName(record: PersistedWorkspaceRecord): string {
+  return resolveWorkspaceName({ title: record.title, derivedDisplayName: record.displayName });
 }

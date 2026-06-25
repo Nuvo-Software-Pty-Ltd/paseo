@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import type { Logger } from "pino";
+import { z } from "zod";
 
 import { terminateWithTreeKill } from "../../../../utils/tree-kill.js";
 
@@ -35,6 +36,87 @@ interface PendingRequest {
 type RequestHandler = (params: unknown) => unknown;
 type NotificationHandler = (method: string, params: unknown) => void;
 
+export interface CodexThreadForkParams {
+  threadId: string;
+  path?: string | null;
+  model?: string | null;
+  modelProvider?: string | null;
+  serviceTier?: string | null;
+  cwd?: string | null;
+  runtimeWorkspaceRoots?: string[] | null;
+  approvalPolicy?: unknown;
+  approvalsReviewer?: unknown;
+  sandbox?: unknown;
+  permissions?: string | null;
+  config?: Record<string, unknown> | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+  ephemeral?: boolean;
+  threadSource?: unknown;
+  excludeTurns?: boolean;
+  persistExtendedHistory?: boolean;
+}
+
+const CodexThreadForkResponseSchema = z
+  .object({
+    thread: z
+      .object({
+        id: z.string(),
+        sessionId: z.string().optional(),
+        forkedFromId: z.string().nullable().optional(),
+        turns: z.array(z.unknown()).optional(),
+      })
+      .passthrough(),
+    model: z.string(),
+    modelProvider: z.string(),
+    serviceTier: z.string().nullable(),
+    cwd: z.string(),
+    runtimeWorkspaceRoots: z.array(z.string()).optional().default([]),
+    instructionSources: z.array(z.string()).optional().default([]),
+    approvalPolicy: z.unknown(),
+    approvalsReviewer: z.unknown(),
+    sandbox: z.unknown(),
+    activePermissionProfile: z.unknown().optional(),
+    reasoningEffort: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export type CodexThreadForkResponse = z.infer<typeof CodexThreadForkResponseSchema>;
+
+export function parseCodexThreadForkResponse(response: unknown): CodexThreadForkResponse {
+  return CodexThreadForkResponseSchema.parse(response);
+}
+
+export interface CodexThreadRollbackParams {
+  threadId: string;
+  numTurns: number;
+}
+
+const CodexThreadRollbackResponseSchema = z
+  .object({
+    thread: z
+      .object({
+        id: z.string(),
+        sessionId: z.string().optional(),
+        forkedFromId: z.string().nullable().optional(),
+        turns: z.array(z.unknown()).optional(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type CodexThreadRollbackResponse = z.infer<typeof CodexThreadRollbackResponseSchema>;
+
+export function parseCodexThreadRollbackResponse(response: unknown): CodexThreadRollbackResponse {
+  return CodexThreadRollbackResponseSchema.parse(response);
+}
+
+export interface CodexAppServerTraceContext {
+  agentId?: string;
+  sessionId?: string;
+  turnId?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
@@ -54,6 +136,24 @@ function isJsonRpcNotification(msg: unknown): msg is JsonRpcNotification {
   return typeof msg.method === "string" && msg.id === undefined;
 }
 
+function readProviderSessionId(params: unknown): string | undefined {
+  if (!isRecord(params)) {
+    return undefined;
+  }
+  return typeof params.threadId === "string" ? params.threadId : undefined;
+}
+
+function readProviderTurnId(params: unknown): string | undefined {
+  if (!isRecord(params)) {
+    return undefined;
+  }
+  if (typeof params.turnId === "string") {
+    return params.turnId;
+  }
+  const turn = params.turn;
+  return isRecord(turn) && typeof turn.id === "string" ? turn.id : undefined;
+}
+
 export class CodexAppServerClient {
   private readonly rl: readline.Interface;
   private readonly pending = new Map<number, PendingRequest>();
@@ -66,6 +166,7 @@ export class CodexAppServerClient {
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
     private readonly logger: Logger,
+    private readonly getTraceContext: () => CodexAppServerTraceContext = () => ({}),
   ) {
     this.rl = readline.createInterface({ input: child.stdout });
     this.rl.on("line", (line) => {
@@ -129,6 +230,14 @@ export class CodexAppServerClient {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
     });
+  }
+
+  async forkThread(params: CodexThreadForkParams): Promise<CodexThreadForkResponse> {
+    return parseCodexThreadForkResponse(await this.request("thread/fork", params));
+  }
+
+  async rollbackThread(params: CodexThreadRollbackParams): Promise<CodexThreadRollbackResponse> {
+    return parseCodexThreadRollbackResponse(await this.request("thread/rollback", params));
   }
 
   notify(method: string, params?: unknown): void {
@@ -209,6 +318,7 @@ export class CodexAppServerClient {
 
       if (isJsonRpcRequest(raw)) {
         const request = raw;
+        this.traceRawEvent(request);
         const handler = this.requestHandlers.get(request.method);
         try {
           const result = handler ? await handler(request.params) : {};
@@ -224,7 +334,24 @@ export class CodexAppServerClient {
     }
 
     if (isJsonRpcNotification(raw)) {
+      this.traceRawEvent(raw);
       this.notificationHandler?.(raw.method, raw.params);
     }
+  }
+
+  private traceRawEvent(raw: JsonRpcRequest | JsonRpcNotification): void {
+    const traceContext = this.getTraceContext();
+    this.logger.trace(
+      {
+        provider: "codex",
+        agentId: traceContext.agentId,
+        sessionId: traceContext.sessionId ?? readProviderSessionId(raw.params),
+        turnId: traceContext.turnId ?? readProviderTurnId(raw.params),
+        method: raw.method,
+        params: raw.params,
+        rawEvent: raw,
+      },
+      "provider.codex.raw_event",
+    );
   }
 }

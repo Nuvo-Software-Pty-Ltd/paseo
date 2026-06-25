@@ -2,6 +2,7 @@ import { useRef, ReactNode, useCallback, useEffect } from "react";
 import { Buffer } from "buffer";
 import { AppState } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { useClientActivity } from "@/hooks/use-client-activity";
 import { usePushTokenRegistration } from "@/hooks/use-push-token-registration";
 import { clearArchiveAgentPending } from "@/hooks/use-archive-agent";
@@ -13,19 +14,25 @@ import {
   type ProcessTimelineResponseOutput,
   type TimelineReducerSideEffect,
 } from "@/timeline/session-stream-reducers";
-import { TIMELINE_FETCH_PAGE_SIZE } from "@/timeline/timeline-fetch-policy";
-import type { AgentAttachment, SessionOutboundMessage } from "@server/shared/messages";
-import { parseServerInfoStatusPayload } from "@server/shared/messages";
+import { useCreateFlowStore } from "@/stores/create-flow-store";
+import {
+  isTimelineCatchUpComplete,
+  planResumeTimelineSync,
+  planTimelineCatchUpAfter,
+  planTimelineCatchUpFollowUp,
+} from "@/timeline/timeline-sync-plan";
+import type { AgentAttachment, SessionOutboundMessage } from "@getpaseo/protocol/messages";
+import { parseServerInfoStatusPayload } from "@getpaseo/protocol/messages";
 import {
   buildAgentAttentionNotificationPayload,
   type AgentAttentionNotificationPayload,
   type NotificationPermissionRequest,
-} from "@server/shared/agent-attention-notification";
-import type { AgentLifecycleStatus } from "@server/shared/agent-lifecycle";
-import type { DaemonClient } from "@server/client/daemon-client";
-import type { AgentSessionConfig } from "@server/server/agent/agent-sdk-types";
-import type { GitSetupOptions } from "@server/shared/messages";
-import type { AgentPermissionResponse } from "@server/server/agent/agent-sdk-types";
+} from "@getpaseo/protocol/agent-attention-notification";
+import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { AgentSessionConfig } from "@getpaseo/protocol/agent-types";
+import type { GitSetupOptions } from "@getpaseo/protocol/messages";
+import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import { getHostRuntimeStore, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useVoiceAudioEngineOptional, useVoiceRuntimeOptional } from "@/contexts/voice-context";
 import type { AudioPlaybackSource } from "@/voice/audio-engine-types";
@@ -35,7 +42,9 @@ import {
   type MessageEntry,
   type SessionState,
   type WorkspaceDescriptor,
+  type EmptyProjectDescriptor,
   normalizeWorkspaceDescriptor,
+  normalizeEmptyProjectDescriptor,
 } from "@/stores/session-store";
 import { useDraftStore } from "@/stores/draft-store";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
@@ -52,7 +61,7 @@ import { derivePendingPermissionKey, normalizeAgentSnapshot } from "@/utils/agen
 import { resolveProjectPlacement } from "@/utils/project-placement";
 import { buildDraftStoreKey } from "@/stores/draft-keys";
 import type { AttachmentMetadata } from "@/attachments/types";
-import { splitComposerAttachmentsForSubmit } from "@/components/composer-attachments";
+import { splitComposerAttachmentsForSubmit } from "@/composer/attachments/submit";
 import { reconcilePreviousAgentStatuses } from "@/contexts/session-status-tracking";
 import { patchWorkspaceScripts } from "@/contexts/session-workspace-scripts";
 import {
@@ -62,6 +71,12 @@ import {
 import { isNative } from "@/constants/platform";
 import { useToast } from "@/contexts/toast-context";
 import { toErrorMessage } from "@/utils/error-messages";
+import { showProviderNoticeToast } from "@/utils/provider-notice-toast";
+import { applyCheckoutStatusUpdateFromEvent } from "@/git/checkout-status-cache";
+import {
+  applyLegacyDaemonWorkspaceOwnership,
+  backfillLegacyDaemonWorkspaceDirectoryIfEmpty,
+} from "@/workspace/legacy-daemon-workspaces";
 
 // Re-export types from session-store and draft-store for backward compatibility
 export type { DraftInput } from "@/stores/draft-store";
@@ -102,6 +117,56 @@ interface BufferedAudioChunk {
   audio: string;
   format: string;
   id: string;
+}
+
+interface WorkspaceHydrationSnapshot {
+  workspaces: Map<string, WorkspaceDescriptor>;
+  emptyProjects: Map<string, EmptyProjectDescriptor>;
+}
+
+async function fetchWorkspaceHydrationSnapshot(input: {
+  client: DaemonClient;
+  serverId: string;
+  subscribe: boolean;
+  isCancelled?: () => boolean;
+}): Promise<WorkspaceHydrationSnapshot | null> {
+  const workspaces = new Map<string, WorkspaceDescriptor>();
+  const emptyProjects = new Map<string, EmptyProjectDescriptor>();
+  let cursor: string | null = null;
+  let includeSubscribe = input.subscribe;
+
+  while (true) {
+    const payload = await input.client.fetchWorkspaces({
+      sort: [{ key: "activity_at", direction: "desc" }],
+      ...(includeSubscribe ? { subscribe: {} } : {}),
+      page: cursor ? { limit: 200, cursor } : { limit: 200 },
+    });
+    if (input.isCancelled?.()) {
+      return null;
+    }
+
+    for (const entry of payload.entries) {
+      const workspace = normalizeWorkspaceDescriptor(entry);
+      if (shouldSuppressWorkspaceForLocalArchive({ serverId: input.serverId, workspace })) {
+        continue;
+      }
+      workspaces.set(workspace.id, workspace);
+    }
+
+    // Project parents with no active workspaces only ride on the first page.
+    for (const project of payload.emptyProjects ?? []) {
+      const descriptor = normalizeEmptyProjectDescriptor(project);
+      emptyProjects.set(descriptor.projectId, descriptor);
+    }
+
+    if (!payload.pageInfo.hasMore || !payload.pageInfo.nextCursor) {
+      break;
+    }
+    cursor = payload.pageInfo.nextCursor;
+    includeSubscribe = false;
+  }
+
+  return { workspaces, emptyProjects };
 }
 
 function decodeBase64Chunk(base64: string): Uint8Array {
@@ -375,6 +440,7 @@ function finalizeTimelineApplication(input: {
   }
   if (shouldMarkAuthoritativeHistoryApplied) {
     setAgentAuthoritativeHistoryApplied(serverId, agentId, true);
+    useCreateFlowStore.getState().clearByAgent({ serverId, agentId });
   }
   if (result.initResolution === "resolve") {
     resolveInitDeferred(initKey);
@@ -433,6 +499,7 @@ export function SessionProvider(props: SessionProviderProps) {
 }
 
 function SessionProviderInternal({ children, serverId, client }: SessionProviderClientProps) {
+  const { t } = useTranslation();
   const voiceRuntime = useVoiceRuntimeOptional();
   const voiceAudioEngine = useVoiceAudioEngineOptional();
   const queryClient = useQueryClient();
@@ -463,6 +530,9 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const setHasHydratedWorkspaces = useSessionStore((state) => state.setHasHydratedWorkspaces);
   const setAgents = useSessionStore((state) => state.setAgents);
   const setWorkspaces = useSessionStore((state) => state.setWorkspaces);
+  const setEmptyProjects = useSessionStore((state) => state.setEmptyProjects);
+  const addEmptyProject = useSessionStore((state) => state.addEmptyProject);
+  const removeEmptyProject = useSessionStore((state) => state.removeEmptyProject);
   const mergeWorkspaces = useSessionStore((state) => state.mergeWorkspaces);
   const removeWorkspace = useSessionStore((state) => state.removeWorkspace);
   const setAgentLastActivity = useSessionStore((state) => state.setAgentLastActivity);
@@ -479,6 +549,9 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   // Track focused agent for heartbeat
   const focusedAgentId = useSessionStore(
     (state) => state.sessions[serverId]?.focusedAgentId ?? null,
+  );
+  const focusedTerminalId = useSessionStore(
+    (state) => state.sessions[serverId]?.focusedTerminalId ?? null,
   );
   const sessionAgents = useSessionStore((state) => state.sessions[serverId]?.agents);
 
@@ -498,6 +571,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
   const revalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const revalidationInFlightRef = useRef<Promise<void> | null>(null);
   const revalidationQueuedRef = useRef(false);
+  const timelineCatchUpInFlightRef = useRef<Set<string>>(new Set());
   const wasConnectedRef = useRef(isConnected);
   const audioOutputBuffersRef = useRef<Map<string, BufferedAudioChunk[]>>(new Map());
   const activeAudioGroupsRef = useRef<Set<string>>(new Set());
@@ -525,43 +599,32 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         return;
       }
 
-      const workspaces = new Map<string, WorkspaceDescriptor>();
-      let cursor: string | null = null;
-      let includeSubscribe = options?.subscribe ?? false;
-
-      while (true) {
-        const payload = await client.fetchWorkspaces({
-          sort: [{ key: "activity_at", direction: "desc" }],
-          ...(includeSubscribe ? { subscribe: {} } : {}),
-          page: cursor ? { limit: 200, cursor } : { limit: 200 },
-        });
-        if (options?.isCancelled?.()) {
-          return;
-        }
-
-        for (const entry of payload.entries) {
-          const workspace = normalizeWorkspaceDescriptor(entry);
-          if (shouldSuppressWorkspaceForLocalArchive({ serverId, workspace })) {
-            continue;
-          }
-          workspaces.set(workspace.id, workspace);
-        }
-
-        if (!payload.pageInfo.hasMore || !payload.pageInfo.nextCursor) {
-          break;
-        }
-        cursor = payload.pageInfo.nextCursor;
-        includeSubscribe = false;
-      }
-
-      if (options?.isCancelled?.()) {
+      const snapshot = await fetchWorkspaceHydrationSnapshot({
+        client,
+        serverId,
+        subscribe: options?.subscribe ?? false,
+        isCancelled: options?.isCancelled,
+      });
+      if (!snapshot || options?.isCancelled?.()) {
         return;
       }
 
-      setWorkspaces(serverId, workspaces);
+      const didBackfillLegacy = await backfillLegacyDaemonWorkspaceDirectoryIfEmpty({
+        client,
+        serverId,
+        workspaces: snapshot.workspaces,
+        emptyProjects: snapshot.emptyProjects,
+        isCancelled: options?.isCancelled,
+      });
+      if (didBackfillLegacy) {
+        return;
+      }
+
+      setWorkspaces(serverId, snapshot.workspaces);
+      setEmptyProjects(serverId, snapshot.emptyProjects.values());
       setHasHydratedWorkspaces(serverId, true);
     },
-    [client, isConnected, serverId, setHasHydratedWorkspaces, setWorkspaces],
+    [client, isConnected, serverId, setEmptyProjects, setHasHydratedWorkspaces, setWorkspaces],
   );
 
   const applyAuthoritativeAgentSnapshot = useCallback(
@@ -744,6 +807,27 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     }, AUTHORITATIVE_REVALIDATION_DEBOUNCE_MS);
   }, [client, flushAuthoritativeRevalidation, isConnected]);
 
+  const requestCanonicalCatchUp = useCallback(
+    (agentId: string, cursor: { epoch: string; endSeq: number }) => {
+      const request = planTimelineCatchUpAfter({ epoch: cursor.epoch, seq: cursor.endSeq });
+      const key = `${agentId}:${request.cursor.epoch}:${request.cursor.seq}`;
+      const inFlight = timelineCatchUpInFlightRef.current;
+      if (inFlight.has(key)) {
+        return;
+      }
+      inFlight.add(key);
+      void client
+        .fetchAgentTimeline(agentId, request)
+        .catch((error) => {
+          console.warn("[Session] failed to fetch canonical catch-up timeline", agentId, error);
+        })
+        .finally(() => {
+          inFlight.delete(key);
+        });
+    },
+    [client],
+  );
+
   const handleAppResumed = useCallback(
     (awayMs: number) => {
       scheduleAuthoritativeRevalidation();
@@ -752,15 +836,19 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         const session = useSessionStore.getState().sessions[serverId];
         const agentId = session?.focusedAgentId;
         if (agentId) {
-          void client
-            .fetchAgentTimeline(agentId, {
-              direction: "tail",
-              limit: TIMELINE_FETCH_PAGE_SIZE,
-              projection: "canonical",
-            })
-            .catch((error) => {
+          const plan = planResumeTimelineSync({
+            cursor: session?.agentTimelineCursor.get(agentId),
+          });
+          if (plan.direction === "after") {
+            requestCanonicalCatchUp(agentId, {
+              epoch: plan.cursor.epoch,
+              endSeq: plan.cursor.seq,
+            });
+          } else {
+            void client.fetchAgentTimeline(agentId, plan).catch((error) => {
               console.warn("[Session] failed to fetch tail timeline on resume", agentId, error);
             });
+          }
         }
       }
 
@@ -769,11 +857,17 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       }
       bumpHistorySyncGeneration(serverId);
     },
-    [bumpHistorySyncGeneration, client, scheduleAuthoritativeRevalidation, serverId],
+    [
+      bumpHistorySyncGeneration,
+      client,
+      requestCanonicalCatchUp,
+      scheduleAuthoritativeRevalidation,
+      serverId,
+    ],
   );
 
   // Client activity tracking (heartbeat, push token registration)
-  useClientActivity({ client, focusedAgentId, onAppResumed: handleAppResumed });
+  useClientActivity({ client, focusedAgentId, focusedTerminalId, onAppResumed: handleAppResumed });
   usePushTokenRegistration({ client, serverId });
 
   const notifyAgentAttention = useCallback(
@@ -869,25 +963,25 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       serverId,
       setVoiceMode: async (enabled, agentId) => {
         if (!client) {
-          throw new Error("Daemon unavailable");
+          throw new Error(t("common.errors.daemonUnavailable"));
         }
         await client.setVoiceMode(enabled, agentId);
       },
       sendVoiceAudioChunk: async (audioData, mimeType) => {
         if (!client) {
-          throw new Error("Daemon unavailable");
+          throw new Error(t("common.errors.daemonUnavailable"));
         }
         await client.sendVoiceAudioChunk(audioData, mimeType);
       },
       audioPlayed: async (chunkId) => {
         if (!client) {
-          throw new Error("Daemon unavailable");
+          throw new Error(t("common.errors.daemonUnavailable"));
         }
         await client.audioPlayed(chunkId);
       },
       abortRequest: async () => {
         if (!client) {
-          throw new Error("Daemon unavailable");
+          throw new Error(t("common.errors.daemonUnavailable"));
         }
         await client.abortRequest();
       },
@@ -896,7 +990,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       },
     });
     return () => unregister?.();
-  }, [client, serverId, setIsPlayingAudio, voiceRuntime]);
+  }, [client, serverId, setIsPlayingAudio, t, voiceRuntime]);
 
   useEffect(() => {
     voiceRuntime?.updateSessionConnection(serverId, isConnected);
@@ -987,13 +1081,16 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       }
 
       const normalized = normalizeAgentSnapshot(update.agent, serverId);
-      const agent = {
-        ...normalized,
-        projectPlacement: resolveProjectPlacement({
-          projectPlacement: update.project,
-          cwd: normalized.cwd,
-        }),
-      };
+      const agent = applyLegacyDaemonWorkspaceOwnership({
+        serverId,
+        agent: {
+          ...normalized,
+          projectPlacement: resolveProjectPlacement({
+            projectPlacement: update.project,
+            cwd: normalized.cwd,
+          }),
+        },
+      });
 
       applyAuthoritativeAgentSnapshot(agent);
     },
@@ -1016,22 +1113,6 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     [serverId, upsertWorkspaceSetupProgress],
   );
 
-  const requestCanonicalCatchUp = useCallback(
-    (agentId: string, cursor: { epoch: string; endSeq: number }) => {
-      void client
-        .fetchAgentTimeline(agentId, {
-          direction: "after",
-          cursor: { epoch: cursor.epoch, seq: cursor.endSeq },
-          limit: TIMELINE_FETCH_PAGE_SIZE,
-          projection: "canonical",
-        })
-        .catch((error) => {
-          console.warn("[Session] failed to fetch canonical catch-up timeline", agentId, error);
-        });
-    },
-    [client],
-  );
-
   const applyTimelineResponse = useCallback(
     (
       payload: Extract<
@@ -1041,8 +1122,13 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     ) => {
       const agentId = payload.agentId;
       const initKey = getInitKey(serverId, agentId);
+      const catchUpComplete = isTimelineCatchUpComplete({
+        direction: payload.direction,
+        hasNewer: payload.hasNewer,
+        error: payload.error,
+      });
       const shouldMarkAuthoritativeHistoryApplied =
-        payload.direction === "tail" || payload.direction === "after";
+        payload.direction === "tail" || (payload.direction === "after" && catchUpComplete);
 
       // Read current store state
       const session = useSessionStore.getState().sessions[serverId];
@@ -1064,10 +1150,15 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
 
       if (payload.agent) {
         const normalized = normalizeAgentSnapshot(payload.agent, serverId);
-        applyAuthoritativeAgentSnapshot({
-          ...normalized,
-          projectPlacement: session?.agents.get(agentId)?.projectPlacement ?? null,
-        });
+        applyAuthoritativeAgentSnapshot(
+          applyLegacyDaemonWorkspaceOwnership({
+            serverId,
+            agent: {
+              ...normalized,
+              projectPlacement: session?.agents.get(agentId)?.projectPlacement ?? null,
+            },
+          }),
+        );
       }
 
       // Call pure reducer
@@ -1111,6 +1202,19 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         requestCanonicalCatchUp,
         applyAgentUpdatePayload,
       });
+
+      const followUp = planTimelineCatchUpFollowUp({
+        direction: payload.direction,
+        hasNewer: payload.hasNewer,
+        endCursor: payload.endCursor,
+        error: payload.error,
+      });
+      if (followUp?.direction === "after") {
+        requestCanonicalCatchUp(agentId, {
+          epoch: followUp.cursor.epoch,
+          endSeq: followUp.cursor.seq,
+        });
+      }
 
       finalizeTimelineApplication({
         result,
@@ -1243,6 +1347,12 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         });
         removeWorkspaceSetup({ serverId, workspaceId: message.payload.id });
         removeWorkspace(serverId, message.payload.id);
+        if (message.payload.emptyProject) {
+          addEmptyProject(serverId, normalizeEmptyProjectDescriptor(message.payload.emptyProject));
+        }
+        if (message.payload.removedProjectId) {
+          removeEmptyProject(serverId, message.payload.removedProjectId);
+        }
         return;
       }
       const workspace = normalizeWorkspaceDescriptor(message.payload.workspace);
@@ -1255,6 +1365,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     const unsubScriptStatusUpdate = client.on("script_status_update", (message) => {
       if (message.type !== "script_status_update") return;
       setWorkspaces(serverId, (prev) => patchWorkspaceScripts(prev, message.payload));
+    });
+
+    const unsubCheckoutStatusUpdate = client.on("checkout_status_update", (message) => {
+      if (message.type !== "checkout_status_update") return;
+      applyCheckoutStatusUpdateFromEvent({ queryClient, serverId, message });
     });
 
     const unsubWorkspaceSetupProgress = client.on("workspace_setup_progress", (message) => {
@@ -1599,12 +1714,34 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       });
     });
 
+    const unsubTerminalAttention = client.on("terminal_attention_required", (message) => {
+      if (message.type !== "terminal_attention_required") {
+        return;
+      }
+      if (!message.payload.shouldNotify) {
+        return;
+      }
+      void sendOsNotification({
+        title: message.payload.title,
+        body: message.payload.body,
+        // serverId + workspaceId + terminalId route a tap to the terminal tab; cwd is
+        // carried as a fallback identifier when the daemon resolved no workspace.
+        data: {
+          serverId: message.payload.serverId ?? serverId,
+          terminalId: message.payload.terminalId,
+          cwd: message.payload.cwd,
+          ...(message.payload.workspaceId ? { workspaceId: message.payload.workspaceId } : {}),
+        },
+      });
+    });
+
     return () => {
       unsubAgentUpdate();
       unsubAgentStream();
       unsubAgentTimeline();
       unsubWorkspaceUpdate();
       unsubScriptStatusUpdate();
+      unsubCheckoutStatusUpdate();
       unsubWorkspaceSetupProgress();
       unsubWorkspaceSetupStatusResponse();
       unsubStatus();
@@ -1617,6 +1754,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
       unsubVoiceInputState();
       unsubAgentDeleted();
       unsubAgentArchived();
+      unsubTerminalAttention();
       agentStreamReducerQueue.dispose({ flush: true });
     };
   }, [
@@ -1637,6 +1775,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
     mergeWorkspaces,
     removeWorkspace,
     removeWorkspaceSetup,
+    addEmptyProject,
+    removeEmptyProject,
     setAgentLastActivity,
     setPendingPermissions,
     setHasHydratedAgents,
@@ -1664,6 +1804,9 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         id: messageId,
         text: message,
         timestamp: new Date(),
+        optimistic: true,
+        ...(images && images.length > 0 ? { images } : {}),
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
 
       // Append to head if streaming (keeps the user message with the current
@@ -1809,10 +1952,13 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         console.warn("[Session] setAgentMode skipped: daemon unavailable");
         return;
       }
-      void client.setAgentMode(agentId, modeId).catch((error) => {
-        console.error("[Session] Failed to set agent mode:", error);
-        toast.error(toErrorMessage(error));
-      });
+      void client
+        .setAgentMode(agentId, modeId)
+        .then((notice) => showProviderNoticeToast(toast, notice))
+        .catch((error) => {
+          console.error("[Session] Failed to set agent mode:", error);
+          toast.error(toErrorMessage(error));
+        });
     },
     [client, toast],
   );
@@ -1837,10 +1983,13 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
         console.warn("[Session] setAgentThinkingOption skipped: daemon unavailable");
         return;
       }
-      void client.setAgentThinkingOption(agentId, thinkingOptionId).catch((error) => {
-        console.error("[Session] Failed to set agent thinking option:", error);
-        toast.error(toErrorMessage(error));
-      });
+      void client
+        .setAgentThinkingOption(agentId, thinkingOptionId)
+        .then((notice) => showProviderNoticeToast(toast, notice))
+        .catch((error) => {
+          console.error("[Session] Failed to set agent thinking option:", error);
+          toast.error(toErrorMessage(error));
+        });
     },
     [client, toast],
   );

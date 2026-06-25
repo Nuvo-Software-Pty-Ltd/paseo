@@ -1,4 +1,4 @@
-import type { CreateTerminalResponse, ListTerminalsResponse } from "@server/shared/messages";
+import type { CreateTerminalResponse, ListTerminalsResponse } from "@getpaseo/protocol/messages";
 import { upsertTerminalListEntry } from "@/utils/terminal-list";
 
 export const TERMINALS_QUERY_STALE_TIME = 5_000;
@@ -7,8 +7,12 @@ export type ListTerminalsPayload = ListTerminalsResponse["payload"];
 type TerminalEntry = ListTerminalsPayload["terminals"][number];
 type CreatedTerminal = NonNullable<CreateTerminalResponse["payload"]["terminal"]>;
 
-export function buildTerminalsQueryKey(serverId: string, workspaceDirectory: string | null) {
-  return ["terminals", serverId, workspaceDirectory] as const;
+export function buildTerminalsQueryKey(
+  serverId: string,
+  workspaceDirectory: string | null,
+  workspaceId?: string | null,
+) {
+  return ["terminals", serverId, workspaceDirectory, workspaceId ?? null] as const;
 }
 
 export function canCreateWorkspaceTerminal(input: {

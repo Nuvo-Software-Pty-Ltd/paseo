@@ -2,8 +2,8 @@
  * @vitest-environment jsdom
  */
 import { act } from "@testing-library/react";
-import type { DaemonClient } from "@server/client/daemon-client";
-import type { WorkspaceScriptPayload } from "@server/shared/messages";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { WorkspaceScriptPayload } from "@getpaseo/protocol/messages";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import React from "react";
@@ -90,6 +90,7 @@ function workspace(input: {
     workspaceKind: input.name === "main" ? "local_checkout" : "worktree",
     name: input.name,
     status: input.status ?? "done",
+    statusEnteredAt: null,
     archivingAt: null,
     diffStat: null,
     scripts: input.scripts ?? [],

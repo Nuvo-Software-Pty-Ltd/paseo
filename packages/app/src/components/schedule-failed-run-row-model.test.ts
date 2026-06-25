@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ScheduleRun } from "@server/server/schedule/types";
+import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 import { buildScheduleRunRowModel, isLastRunFailure } from "./schedule-failed-run-row-model";
 
 // Round-19 fixture verbatim, captured at:

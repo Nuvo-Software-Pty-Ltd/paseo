@@ -1,11 +1,8 @@
 import type { Page } from "@playwright/test";
+import type { TerminalActivity, TerminalActivityState } from "@getpaseo/protocol/terminal-activity";
 import { createTempGitRepo } from "./workspace";
-import {
-  connectTerminalClient,
-  navigateToTerminal,
-  setupDeterministicPrompt,
-  type TerminalPerfDaemonClient,
-} from "./terminal-perf";
+import { navigateToTerminal, setupDeterministicPrompt } from "./terminal-perf";
+import { connectSeedClient, type SeedDaemonClient } from "./seed-client";
 
 interface TempRepo {
   path: string;
@@ -18,25 +15,40 @@ export interface TerminalInstance {
   cwd: string;
 }
 
+interface CreateTerminalInput {
+  name: string;
+  command?: string;
+  args?: string[];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class TerminalE2EHarness {
-  readonly client: TerminalPerfDaemonClient;
+  readonly client: SeedDaemonClient;
   readonly tempRepo: TempRepo;
+  readonly projectId: string;
   readonly workspaceId: string;
 
   private constructor(input: {
-    client: TerminalPerfDaemonClient;
+    client: SeedDaemonClient;
     tempRepo: TempRepo;
+    projectId: string;
     workspaceId: string;
   }) {
     this.client = input.client;
     this.tempRepo = input.tempRepo;
+    this.projectId = input.projectId;
     this.workspaceId = input.workspaceId;
   }
 
   static async create(input: { tempPrefix: string }): Promise<TerminalE2EHarness> {
     const tempRepo = await createTempGitRepo(input.tempPrefix);
-    const client = await connectTerminalClient();
-    const seedResult = await client.openProject(tempRepo.path);
+    const client = await connectSeedClient();
+    const seedResult = await client.createWorkspace({
+      source: { kind: "directory", path: tempRepo.path },
+    });
     if (!seedResult.workspace) {
       await client.close().catch(() => {});
       await tempRepo.cleanup().catch(() => {});
@@ -45,21 +57,67 @@ export class TerminalE2EHarness {
     return new TerminalE2EHarness({
       client,
       tempRepo,
+      projectId: seedResult.workspace.projectId,
       workspaceId: seedResult.workspace.id,
     });
   }
 
   async cleanup(): Promise<void> {
+    await this.client.removeProject(this.projectId).catch(() => {});
     await this.client.close().catch(() => {});
     await this.tempRepo.cleanup().catch(() => {});
   }
 
-  async createTerminal(input: { name: string }): Promise<TerminalInstance> {
-    const result = await this.client.createTerminal(this.tempRepo.path, input.name);
+  async createTerminal(input: CreateTerminalInput): Promise<TerminalInstance> {
+    const options =
+      input.command || input.args
+        ? {
+            command: input.command,
+            args: input.args,
+            workspaceId: this.workspaceId,
+          }
+        : { workspaceId: this.workspaceId };
+    const result = await this.client.createTerminal(
+      this.tempRepo.path,
+      input.name,
+      undefined,
+      options,
+    );
     if (!result.terminal) {
       throw new Error(`Failed to create terminal: ${result.error}`);
     }
     return result.terminal;
+  }
+
+  async waitForTerminalActivity(input: {
+    terminalId: string;
+    state: TerminalActivityState | null;
+    attentionReason?: TerminalActivity["attentionReason"] | null;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const timeoutMs = input.timeoutMs ?? 10_000;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const result = await this.client.listTerminals(this.tempRepo.path, undefined, {
+        workspaceId: this.workspaceId,
+      });
+      const terminal = result.terminals.find((entry) => entry.id === input.terminalId);
+      const activity = terminal?.activity ?? null;
+      const attentionMatches =
+        input.attentionReason === undefined ||
+        (activity?.attentionReason ?? null) === input.attentionReason;
+      if ((activity?.state ?? null) === input.state && attentionMatches) {
+        return;
+      }
+      await sleep(50);
+    }
+    const attentionSuffix =
+      input.attentionReason === undefined
+        ? ""
+        : ` with attention ${input.attentionReason ?? "none"}`;
+    throw new Error(
+      `Timed out waiting for terminal ${input.terminalId} activity state ${input.state ?? "unknown"}${attentionSuffix}`,
+    );
   }
 
   async killTerminal(terminalId: string): Promise<void> {

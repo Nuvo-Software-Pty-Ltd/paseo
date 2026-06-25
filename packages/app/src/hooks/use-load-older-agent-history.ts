@@ -1,7 +1,63 @@
 import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import type { ToastApi } from "@/components/toast-host";
-import { useSessionStore } from "@/stores/session-store";
-import { TIMELINE_FETCH_PAGE_SIZE } from "@/timeline/timeline-fetch-policy";
+import { i18n } from "@/i18n/i18next";
+import { useSessionStore, type AgentTimelineCursorState } from "@/stores/session-store";
+import { planTimelineOlderFetch } from "@/timeline/timeline-sync-plan";
+
+export interface LoadOlderAgentHistoryClient {
+  fetchAgentTimeline: (
+    agentId: string,
+    request: {
+      direction: "before";
+      cursor: { epoch: string; seq: number };
+      limit: number;
+      projection: "projected";
+    },
+  ) => Promise<unknown>;
+}
+
+export interface LoadOlderAgentHistoryLogger {
+  warn: (...args: unknown[]) => void;
+}
+
+export interface LoadOlderAgentHistoryDeps {
+  client: LoadOlderAgentHistoryClient | null;
+  cursor: AgentTimelineCursorState | undefined;
+  hasOlder: boolean;
+  isLoadingOlder: boolean;
+  setInFlight: (value: boolean) => void;
+  toast?: ToastApi | null;
+  logger?: LoadOlderAgentHistoryLogger;
+  failedMessage?: string;
+}
+
+export async function loadOlderAgentHistory(
+  agentId: string,
+  deps: LoadOlderAgentHistoryDeps,
+): Promise<void> {
+  const { client, cursor, hasOlder, isLoadingOlder, setInFlight, toast, logger, failedMessage } =
+    deps;
+  if (!client || !cursor || !hasOlder || isLoadingOlder) {
+    return;
+  }
+
+  setInFlight(true);
+  try {
+    await client.fetchAgentTimeline(
+      agentId,
+      planTimelineOlderFetch({ epoch: cursor.epoch, seq: cursor.startSeq }),
+    );
+  } catch (error) {
+    (logger ?? console).warn("[Timeline] failed to load older agent history", agentId, error);
+    toast?.show(failedMessage ?? i18n.t("loadOlderHistory.failed"), {
+      durationMs: 2200,
+      testID: "agent-load-older-history-toast",
+    });
+  } finally {
+    setInFlight(false);
+  }
+}
 
 export function useLoadOlderAgentHistory({
   serverId,
@@ -12,10 +68,7 @@ export function useLoadOlderAgentHistory({
   agentId: string;
   toast?: ToastApi | null;
 }) {
-  const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
-  const cursor = useSessionStore((state) =>
-    state.sessions[serverId]?.agentTimelineCursor.get(agentId),
-  );
+  const { t } = useTranslation();
   const hasOlder =
     useSessionStore((state) => state.sessions[serverId]?.agentTimelineHasOlder.get(agentId)) ===
     true;
@@ -42,31 +95,17 @@ export function useLoadOlderAgentHistory({
   );
 
   const loadOlder = useCallback(() => {
-    const latestSession = useSessionStore.getState().sessions[serverId];
-    const latestIsLoading = latestSession?.agentTimelineOlderFetchInFlight.get(agentId) === true;
-    if (!client || !cursor || !hasOlder || isLoadingOlder || latestIsLoading) {
-      return;
-    }
-
-    setInFlight(true);
-    void client
-      .fetchAgentTimeline(agentId, {
-        direction: "before",
-        cursor: { epoch: cursor.epoch, seq: cursor.startSeq },
-        limit: TIMELINE_FETCH_PAGE_SIZE,
-        projection: "canonical",
-      })
-      .catch((error) => {
-        console.warn("[Timeline] failed to load older agent history", agentId, error);
-        toast?.show("Couldn't load older history", {
-          durationMs: 2200,
-          testID: "agent-load-older-history-toast",
-        });
-      })
-      .finally(() => {
-        setInFlight(false);
-      });
-  }, [agentId, client, cursor, hasOlder, isLoadingOlder, serverId, setInFlight, toast]);
+    const session = useSessionStore.getState().sessions[serverId];
+    void loadOlderAgentHistory(agentId, {
+      client: (session?.client ?? null) as LoadOlderAgentHistoryClient | null,
+      cursor: session?.agentTimelineCursor.get(agentId),
+      hasOlder: session?.agentTimelineHasOlder.get(agentId) === true,
+      isLoadingOlder: session?.agentTimelineOlderFetchInFlight.get(agentId) === true,
+      setInFlight,
+      toast,
+      failedMessage: t("loadOlderHistory.failed"),
+    });
+  }, [agentId, serverId, setInFlight, toast, t]);
 
   return {
     isLoadingOlder,

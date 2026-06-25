@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AgentPermissionAction } from "@server/server/agent/agent-sdk-types";
+import type { AgentPermissionAction } from "@getpaseo/protocol/agent-types";
 import {
   buildPermissionResponse,
   isHardAbortAction,

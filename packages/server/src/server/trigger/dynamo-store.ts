@@ -2,8 +2,8 @@ import type { Logger } from "pino";
 import { randomBytes } from "node:crypto";
 import { resolveDaemonDataTableName, type DynamoLike } from "../cloud-dynamo-client.js";
 import { createCloudSharedKeys, type CloudSharedKeys } from "../cloud-shared-mirror.js";
-import type { ScheduleRun } from "../schedule/types.js";
-import { WebhookTriggerSchema, type WebhookTrigger } from "./types.js";
+import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
+import { WebhookTriggerSchema, type WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 import type { WebhookTriggerStore } from "./store.js";
 
 // D-3.5d — DynamoDB-backed WebhookTriggerStore for cloud mode. Mirrors

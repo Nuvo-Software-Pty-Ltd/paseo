@@ -4,11 +4,10 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
 import { OpenCodeAgentClient } from "./opencode-agent.js";
 import {
-  createEventStream,
   idleEvent,
   TestOpenCodeClient,
-  TestOpenCodeRuntime,
-} from "./opencode/test-utils/test-opencode-runtime.js";
+  TestOpenCodeHarness,
+} from "./opencode/test-utils/test-opencode-harness.js";
 
 interface MockOpenCodeClientOptions {
   agents?: unknown[];
@@ -16,10 +15,16 @@ interface MockOpenCodeClientOptions {
 }
 
 function mockOpenCodeClient(options: MockOpenCodeClientOptions = {}) {
-  const runtime = new TestOpenCodeRuntime();
+  const runtime = new TestOpenCodeHarness();
   const openCodeClient = new TestOpenCodeClient();
   openCodeClient.appAgentsResponse = { data: options.agents ?? [] };
-  openCodeClient.eventStream = createEventStream(options.events ?? [idleEvent()]);
+  openCodeClient.sessionPromptAsyncEvents = options.events ?? [idleEvent()];
+  openCodeClient.providerListResponse = {
+    data: {
+      connected: ["openai"],
+      all: [{ id: "openai", source: "env", models: {} }],
+    },
+  };
   runtime.enqueueClient(openCodeClient);
 
   return { openCodeClient, runtime };
@@ -41,7 +46,7 @@ function toolPermissionEvent(): unknown {
   };
 }
 
-function questionEvent(): unknown {
+function questionEvent(questionOverrides: Record<string, unknown> = {}): unknown {
   return {
     type: "question.asked",
     properties: {
@@ -52,6 +57,7 @@ function questionEvent(): unknown {
           question: "Which option should OpenCode use?",
           header: "Decision",
           options: [{ label: "Proceed", description: "Continue with the change" }],
+          ...questionOverrides,
         },
       ],
       tool: {
@@ -62,8 +68,8 @@ function questionEvent(): unknown {
   };
 }
 
-describe("OpenCode full-access mode", () => {
-  test("includes virtual full-access mode with dynamic OpenCode agents", async () => {
+describe("OpenCode auto_accept feature", () => {
+  test("lists discovered OpenCode modes without injecting defaults", async () => {
     const { runtime } = mockOpenCodeClient({
       agents: [
         { name: "build", mode: "primary", hidden: false, description: "Build agent" },
@@ -71,27 +77,71 @@ describe("OpenCode full-access mode", () => {
       ],
     });
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, undefined, { runtime });
-    const modes = await client.listModes({ cwd: "/tmp/project", force: false });
-
-    expect(modes.map((mode) => mode.id)).toEqual(["build", "plan", "full-access", "paseo-custom"]);
-    expect(modes.find((mode) => mode.id === "full-access")).toMatchObject({
-      label: "Full Access",
-      description: "Automatically approves all tool permission prompts for the session",
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
     });
+    const { modes } = await client.fetchCatalog({ cwd: "/tmp/project", force: false });
+
+    expect(modes.map((mode) => mode.id)).toEqual(["build", "paseo-custom"]);
   });
 
-  test("reports full-access but sends prompts through OpenCode build agent", async () => {
+  test("falls back to default OpenCode modes when discovery returns no modes", async () => {
+    const { runtime } = mockOpenCodeClient({ agents: [] });
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const { modes } = await client.fetchCatalog({ cwd: "/tmp/project", force: false });
+
+    expect(modes.map((mode) => mode.id)).toEqual(["build", "plan"]);
+  });
+
+  test("lists auto accept as a provider feature", async () => {
+    const { runtime } = mockOpenCodeClient();
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const enabledFeatures = await client.listFeatures({
+      provider: "opencode",
+      cwd: "/tmp/project",
+      featureValues: { auto_accept: true },
+    });
+    const legacyFeatures = await client.listFeatures({
+      provider: "opencode",
+      cwd: "/tmp/project",
+      modeId: "full-access",
+    });
+
+    expect(enabledFeatures).toEqual([
+      expect.objectContaining({
+        type: "toggle",
+        id: "auto_accept",
+        label: "Auto Accept",
+        value: true,
+      }),
+    ]);
+    expect(legacyFeatures).toEqual([expect.objectContaining({ id: "auto_accept", value: true })]);
+  });
+
+  test("keeps legacy full-access as an alias for build plus auto accept", async () => {
     const { openCodeClient, runtime } = mockOpenCodeClient();
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession({
       provider: "opencode",
       cwd: "/tmp/project",
       modeId: "full-access",
     });
 
-    expect(await session.getCurrentMode()).toBe("full-access");
+    expect(await session.getCurrentMode()).toBe("build");
+    expect(session.features).toEqual([expect.objectContaining({ id: "auto_accept", value: true })]);
 
     await session.run("Implement the change");
 
@@ -103,17 +153,124 @@ describe("OpenCode full-access mode", () => {
     await session.close();
   });
 
-  test("auto-approves tool permissions in full-access without surfacing them", async () => {
+  test("resolves legacy full-access for provider-driven child creation", () => {
+    const client = new OpenCodeAgentClient(createTestLogger());
+
+    expect(
+      client.resolveCreateConfig({
+        provider: "opencode",
+        requestedMode: "full-access",
+        featureValues: undefined,
+        parent: null,
+        unattended: false,
+        availableModes: [
+          { id: "build", label: "Build" },
+          { id: "plan", label: "Plan" },
+        ],
+      }),
+    ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
+  });
+
+  test("inherits unattended callers as build plus auto accept", () => {
+    const client = new OpenCodeAgentClient(createTestLogger());
+
+    expect(
+      client.resolveCreateConfig({
+        provider: "opencode",
+        requestedMode: undefined,
+        featureValues: undefined,
+        parent: {
+          provider: "claude",
+          modeId: "bypassPermissions",
+          isUnattended: true,
+        },
+        unattended: true,
+        availableModes: [
+          { id: "build", label: "Build" },
+          { id: "plan", label: "Plan" },
+        ],
+      }),
+    ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
+  });
+
+  test("defaults unattended creation without a parent to build plus auto accept", () => {
+    const client = new OpenCodeAgentClient(createTestLogger());
+
+    expect(
+      client.resolveCreateConfig({
+        provider: "opencode",
+        requestedMode: undefined,
+        featureValues: undefined,
+        parent: null,
+        unattended: true,
+        availableModes: [
+          { id: "build", label: "Build" },
+          { id: "plan", label: "Plan" },
+        ],
+      }),
+    ).toEqual({ modeId: "build", featureValues: { auto_accept: true } });
+  });
+
+  test("preserves the selected OpenCode agent when inheriting auto accept from an OpenCode parent", () => {
+    const client = new OpenCodeAgentClient(createTestLogger());
+
+    expect(
+      client.resolveCreateConfig({
+        provider: "opencode",
+        requestedMode: undefined,
+        featureValues: undefined,
+        parent: {
+          provider: "opencode",
+          modeId: "paseo-custom",
+          isUnattended: true,
+        },
+        unattended: true,
+        availableModes: [
+          { id: "build", label: "Build" },
+          { id: "plan", label: "Plan" },
+          { id: "paseo-custom", label: "Paseo Custom" },
+        ],
+      }),
+    ).toEqual({ modeId: "paseo-custom", featureValues: { auto_accept: true } });
+  });
+
+  test("inherits auto accept from an OpenCode parent when the child chooses a mode", () => {
+    const client = new OpenCodeAgentClient(createTestLogger());
+
+    expect(
+      client.resolveCreateConfig({
+        provider: "opencode",
+        requestedMode: "base",
+        featureValues: undefined,
+        parent: {
+          provider: "opencode",
+          modeId: "orchestrator",
+          isUnattended: true,
+        },
+        unattended: true,
+        availableModes: [
+          { id: "build", label: "Build" },
+          { id: "base", label: "Base" },
+          { id: "orchestrator", label: "Orchestrator" },
+        ],
+      }),
+    ).toEqual({ modeId: "base", featureValues: { auto_accept: true } });
+  });
+
+  test("auto-approves tool permissions when auto accept is enabled", async () => {
     const { openCodeClient, runtime } = mockOpenCodeClient({
       events: [toolPermissionEvent(), idleEvent()],
     });
     const receivedEvents: AgentStreamEvent[] = [];
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession({
       provider: "opencode",
       cwd: "/tmp/project",
-      modeId: "full-access",
+      featureValues: { auto_accept: true },
     });
     session.subscribe((event) => receivedEvents.push(event));
 
@@ -131,17 +288,20 @@ describe("OpenCode full-access mode", () => {
     await session.close();
   });
 
-  test("keeps questions separate from full-access tool auto-approval", async () => {
+  test("keeps questions separate from auto accept tool approval", async () => {
     const { openCodeClient, runtime } = mockOpenCodeClient({
       events: [questionEvent(), idleEvent()],
     });
     const receivedEvents: AgentStreamEvent[] = [];
 
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, undefined, { runtime });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
     const session = await client.createSession({
       provider: "opencode",
       cwd: "/tmp/project",
-      modeId: "full-access",
+      featureValues: { auto_accept: true },
     });
     session.subscribe((event) => receivedEvents.push(event));
 
@@ -170,6 +330,59 @@ describe("OpenCode full-access mode", () => {
     });
     expect(openCodeClient.calls.permissionReply).toEqual([]);
     expect(session.getPendingPermissions()).toEqual([]);
+
+    await session.close();
+  });
+
+  test("surfaces OpenCode questions with a free-write answer option", async () => {
+    const { openCodeClient, runtime } = mockOpenCodeClient({
+      events: [questionEvent({ custom: false }), idleEvent()],
+    });
+    const receivedEvents: AgentStreamEvent[] = [];
+
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/tmp/project",
+    });
+    session.subscribe((event) => receivedEvents.push(event));
+
+    await session.run("Ask a question");
+
+    expect(receivedEvents.filter((event) => event.type === "permission_requested")).toEqual([
+      expect.objectContaining({
+        request: expect.objectContaining({
+          id: "question-1",
+          kind: "question",
+          input: {
+            questions: [
+              {
+                question: "Which option should OpenCode use?",
+                header: "Decision",
+                options: [{ label: "Proceed", description: "Continue with the change" }],
+                allowOther: true,
+              },
+            ],
+          },
+        }),
+      }),
+    ]);
+
+    await session.respondToPermission("question-1", {
+      behavior: "allow",
+      updatedInput: { answers: { Decision: "Use another answer" } },
+    });
+
+    expect(openCodeClient.calls.questionReply).toEqual([
+      {
+        requestID: "question-1",
+        directory: "/tmp/project",
+        answers: [["Use another answer"]],
+      },
+    ]);
 
     await session.close();
   });

@@ -1,11 +1,17 @@
 import { z } from "zod";
-import type { GitHubSearchKind } from "../shared/messages.js";
-import { findExecutable } from "../utils/executable.js";
+import type { GitHubSearchKind } from "@getpaseo/protocol/messages";
+import { findExecutable } from "../executable-resolution/executable-resolution.js";
 import { resolveGitHubRemote } from "../utils/github-remote.js";
 import { runGitCommand } from "../utils/run-git-command.js";
 import { execCommand } from "../utils/spawn.js";
 
 const DEFAULT_GITHUB_CACHE_TTL_MS = 30_000;
+const CHECK_ANNOTATION_PAGE_MAX = 20;
+const CHECK_LOG_TAIL_MAX_LINES = 200;
+const CHECK_LOG_TAIL_MAX_BYTES = 16 * 1024;
+const CHECK_LOG_TAIL_CACHE_MAX_ENTRIES = 128;
+const ACTIONS_JOB_PAGE_MAX = 100;
+const FAILED_CHECK_JOB_LIMIT = 5;
 export const GITHUB_POLL_FAST_INTERVAL_MS = 20_000;
 export const GITHUB_POLL_SLOW_INTERVAL_MS = 120_000;
 export const GITHUB_POLL_ERROR_BACKOFF_CAP_MS = 300_000;
@@ -41,6 +47,7 @@ const GitHubPullRequestSummarySchema = z.object({
 
 const PullRequestCheckRunNodeSchema = z.object({
   __typename: z.literal("CheckRun"),
+  databaseId: z.number().nullable().optional(),
   name: z.string(),
   workflowName: z.string().nullable().optional(),
   conclusion: z.string().nullable().optional(),
@@ -79,6 +86,59 @@ const LegacyPullRequestStatusCheckRollupSchema = z.object({
   contexts: z.array(z.unknown()),
 });
 
+const GitHubCheckRunDetailsSchema = z.object({
+  id: z.number(),
+  name: z.string().catch(""),
+  status: z.string().nullable().optional(),
+  conclusion: z.string().nullable().optional(),
+  html_url: z.string().nullable().optional(),
+  details_url: z.string().nullable().optional(),
+  output: z
+    .object({
+      title: z.string().nullable().optional(),
+      summary: z.string().nullable().optional(),
+      text: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+  check_suite: z
+    .object({
+      workflow_run: z
+        .object({
+          id: z.number().nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
+const GitHubCheckAnnotationSchema = z.object({
+  path: z.string().optional(),
+  start_line: z.number().optional(),
+  end_line: z.number().optional(),
+  annotation_level: z.string().optional(),
+  message: z.string().optional(),
+  title: z.string().optional(),
+  raw_details: z.string().optional(),
+});
+
+const GitHubCheckAnnotationsSchema = z.array(GitHubCheckAnnotationSchema).catch([]);
+
+const GitHubActionsJobSchema = z.object({
+  id: z.number(),
+  name: z.string().catch(""),
+  status: z.string().nullable().optional(),
+  conclusion: z.string().nullable().optional(),
+  html_url: z.string().nullable().optional(),
+  completed_at: z.string().nullable().optional(),
+});
+
+const GitHubActionsJobsSchema = z.object({
+  jobs: z.array(GitHubActionsJobSchema).catch([]),
+});
+
 const PullRequestReviewDecisionSchema = z
   .enum(["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"])
   .nullable()
@@ -92,6 +152,52 @@ const HeadRepositoryOwnerSchema = z
   .optional();
 
 const PullRequestMergeableSchema = z.enum(["MERGEABLE", "CONFLICTING", "UNKNOWN"]).catch("UNKNOWN");
+
+const GitHubAutoMergeRequestSchema = z
+  .object({
+    enabledAt: z.string().nullable().optional().catch(null),
+    mergeMethod: z.string().nullable().optional().catch(null),
+    enabledBy: z
+      .object({
+        login: z.string().nullable().optional().catch(null),
+      })
+      .nullable()
+      .optional()
+      .catch(null),
+  })
+  .nullable()
+  .optional()
+  .catch(null);
+
+const GitHubPullRequestFactsGraphqlSchema = z.object({
+  data: z.object({
+    repository: z
+      .object({
+        autoMergeAllowed: z.boolean().optional().catch(false),
+        mergeCommitAllowed: z.boolean().optional().catch(false),
+        squashMergeAllowed: z.boolean().optional().catch(false),
+        rebaseMergeAllowed: z.boolean().optional().catch(false),
+        viewerDefaultMergeMethod: z.string().nullable().optional().catch(null),
+        pullRequest: z
+          .object({
+            mergeStateStatus: z.string().nullable().optional().catch(null),
+            autoMergeRequest: GitHubAutoMergeRequestSchema,
+            viewerCanEnableAutoMerge: z.boolean().optional().catch(false),
+            viewerCanDisableAutoMerge: z.boolean().optional().catch(false),
+            viewerCanMergeAsAdmin: z.boolean().optional().catch(false),
+            viewerCanUpdateBranch: z.boolean().optional().catch(false),
+            isMergeQueueEnabled: z.boolean().optional().catch(false),
+            isInMergeQueue: z.boolean().optional().catch(false),
+          })
+          .nullable()
+          .optional()
+          .catch(null),
+      })
+      .nullable()
+      .optional()
+      .catch(null),
+  }),
+});
 
 const CurrentPullRequestStatusSchema = z.object({
   number: z.number().optional(),
@@ -112,6 +218,7 @@ const TimelineAuthorSchema = z
   .object({
     login: z.string().optional(),
     url: z.string().nullable().optional(),
+    avatarUrl: z.string().nullable().optional(),
   })
   .nullable()
   .optional();
@@ -120,6 +227,7 @@ const PullRequestTimelineReviewNodeSchema = z.object({
   id: z.string().catch(""),
   state: z.string().catch(""),
   body: z.string().nullable().catch(null),
+  bodyHTML: z.string().nullable().catch(null),
   url: z.string().catch(""),
   submittedAt: z.string().nullable().catch(null),
   author: TimelineAuthorSchema,
@@ -128,9 +236,33 @@ const PullRequestTimelineReviewNodeSchema = z.object({
 const PullRequestTimelineCommentNodeSchema = z.object({
   id: z.string().catch(""),
   body: z.string().nullable().catch(null),
+  bodyHTML: z.string().nullable().catch(null),
   url: z.string().catch(""),
   createdAt: z.string().nullable().catch(null),
   author: TimelineAuthorSchema,
+});
+
+const PullRequestReviewThreadCommentNodeSchema = PullRequestTimelineCommentNodeSchema.extend({
+  pullRequestReview: z
+    .object({ id: z.string().catch("") })
+    .nullable()
+    .optional()
+    .catch(null),
+});
+
+const PullRequestReviewThreadNodeSchema = z.object({
+  id: z.string().catch(""),
+  path: z.string().catch(""),
+  line: z.number().nullable().optional().catch(null),
+  startLine: z.number().nullable().optional().catch(null),
+  isResolved: z.boolean().catch(false),
+  isOutdated: z.boolean().catch(false),
+  comments: z
+    .object({
+      nodes: z.array(PullRequestReviewThreadCommentNodeSchema).catch([]),
+      pageInfo: z.object({ hasNextPage: z.boolean().catch(false) }).catch({ hasNextPage: false }),
+    })
+    .catch({ nodes: [], pageInfo: { hasNextPage: false } }),
 });
 
 const PullRequestTimelinePageInfoSchema = z.object({
@@ -154,6 +286,12 @@ const PullRequestTimelineGraphqlSchema = z.object({
               comments: z
                 .object({
                   nodes: z.array(PullRequestTimelineCommentNodeSchema).catch([]),
+                  pageInfo: PullRequestTimelinePageInfoSchema.catch({ hasNextPage: false }),
+                })
+                .catch({ nodes: [], pageInfo: { hasNextPage: false } }),
+              reviewThreads: z
+                .object({
+                  nodes: z.array(PullRequestReviewThreadNodeSchema).catch([]),
                   pageInfo: PullRequestTimelinePageInfoSchema.catch({ hasNextPage: false }),
                 })
                 .catch({ nodes: [], pageInfo: { hasNextPage: false } }),
@@ -236,8 +374,36 @@ query PullRequestCheckoutTarget($owner: String!, $name: String!, $number: Int!) 
   }
 }`;
 
-const CURRENT_PR_STATUS_FIELDS =
-  "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,statusCheckRollup,reviewDecision,mergeable,headRepositoryOwner";
+const CURRENT_PR_STATUS_BASE_FIELDS =
+  "number,url,title,state,isDraft,baseRefName,headRefName,mergedAt,reviewDecision,mergeable,headRepositoryOwner";
+const CURRENT_PR_STATUS_FIELDS = `${CURRENT_PR_STATUS_BASE_FIELDS},statusCheckRollup`;
+
+const PULL_REQUEST_STATUS_FACTS_QUERY = `
+query PullRequestStatusFacts($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    autoMergeAllowed
+    mergeCommitAllowed
+    squashMergeAllowed
+    rebaseMergeAllowed
+    viewerDefaultMergeMethod
+    pullRequest(number: $number) {
+      mergeStateStatus
+      autoMergeRequest {
+        enabledAt
+        mergeMethod
+        enabledBy {
+          login
+        }
+      }
+      viewerCanEnableAutoMerge
+      viewerCanDisableAutoMerge
+      viewerCanMergeAsAdmin
+      viewerCanUpdateBranch
+      isMergeQueueEnabled
+      isInMergeQueue
+    }
+  }
+}`;
 
 const PULL_REQUEST_TIMELINE_QUERY = `
 query PullRequestTimeline($owner: String!, $name: String!, $number: Int!) {
@@ -249,11 +415,13 @@ query PullRequestTimeline($owner: String!, $name: String!, $number: Int!) {
           id
           state
           body
+          bodyHTML
           url
           submittedAt
           author {
             login
             url
+            avatarUrl
           }
         }
         pageInfo {
@@ -264,11 +432,46 @@ query PullRequestTimeline($owner: String!, $name: String!, $number: Int!) {
         nodes {
           id
           body
+          bodyHTML
           url
           createdAt
           author {
             login
             url
+            avatarUrl
+          }
+        }
+        pageInfo {
+          hasNextPage
+        }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          path
+          line
+          startLine
+          isResolved
+          isOutdated
+          comments(first: 100) {
+            nodes {
+              id
+              body
+              bodyHTML
+              url
+              createdAt
+              author {
+                login
+                url
+                avatarUrl
+              }
+              pullRequestReview {
+                id
+              }
+            }
+            pageInfo {
+              hasNextPage
+            }
           }
         }
         pageInfo {
@@ -346,11 +549,35 @@ export interface PullRequestCheck {
   url: string | null;
   workflow?: string;
   duration?: string;
+  checkRunId?: number;
+  workflowRunId?: number;
 }
 
 export type PullRequestChecksStatus = "none" | "pending" | "success" | "failure";
 export type PullRequestReviewDecision = "approved" | "changes_requested" | "pending" | null;
 export type PullRequestMergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
+export interface GitHubPullRequestStatusFacts {
+  mergeStateStatus: string | null;
+  autoMergeRequest: {
+    enabledAt: string | null;
+    mergeMethod: string | null;
+    enabledBy: string | null;
+  } | null;
+  viewerCanEnableAutoMerge: boolean;
+  viewerCanDisableAutoMerge: boolean;
+  viewerCanMergeAsAdmin: boolean;
+  viewerCanUpdateBranch: boolean;
+  repository: {
+    autoMergeAllowed: boolean;
+    mergeCommitAllowed: boolean;
+    squashMergeAllowed: boolean;
+    rebaseMergeAllowed: boolean;
+    viewerDefaultMergeMethod: string | null;
+  };
+  isMergeQueueEnabled: boolean;
+  isInMergeQueue: boolean;
+}
 
 export interface GitHubCurrentPullRequestStatus {
   number?: number;
@@ -367,6 +594,7 @@ export interface GitHubCurrentPullRequestStatus {
   checks: PullRequestCheck[];
   checksStatus: PullRequestChecksStatus;
   reviewDecision: PullRequestReviewDecision;
+  github?: GitHubPullRequestStatusFacts;
 }
 
 export type PullRequestTimelineReviewState = "approved" | "changes_requested" | "commented";
@@ -375,6 +603,7 @@ interface PullRequestTimelineItemBase {
   id: string;
   author: string;
   authorUrl: string | null;
+  avatarUrl: string | null;
   body: string;
   createdAt: number;
   url: string;
@@ -387,7 +616,18 @@ export type PullRequestTimelineItem =
     })
   | (PullRequestTimelineItemBase & {
       kind: "comment";
+      reviewId?: string;
+      location?: PullRequestTimelineCommentLocation;
     });
+
+export interface PullRequestTimelineCommentLocation {
+  path: string;
+  line?: number;
+  startLine?: number;
+  threadId?: string;
+  isResolved?: boolean;
+  isOutdated?: boolean;
+}
 
 export type GitHubPullRequestTimelineErrorKind = "not_found" | "forbidden" | "unknown";
 
@@ -411,14 +651,38 @@ export interface GitHubPullRequestCreateResult {
 }
 
 export type GitHubPullRequestMergeMethod = "merge" | "squash" | "rebase";
+const DIRECT_PULL_REQUEST_MERGE_STATE_ALLOWLIST = new Set(["CLEAN", "HAS_HOOKS"]);
+
+export interface GitHubPullRequestCommandStatus {
+  mergeable?: PullRequestMergeable;
+  github?: GitHubPullRequestStatusFacts;
+}
 
 export interface MergeGitHubPullRequestOptions {
   cwd: string;
   prNumber: number;
   mergeMethod: GitHubPullRequestMergeMethod;
+  status?: GitHubPullRequestCommandStatus | null;
+}
+
+export interface EnableGitHubPullRequestAutoMergeOptions {
+  cwd: string;
+  prNumber: number;
+  mergeMethod: GitHubPullRequestMergeMethod;
+  status?: GitHubPullRequestCommandStatus | null;
+}
+
+export interface DisableGitHubPullRequestAutoMergeOptions {
+  cwd: string;
+  prNumber: number;
+  status?: GitHubPullRequestCommandStatus | null;
 }
 
 export interface GitHubPullRequestMergeResult {
+  success: true;
+}
+
+export interface GitHubPullRequestAutoMergeResult {
   success: true;
 }
 
@@ -455,6 +719,53 @@ export type GetGitHubPullRequestTimelineOptions = {
   repoOwner: string;
   repoName: string;
 } & GitHubReadOptions;
+
+export type GetGitHubCheckDetailsOptions = {
+  cwd: string;
+  repoOwner: string;
+  repoName: string;
+  checkRunId: number;
+  workflowRunId?: number;
+} & GitHubReadOptions;
+
+export interface GitHubCheckAnnotation {
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+  annotationLevel?: string;
+  message?: string;
+  title?: string;
+  rawDetails?: string;
+}
+
+export interface GitHubCheckFailedJob {
+  jobId: number;
+  name: string;
+  status?: string | null;
+  conclusion?: string | null;
+  url?: string | null;
+  completedAt?: string;
+  logTail?: string;
+  logTruncated?: boolean;
+}
+
+export interface GitHubCheckDetails {
+  checkRunId: number;
+  workflowRunId?: number | null;
+  name: string;
+  status?: string | null;
+  conclusion?: string | null;
+  url?: string | null;
+  detailsUrl?: string | null;
+  output?: {
+    title?: string | null;
+    summary?: string | null;
+    text?: string | null;
+  } | null;
+  annotations: GitHubCheckAnnotation[];
+  failedJobs: GitHubCheckFailedJob[];
+  truncated: boolean;
+}
 
 export interface GitHubSearchResult {
   items: Array<{
@@ -506,15 +817,23 @@ export interface GitHubService {
   getPullRequestTimeline(
     options: GetGitHubPullRequestTimelineOptions,
   ): Promise<GitHubPullRequestTimeline>;
+  getGitHubCheckDetails(options: GetGitHubCheckDetailsOptions): Promise<GitHubCheckDetails>;
   searchIssuesAndPrs(options: SearchGitHubIssuesAndPrsOptions): Promise<GitHubSearchResult>;
   createPullRequest(
     options: CreateGitHubPullRequestOptions,
   ): Promise<GitHubPullRequestCreateResult>;
   mergePullRequest(options: MergeGitHubPullRequestOptions): Promise<GitHubPullRequestMergeResult>;
+  enablePullRequestAutoMerge(
+    options: EnableGitHubPullRequestAutoMergeOptions,
+  ): Promise<GitHubPullRequestAutoMergeResult>;
+  disablePullRequestAutoMerge(
+    options: DisableGitHubPullRequestAutoMergeOptions,
+  ): Promise<GitHubPullRequestAutoMergeResult>;
   isAuthenticated(options: { cwd: string } & GitHubReadOptions): Promise<boolean>;
   retainCurrentPullRequestStatusPoll?(options: {
     cwd: string;
     headRef: string;
+    headRepositoryOwner?: string;
     onStatus?: (status: GitHubCurrentPullRequestStatus | null) => void;
     onError?: (error: unknown) => void;
   }): { unsubscribe: () => void };
@@ -576,6 +895,13 @@ interface CommandFailureLike {
 type PullRequestCheckRunNode = z.infer<typeof PullRequestCheckRunNodeSchema>;
 type PullRequestStatusContextNode = z.infer<typeof PullRequestStatusContextNodeSchema>;
 type CurrentPullRequestStatusItem = z.infer<typeof CurrentPullRequestStatusSchema>;
+type GitHubPullRequestFactsGraphql = z.infer<typeof GitHubPullRequestFactsGraphqlSchema>;
+type GitHubPullRequestFactsRepository = NonNullable<
+  GitHubPullRequestFactsGraphql["data"]["repository"]
+>;
+type GitHubPullRequestFactsPullRequest = NonNullable<
+  GitHubPullRequestFactsRepository["pullRequest"]
+>;
 
 interface InFlightCacheEntry {
   cwd: string;
@@ -586,6 +912,7 @@ interface InFlightCacheEntry {
 interface GitHubPollTarget {
   cwd: string;
   headRef: string;
+  headRepositoryOwner?: string;
   retainCount: number;
   timer: NodeJS.Timeout | null;
   latestStatus: GitHubCurrentPullRequestStatus | null;
@@ -609,6 +936,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
   const cache = new Map<string, CacheEntry>();
   const inFlight = new Map<string, InFlightCacheEntry>();
   const pollTargets = new Map<string, GitHubPollTarget>();
+  const checkLogTailCache = new Map<string, { logTail: string; logTruncated: boolean }>();
   let api!: GitHubService;
 
   async function cached<T>(params: {
@@ -679,17 +1007,25 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     }
   }
 
-  function getPollTargetKey(target: { cwd: string; headRef: string }): string {
+  function getPollTargetKey(target: {
+    cwd: string;
+    headRef: string;
+    headRepositoryOwner?: string;
+  }): string {
     return buildCacheKey({
       cwd: target.cwd,
       method: "getCurrentPullRequestStatus",
-      args: { headRef: target.headRef },
+      args: {
+        headRef: target.headRef,
+        headRepositoryOwner: target.headRepositoryOwner,
+      },
     });
   }
 
   function updatePollTargetAfterSuccess(update: {
     cwd: string;
     headRef: string;
+    headRepositoryOwner?: string;
     status: GitHubCurrentPullRequestStatus | null;
     notify: boolean;
   }): void {
@@ -738,6 +1074,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
       await api.getCurrentPullRequestStatus({
         cwd: target.cwd,
         headRef: target.headRef,
+        headRepositoryOwner: target.headRepositoryOwner,
         reason: "self-heal-github",
       });
     } catch (error) {
@@ -881,17 +1218,19 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         },
         readOptions: input,
         load: async () => {
-          return resolveCurrentPullRequestView({
+          const status = await resolveCurrentPullRequestView({
             cwd: input.cwd,
             headRef: input.headRef,
             headRepositoryOwner: input.headRepositoryOwner,
             run,
           });
+          return addCurrentPullRequestGithubFacts({ cwd: input.cwd, status, run });
         },
       }).then((status) => {
         updatePollTargetAfterSuccess({
           cwd: input.cwd,
           headRef: input.headRef,
+          headRepositoryOwner: input.headRepositoryOwner,
           status,
           notify: input.reason === "self-heal-github",
         });
@@ -937,6 +1276,94 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
               error: mapPullRequestTimelineError(error),
             };
           }
+        },
+      });
+    },
+
+    getGitHubCheckDetails(input) {
+      return cached({
+        cwd: input.cwd,
+        method: "getGitHubCheckDetails",
+        args: {
+          repoOwner: input.repoOwner,
+          repoName: input.repoName,
+          checkRunId: input.checkRunId,
+          workflowRunId: input.workflowRunId,
+        },
+        readOptions: input,
+        load: async () => {
+          const repoPath = `repos/${input.repoOwner}/${input.repoName}`;
+          const checkRun = parseGitHubCheckRunDetails(
+            await run(["api", `${repoPath}/check-runs/${input.checkRunId}`], { cwd: input.cwd }),
+          );
+          const annotations = parseGitHubCheckAnnotations(
+            await run(
+              [
+                "api",
+                `${repoPath}/check-runs/${input.checkRunId}/annotations`,
+                "-f",
+                `per_page=${CHECK_ANNOTATION_PAGE_MAX}`,
+              ],
+              {
+                cwd: input.cwd,
+              },
+            ),
+          );
+          const workflowRunId = input.workflowRunId ?? checkRun.workflowRunId ?? null;
+          const failedJobs: GitHubCheckFailedJob[] = [];
+          let truncated = annotations.length >= CHECK_ANNOTATION_PAGE_MAX;
+
+          if (typeof workflowRunId === "number") {
+            const jobs = parseGitHubActionsJobs(
+              await run(
+                [
+                  "api",
+                  `${repoPath}/actions/runs/${workflowRunId}/jobs`,
+                  "-f",
+                  `per_page=${ACTIONS_JOB_PAGE_MAX}`,
+                ],
+                {
+                  cwd: input.cwd,
+                },
+              ),
+            );
+            const failed = jobs.filter(isFailedActionsJob);
+            truncated ||= jobs.length >= ACTIONS_JOB_PAGE_MAX;
+            truncated ||= failed.length > FAILED_CHECK_JOB_LIMIT;
+            for (const job of failed.slice(0, FAILED_CHECK_JOB_LIMIT)) {
+              const log = await getCachedCheckLogTail({
+                cwd: input.cwd,
+                repoPath,
+                job,
+                run,
+                cache: checkLogTailCache,
+              });
+              truncated ||= log.logTruncated;
+              failedJobs.push({
+                jobId: job.jobId,
+                name: job.name,
+                status: job.status,
+                conclusion: job.conclusion,
+                url: job.url,
+                logTail: log.logTail,
+                logTruncated: log.logTruncated,
+              });
+            }
+          }
+
+          return {
+            checkRunId: checkRun.checkRunId,
+            workflowRunId,
+            name: checkRun.name,
+            status: checkRun.status,
+            conclusion: checkRun.conclusion,
+            url: checkRun.url,
+            detailsUrl: checkRun.detailsUrl,
+            output: checkRun.output,
+            annotations,
+            failedJobs,
+            truncated,
+          };
         },
       });
     },
@@ -1050,7 +1477,26 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
     },
 
     async mergePullRequest(input) {
+      assertDirectPullRequestMergeReady(input);
       await run(["pr", "merge", String(input.prNumber), `--${input.mergeMethod}`], {
+        cwd: input.cwd,
+        envOverlay: { GH_PROMPT_DISABLED: "1" },
+      });
+      return { success: true };
+    },
+
+    async enablePullRequestAutoMerge(input) {
+      assertPullRequestAutoMergeEnableReady(input);
+      await run(["pr", "merge", String(input.prNumber), "--auto", `--${input.mergeMethod}`], {
+        cwd: input.cwd,
+        envOverlay: { GH_PROMPT_DISABLED: "1" },
+      });
+      return { success: true };
+    },
+
+    async disablePullRequestAutoMerge(input) {
+      assertPullRequestAutoMergeDisableReady(input);
+      await run(["pr", "merge", String(input.prNumber), "--disable-auto"], {
         cwd: input.cwd,
         envOverlay: { GH_PROMPT_DISABLED: "1" },
       });
@@ -1087,6 +1533,7 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
         target = {
           cwd: input.cwd,
           headRef: input.headRef,
+          headRepositoryOwner: input.headRepositoryOwner,
           retainCount: 0,
           timer: null,
           latestStatus: null,
@@ -1158,6 +1605,89 @@ export function createGitHubService(options: CreateGitHubServiceOptions = {}): G
   };
 
   return api;
+}
+
+function assertDirectPullRequestMergeReady(input: MergeGitHubPullRequestOptions): void {
+  const github = input.status?.github;
+  if (!github) {
+    throw new Error("GitHub merge facts are unavailable for this pull request");
+  }
+
+  if (!DIRECT_PULL_REQUEST_MERGE_STATE_ALLOWLIST.has(github.mergeStateStatus ?? "")) {
+    throw new Error("GitHub does not report this pull request as ready for direct merge");
+  }
+  if (github.isMergeQueueEnabled || github.isInMergeQueue) {
+    throw new Error("Direct merge is not available because this repository uses a merge queue");
+  }
+  if (github.autoMergeRequest !== null) {
+    throw new Error("Direct merge is not available because auto-merge is already enabled");
+  }
+  if (!isPullRequestMergeMethodAllowed(github.repository, input.mergeMethod)) {
+    throw new Error(`Direct merge is not available because ${input.mergeMethod} is disabled`);
+  }
+}
+
+export function assertPullRequestAutoMergeEnableReady(
+  input: Pick<EnableGitHubPullRequestAutoMergeOptions, "mergeMethod" | "status">,
+): void {
+  const github = input.status?.github;
+  if (!github) {
+    throw new Error("GitHub auto-merge facts are unavailable for this pull request");
+  }
+
+  if (github.mergeStateStatus !== "BLOCKED") {
+    throw new Error("GitHub does not report this pull request as blocked for auto-merge");
+  }
+  if (!github.viewerCanEnableAutoMerge) {
+    throw new Error("GitHub does not allow this viewer to enable auto-merge");
+  }
+  if (!github.repository.autoMergeAllowed) {
+    throw new Error("Auto-merge is disabled for this repository");
+  }
+  if (!isPullRequestMergeMethodAllowed(github.repository, input.mergeMethod)) {
+    throw new Error(`Auto-merge is not available because ${input.mergeMethod} is disabled`);
+  }
+  if (github.autoMergeRequest !== null) {
+    throw new Error("Auto-merge is already enabled for this pull request");
+  }
+  if (github.isMergeQueueEnabled || github.isInMergeQueue) {
+    throw new Error("Auto-merge is not available because this repository uses a merge queue");
+  }
+  if (input.status?.mergeable === "CONFLICTING") {
+    throw new Error("Auto-merge is not available because this pull request has conflicts");
+  }
+}
+
+export function assertPullRequestAutoMergeDisableReady(
+  input: Pick<DisableGitHubPullRequestAutoMergeOptions, "status">,
+): void {
+  const github = input.status?.github;
+  if (!github) {
+    throw new Error("GitHub auto-merge facts are unavailable for this pull request");
+  }
+
+  if (github.autoMergeRequest === null) {
+    throw new Error("Auto-merge is not enabled for this pull request");
+  }
+  if (!github.viewerCanDisableAutoMerge) {
+    throw new Error("GitHub does not allow this viewer to disable auto-merge");
+  }
+  if (github.isMergeQueueEnabled || github.isInMergeQueue) {
+    throw new Error("Auto-merge is not available because this repository uses a merge queue");
+  }
+}
+
+export function isPullRequestMergeMethodAllowed(
+  repository: GitHubPullRequestStatusFacts["repository"],
+  method: GitHubPullRequestMergeMethod,
+): boolean {
+  if (method === "squash") {
+    return repository.squashMergeAllowed;
+  }
+  if (method === "merge") {
+    return repository.mergeCommitAllowed;
+  }
+  return repository.rebaseMergeAllowed;
 }
 
 export function computeGithubNextInterval(
@@ -1314,6 +1844,13 @@ function isNoPullRequestFoundError(error: unknown): boolean {
   return text.includes("no pull requests found");
 }
 
+function isStatusCheckRollupPermissionError(error: unknown): boolean {
+  if (!(error instanceof GitHubCommandError)) {
+    return false;
+  }
+  return error.stderr.toLowerCase().includes("statuscheckrollup");
+}
+
 async function resolveCurrentPullRequestView(options: {
   cwd: string;
   headRef: string;
@@ -1364,14 +1901,78 @@ async function resolveCurrentPullRequestView(options: {
   return match?.status ?? null;
 }
 
+async function addCurrentPullRequestGithubFacts(options: {
+  cwd: string;
+  status: GitHubCurrentPullRequestStatus | null;
+  run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+}): Promise<GitHubCurrentPullRequestStatus | null> {
+  const { status } = options;
+  if (!status?.repoOwner || !status.repoName || typeof status.number !== "number") {
+    return status;
+  }
+
+  const facts = await loadPullRequestGithubFacts({
+    cwd: options.cwd,
+    owner: status.repoOwner,
+    name: status.repoName,
+    number: status.number,
+    run: options.run,
+  });
+  if (!facts) {
+    return status;
+  }
+  return {
+    ...status,
+    github: facts,
+  };
+}
+
+async function loadPullRequestGithubFacts(options: {
+  cwd: string;
+  owner: string;
+  name: string;
+  number: number;
+  run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+}): Promise<GitHubPullRequestStatusFacts | null> {
+  try {
+    const stdout = await options.run(
+      [
+        "api",
+        "graphql",
+        "-f",
+        `query=${PULL_REQUEST_STATUS_FACTS_QUERY}`,
+        "-F",
+        `owner=${options.owner}`,
+        "-F",
+        `name=${options.name}`,
+        "-F",
+        `number=${options.number}`,
+      ],
+      { cwd: options.cwd },
+    );
+    return parsePullRequestGithubFacts(stdout);
+  } catch (error) {
+    if (
+      error instanceof GitHubCommandError ||
+      error instanceof z.ZodError ||
+      error instanceof SyntaxError
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function tryCurrentPullRequestView(options: {
   cwd: string;
   headRef: string;
   run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
 }): Promise<ResolvedPullRequestCandidate | null> {
   try {
-    const stdout = await options.run(["pr", "view", "--json", CURRENT_PR_STATUS_FIELDS], {
+    const stdout = await runCurrentPullRequestStatusCommand({
       cwd: options.cwd,
+      run: options.run,
+      args: ["pr", "view"],
     });
     return parseCurrentPullRequestCandidate(stdout, options.headRef);
   } catch (error) {
@@ -1392,24 +1993,38 @@ async function listCurrentPullRequestCandidates(options: {
   if (options.repo) {
     args.push("--repo", options.repo);
   }
-  args.push(
-    "--state",
-    "all",
-    "--head",
-    options.headRef,
-    "--json",
-    CURRENT_PR_STATUS_FIELDS,
-    "--limit",
-    "10",
-  );
+  args.push("--state", "all", "--head", options.headRef, "--limit", "10");
   try {
-    const stdout = await options.run(args, { cwd: options.cwd });
+    const stdout = await runCurrentPullRequestStatusCommand({
+      cwd: options.cwd,
+      run: options.run,
+      args,
+    });
     return parseCurrentPullRequestCandidateList(stdout, options.headRef);
   } catch (error) {
     if (isNoPullRequestFoundError(error)) {
       return [];
     }
     throw error;
+  }
+}
+
+async function runCurrentPullRequestStatusCommand(options: {
+  cwd: string;
+  run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+  args: string[];
+}): Promise<string> {
+  try {
+    return await options.run([...options.args, "--json", CURRENT_PR_STATUS_FIELDS], {
+      cwd: options.cwd,
+    });
+  } catch (error) {
+    if (!isStatusCheckRollupPermissionError(error)) {
+      throw error;
+    }
+    return options.run([...options.args, "--json", CURRENT_PR_STATUS_BASE_FIELDS], {
+      cwd: options.cwd,
+    });
   }
 }
 
@@ -1443,6 +2058,52 @@ function parseCurrentPullRequestCandidateList(
   return items
     .map((item) => toCurrentPullRequestCandidate(item, fallbackHeadRefName))
     .filter((candidate): candidate is ResolvedPullRequestCandidate => candidate !== null);
+}
+
+function parsePullRequestGithubFacts(stdout: string): GitHubPullRequestStatusFacts | null {
+  const parsed = GitHubPullRequestFactsGraphqlSchema.parse(JSON.parse(stdout || "{}"));
+  const repository = parsed.data.repository;
+  const pullRequest = repository?.pullRequest;
+  if (!repository || !pullRequest) {
+    return null;
+  }
+
+  return {
+    mergeStateStatus: pullRequest.mergeStateStatus ?? null,
+    autoMergeRequest: toGitHubAutoMergeRequest(pullRequest.autoMergeRequest),
+    viewerCanEnableAutoMerge: pullRequest.viewerCanEnableAutoMerge ?? false,
+    viewerCanDisableAutoMerge: pullRequest.viewerCanDisableAutoMerge ?? false,
+    viewerCanMergeAsAdmin: pullRequest.viewerCanMergeAsAdmin ?? false,
+    viewerCanUpdateBranch: pullRequest.viewerCanUpdateBranch ?? false,
+    repository: toGitHubRepositoryMergePolicy(repository),
+    isMergeQueueEnabled: pullRequest.isMergeQueueEnabled ?? false,
+    isInMergeQueue: pullRequest.isInMergeQueue ?? false,
+  };
+}
+
+function toGitHubAutoMergeRequest(
+  request: GitHubPullRequestFactsPullRequest["autoMergeRequest"],
+): GitHubPullRequestStatusFacts["autoMergeRequest"] {
+  if (!request) {
+    return null;
+  }
+  return {
+    enabledAt: request.enabledAt ?? null,
+    mergeMethod: request.mergeMethod ?? null,
+    enabledBy: request.enabledBy?.login ?? null,
+  };
+}
+
+function toGitHubRepositoryMergePolicy(
+  repository: GitHubPullRequestFactsRepository,
+): GitHubPullRequestStatusFacts["repository"] {
+  return {
+    autoMergeAllowed: repository.autoMergeAllowed ?? false,
+    mergeCommitAllowed: repository.mergeCommitAllowed ?? false,
+    squashMergeAllowed: repository.squashMergeAllowed ?? false,
+    rebaseMergeAllowed: repository.rebaseMergeAllowed ?? false,
+    viewerDefaultMergeMethod: repository.viewerDefaultMergeMethod ?? null,
+  };
 }
 
 function toCurrentPullRequestCandidate(
@@ -1564,10 +2225,19 @@ function parsePullRequestTimeline(
 ): GitHubPullRequestTimeline {
   const parsed = PullRequestTimelineGraphqlSchema.parse(JSON.parse(stdout || "{}"));
   const pullRequest = parsed.data?.repository?.pullRequest;
+  const reviewThreadItems = pullRequest
+    ? pullRequest.reviewThreads.nodes.flatMap(toPullRequestTimelineReviewThreadItems)
+    : [];
+  const reviewThreadItemIds = new Set(
+    reviewThreadItems.map((item) => item.id).filter((id) => id.length > 0),
+  );
   const items = pullRequest
     ? [
         ...pullRequest.reviews.nodes.flatMap(toPullRequestTimelineReviewItem),
-        ...pullRequest.comments.nodes.map(toPullRequestTimelineCommentItem),
+        ...pullRequest.comments.nodes
+          .filter((comment) => !reviewThreadItemIds.has(comment.id))
+          .map(toPullRequestTimelineCommentItem),
+        ...reviewThreadItems,
       ].sort(compareTimelineItems)
     : [];
   return {
@@ -1575,9 +2245,12 @@ function parsePullRequestTimeline(
     repoOwner: identity.repoOwner,
     repoName: identity.repoName,
     items,
-    // S3 deliberately caps timeline fetches at the first 100 reviews and first 100 comments.
+    // S3 deliberately caps timeline fetches at the first 100 reviews, comments, and review threads.
     truncated: Boolean(
-      pullRequest?.reviews.pageInfo.hasNextPage || pullRequest?.comments.pageInfo.hasNextPage,
+      pullRequest?.reviews.pageInfo.hasNextPage ||
+      pullRequest?.comments.pageInfo.hasNextPage ||
+      pullRequest?.reviewThreads.pageInfo.hasNextPage ||
+      pullRequest?.reviewThreads.nodes.some((thread) => thread.comments.pageInfo.hasNextPage),
     ),
     error: pullRequest ? null : { kind: "not_found", message: "Pull request not found" },
   };
@@ -1596,7 +2269,8 @@ function toPullRequestTimelineReviewItem(
       id: review.id,
       author: review.author?.login ?? "unknown",
       authorUrl: review.author?.url ?? null,
-      body: review.body ?? "",
+      avatarUrl: review.author?.avatarUrl ?? null,
+      body: normalizeGitHubTimelineBody(review.body ?? "", review.bodyHTML ?? ""),
       createdAt: parseOptionalTime(review.submittedAt ?? null),
       url: review.url,
       reviewState,
@@ -1612,10 +2286,263 @@ function toPullRequestTimelineCommentItem(
     id: comment.id,
     author: comment.author?.login ?? "unknown",
     authorUrl: comment.author?.url ?? null,
-    body: comment.body ?? "",
+    avatarUrl: comment.author?.avatarUrl ?? null,
+    body: normalizeGitHubTimelineBody(comment.body ?? "", comment.bodyHTML ?? ""),
     createdAt: parseOptionalTime(comment.createdAt ?? null),
     url: comment.url,
   };
+}
+
+interface ImageSourceReference {
+  src: string;
+  start: number;
+  end: number;
+}
+
+const RAW_MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\(\s*([^\s)]+)(?:\s+["'][^)]*["'])?\s*\)/g;
+const HTML_IMAGE_RE = /<img\b[^>]*\bsrc\s*=\s*(["'])(.*?)\1[^>]*>/gi;
+const GITHUB_RENDERED_IMAGE_HOSTS = new Set([
+  "camo.githubusercontent.com",
+  "private-user-images.githubusercontent.com",
+]);
+
+function normalizeGitHubTimelineBody(body: string, bodyHTML: string): string {
+  const rawImages = extractRawImageSourceReferences(body);
+  if (rawImages.length === 0) {
+    return body;
+  }
+
+  const renderedSources = extractRenderedImageSources(bodyHTML);
+  if (renderedSources.length !== rawImages.length) {
+    return body;
+  }
+
+  let cursor = 0;
+  let normalized = "";
+  for (let index = 0; index < rawImages.length; index += 1) {
+    const rawImage = rawImages[index];
+    const renderedSrc = renderedSources[index];
+    if (
+      !rawImage ||
+      !renderedSrc ||
+      !isRawGitHubAttachmentSource(rawImage.src) ||
+      !isGitHubRenderedImageSource(renderedSrc)
+    ) {
+      return body;
+    }
+    normalized += body.slice(cursor, rawImage.start);
+    normalized += renderedSrc;
+    cursor = rawImage.end;
+  }
+  normalized += body.slice(cursor);
+  return normalized;
+}
+
+function extractRawImageSourceReferences(source: string): ImageSourceReference[] {
+  const references = [
+    ...extractHtmlImageSourceReferences(source),
+    ...extractMarkdownImageSourceReferences(source),
+  ];
+  return references.sort((left, right) => left.start - right.start);
+}
+
+function extractRenderedImageSources(source: string): string[] {
+  return extractHtmlImageSourceReferences(source).map((reference) => reference.src);
+}
+
+function extractHtmlImageSourceReferences(source: string): ImageSourceReference[] {
+  const references: ImageSourceReference[] = [];
+  HTML_IMAGE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = HTML_IMAGE_RE.exec(source)) !== null) {
+    const src = decodeHtmlAttribute(match[2] ?? "");
+    if (!src) {
+      continue;
+    }
+    const rawAttributeSrc = match[2] ?? "";
+    const start = match.index + match[0].indexOf(rawAttributeSrc);
+    references.push({ src, start, end: start + rawAttributeSrc.length });
+  }
+  return references;
+}
+
+function extractMarkdownImageSourceReferences(source: string): ImageSourceReference[] {
+  const references: ImageSourceReference[] = [];
+  RAW_MARKDOWN_IMAGE_RE.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = RAW_MARKDOWN_IMAGE_RE.exec(source)) !== null) {
+    const src = match[1] ?? "";
+    if (!src) {
+      continue;
+    }
+    const start = match.index + match[0].indexOf(src);
+    references.push({ src, start, end: start + src.length });
+  }
+  return references;
+}
+
+function isRawGitHubAttachmentSource(src: string): boolean {
+  try {
+    const url = new URL(src);
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      url.pathname.startsWith("/user-attachments/assets/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isGitHubRenderedImageSource(src: string): boolean {
+  try {
+    const url = new URL(src);
+    return url.protocol === "https:" && GITHUB_RENDERED_IMAGE_HOSTS.has(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function decodeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&amp;", "&")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+}
+
+function toPullRequestTimelineReviewThreadItems(
+  thread: z.infer<typeof PullRequestReviewThreadNodeSchema>,
+): PullRequestTimelineItem[] {
+  return thread.comments.nodes.map((comment) => ({
+    ...toPullRequestTimelineCommentItem(comment),
+    ...(comment.pullRequestReview?.id ? { reviewId: comment.pullRequestReview.id } : {}),
+    location: {
+      path: thread.path,
+      ...(thread.line !== null && thread.line !== undefined ? { line: thread.line } : {}),
+      ...(thread.startLine !== null && thread.startLine !== undefined
+        ? { startLine: thread.startLine }
+        : {}),
+      ...(thread.id ? { threadId: thread.id } : {}),
+      isResolved: thread.isResolved,
+      isOutdated: thread.isOutdated,
+    },
+  }));
+}
+
+function parseGitHubCheckRunDetails(stdout: string): GitHubCheckDetails {
+  const parsed = GitHubCheckRunDetailsSchema.parse(JSON.parse(stdout || "{}"));
+  return {
+    checkRunId: parsed.id,
+    workflowRunId: parsed.check_suite?.workflow_run?.id ?? null,
+    name: parsed.name,
+    status: parsed.status,
+    conclusion: parsed.conclusion,
+    url: parsed.html_url,
+    detailsUrl: parsed.details_url,
+    output: parsed.output,
+    annotations: [],
+    failedJobs: [],
+    truncated: false,
+  };
+}
+
+function parseGitHubCheckAnnotations(stdout: string): GitHubCheckAnnotation[] {
+  return GitHubCheckAnnotationsSchema.parse(JSON.parse(stdout || "[]")).map((annotation) => {
+    const result: GitHubCheckAnnotation = {};
+    if (annotation.path) result.path = annotation.path;
+    if (annotation.start_line !== undefined) result.startLine = annotation.start_line;
+    if (annotation.end_line !== undefined) result.endLine = annotation.end_line;
+    if (annotation.annotation_level) result.annotationLevel = annotation.annotation_level;
+    if (annotation.message) result.message = annotation.message;
+    if (annotation.title) result.title = annotation.title;
+    if (annotation.raw_details) result.rawDetails = annotation.raw_details;
+    return result;
+  });
+}
+
+function parseGitHubActionsJobs(stdout: string): GitHubCheckFailedJob[] {
+  return GitHubActionsJobsSchema.parse(JSON.parse(stdout || "{}")).jobs.map((job) => {
+    const result: GitHubCheckFailedJob = {
+      jobId: job.id,
+      name: job.name,
+      status: job.status,
+      conclusion: job.conclusion,
+      url: job.html_url,
+    };
+    if (job.completed_at) result.completedAt = job.completed_at;
+    return result;
+  });
+}
+
+function isFailedActionsJob(job: GitHubCheckFailedJob): boolean {
+  return (
+    job.conclusion === "failure" ||
+    job.conclusion === "cancelled" ||
+    job.conclusion === "timed_out" ||
+    job.conclusion === "action_required"
+  );
+}
+
+async function getCachedCheckLogTail(input: {
+  cwd: string;
+  repoPath: string;
+  job: GitHubCheckFailedJob & { completedAt?: string };
+  run: (args: string[], options: GitHubCommandRunnerOptions) => Promise<string>;
+  cache: Map<string, { logTail: string; logTruncated: boolean }>;
+}): Promise<{ logTail: string; logTruncated: boolean }> {
+  const key = `${input.job.jobId}:${input.job.completedAt ?? ""}`;
+  const cached = input.cache.get(key);
+  if (cached) {
+    input.cache.delete(key);
+    input.cache.set(key, cached);
+    return cached;
+  }
+
+  const capped = capCheckLogTail(
+    await input.run(["api", `${input.repoPath}/actions/jobs/${input.job.jobId}/logs`], {
+      cwd: input.cwd,
+    }),
+  );
+  input.cache.set(key, capped);
+  while (input.cache.size > CHECK_LOG_TAIL_CACHE_MAX_ENTRIES) {
+    const oldestKey = input.cache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    input.cache.delete(oldestKey);
+  }
+  return capped;
+}
+
+function capCheckLogTail(log: string): { logTail: string; logTruncated: boolean } {
+  const lines = log.split("\n");
+  let truncated = lines.length > CHECK_LOG_TAIL_MAX_LINES;
+  let tail = lines.slice(-CHECK_LOG_TAIL_MAX_LINES).join("\n");
+
+  if (Buffer.byteLength(tail, "utf8") > CHECK_LOG_TAIL_MAX_BYTES) {
+    truncated = true;
+    tail = utf8SuffixWithinBytes(tail, CHECK_LOG_TAIL_MAX_BYTES);
+  }
+
+  return { logTail: tail, logTruncated: truncated };
+}
+
+function utf8SuffixWithinBytes(value: string, maxBytes: number): string {
+  let lowerBound = 0;
+  let upperBound = value.length;
+
+  while (lowerBound < upperBound) {
+    const midpoint = Math.floor((lowerBound + upperBound) / 2);
+    if (Buffer.byteLength(value.slice(midpoint), "utf8") > maxBytes) {
+      lowerBound = midpoint + 1;
+    } else {
+      upperBound = midpoint;
+    }
+  }
+
+  return value.slice(lowerBound);
 }
 
 function mapTimelineReviewState(
@@ -1779,6 +2706,10 @@ function buildPullRequestCheck(
       url: typeof context.detailsUrl === "string" ? context.detailsUrl : null,
       ...(typeof context.workflowName === "string" && context.workflowName.trim().length > 0
         ? { workflow: context.workflowName }
+        : {}),
+      ...(typeof context.databaseId === "number" ? { checkRunId: context.databaseId } : {}),
+      ...(typeof context.checkSuite?.workflowRun?.databaseId === "number"
+        ? { workflowRunId: context.checkSuite.workflowRun.databaseId }
         : {}),
       ...formatCheckRunDuration(context),
       recency: getCheckRunRecency(context),

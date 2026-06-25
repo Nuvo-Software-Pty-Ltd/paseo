@@ -11,6 +11,7 @@ import {
 import { createAutomationSpawn, spawnFromAutomation } from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
+import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -19,7 +20,7 @@ import type {
   StoredSchedule,
   UpdateScheduleInput,
   UpdateScheduleNewAgentConfig,
-} from "./types.js";
+} from "@getpaseo/protocol/schedule/types";
 
 const SCHEDULE_TICK_INTERVAL_MS = 1000;
 
@@ -126,11 +127,14 @@ function completeSchedule(schedule: StoredSchedule, now: Date): StoredSchedule {
   };
 }
 
+type CreateConfigResolver = Pick<ProviderSnapshotManager, "resolveCreateConfig">;
+
 export interface ScheduleServiceOptions {
   store: ScheduleStore;
   logger: Logger;
   agentManager: AgentManager;
   agentStorage: AgentStore;
+  providerSnapshotManager: CreateConfigResolver;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
 }
@@ -347,6 +351,28 @@ export class ScheduleService {
 
   async delete(id: string): Promise<void> {
     await this.store.delete(id);
+  }
+
+  async deleteForAgent(agentId: string): Promise<number> {
+    const schedules = await this.store.list();
+    const matches = schedules.filter(
+      (schedule) => schedule.target.type === "agent" && schedule.target.agentId === agentId,
+    );
+    const results = await Promise.allSettled(
+      matches.map((schedule) => this.store.delete(schedule.id)),
+    );
+    let deleted = 0;
+    for (const [index, result] of results.entries()) {
+      if (result.status === "fulfilled") {
+        deleted += 1;
+      } else {
+        this.logger.warn(
+          { err: result.reason, scheduleId: matches[index].id, agentId },
+          "Failed to delete schedule for archived agent; continuing",
+        );
+      }
+    }
+    return deleted;
   }
 
   async runOnce(id: string): Promise<StoredSchedule> {
@@ -705,4 +731,5 @@ export class ScheduleService {
       },
     });
   }
+
 }

@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 
 const hasZsh = existsSync("/bin/zsh");
 
@@ -176,6 +176,26 @@ process.stdin.on("data", (chunk) => {
 process.stdout.write(query);
 `;
 
+const OSC11_HELPER_SCRIPT = `process.stdin.setRawMode(true);
+process.stdin.resume();
+let buf = "";
+const timer = setTimeout(() => {
+  process.stdout.write("OSC11_TIMEOUT\\n");
+  process.exit(2);
+}, 2500);
+process.stdin.on("data", (chunk) => {
+  buf += chunk.toString("binary");
+  const match = buf.match(/\\x1b\\]11;rgb:[0-9a-f/]+\\x1b\\\\/);
+  if (!match) {
+    return;
+  }
+  clearTimeout(timer);
+  process.stdout.write("OSC11_OK:" + match[0].replace(/\\x1b/g, "ESC") + "\\n");
+  process.exit(0);
+});
+process.stdout.write("\\x1b]11;?\\x07");
+`;
+
 function writeDaHelper(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   temporaryDirs.push(dir);
@@ -192,12 +212,24 @@ function writeDsrHelper(prefix: string): string {
   return path;
 }
 
+function writeOsc11Helper(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirs.push(dir);
+  const path = join(dir, "helper.cjs");
+  writeFileSync(path, OSC11_HELPER_SCRIPT);
+  return path;
+}
+
 function isDaOkLine(line: string): boolean {
   return line.startsWith("DA_OK:");
 }
 
 function isDsrOkLine(line: string): boolean {
   return line.startsWith("DSR_OK:");
+}
+
+function isOsc11OkLine(line: string): boolean {
+  return line.startsWith("OSC11_OK:");
 }
 
 function hasDaOkLine(state: ReturnType<TerminalSession["getState"]>): boolean {
@@ -208,12 +240,23 @@ function hasDsrOkLine(state: ReturnType<TerminalSession["getState"]>): boolean {
   return getLines(state).some(isDsrOkLine);
 }
 
+function hasOsc11OkLine(state: ReturnType<TerminalSession["getState"]>): boolean {
+  return getLines(state).some(isOsc11OkLine);
+}
+
 function lastNonEmptyLineIsPrompt(state: ReturnType<TerminalSession["getState"]>): boolean {
   const last =
     getLines(state)
       .toReversed()
       .find((line) => line.length > 0) ?? "";
   return last === "$";
+}
+
+function removeZshShellIntegrationRuntimeDir(): void {
+  rmSync(join(tmpdir(), `${userInfo().username || "unknown"}-paseo-zsh`), {
+    recursive: true,
+    force: true,
+  });
 }
 
 describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
@@ -227,16 +270,39 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     });
 
     expect(resolvedEnv.TERM).toBe("xterm-256color");
+    expect(resolvedEnv.TERM_PROGRAM).toBe("kitty");
     expect(resolvedEnv.PASEO_ZSH_ZDOTDIR).toBe("/tmp/paseo-zdotdir");
     expect(resolvedEnv.ZDOTDIR).not.toBe("/tmp/paseo-zdotdir");
     expect(existsSync(join(resolvedEnv.ZDOTDIR, ".zshenv"))).toBe(true);
     expect(existsSync(join(resolvedEnv.ZDOTDIR, "paseo-integration.zsh"))).toBe(true);
   });
 
+  it("reuses zsh shell integration copied from read-only source files", () => {
+    const integrationSourceDir = mkdtempSync(join(tmpdir(), "paseo-zsh-readonly-source-"));
+    const tmpHome = mkdtempSync(join(tmpdir(), "paseo-zsh-readonly-home-"));
+    temporaryDirs.push(integrationSourceDir, tmpHome);
+    cpSync(resolveZshShellIntegrationDir(), integrationSourceDir, { recursive: true });
+    chmodSync(join(integrationSourceDir, ".zshenv"), 0o444);
+    chmodSync(join(integrationSourceDir, "paseo-integration.zsh"), 0o444);
+    removeZshShellIntegrationRuntimeDir();
+
+    const buildEnvironment = () =>
+      buildTerminalEnvironment({
+        shell: "/bin/zsh",
+        env: { HOME: tmpHome },
+        zshShellIntegrationDir: integrationSourceDir,
+      });
+
+    buildEnvironment();
+
+    expect(buildEnvironment).not.toThrow();
+  });
+
   describe("send input", () => {
     it("executes a simple echo command", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -263,6 +329,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("executes multiple commands sequentially", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -288,6 +355,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures output from pwd in specified cwd", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -317,6 +385,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: homeDir,
           command: "/bin/zsh",
           args: ["-c", 'printf \'%s\\n%s\\n\' "${ZDOTDIR-}" "${PASEO_TEST_REAL_ZDOTDIR-}"'],
@@ -344,6 +413,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: packageRoot,
           command: process.execPath,
           args: [scriptPath, "run", "dev"],
@@ -367,6 +437,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("emits OSC title updates to title listeners", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -392,6 +463,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("keeps preset titles instead of applying OSC title updates", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -416,6 +488,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: packageRoot,
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -449,6 +522,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: packageRoot,
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -473,6 +547,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("debounces rapid title changes and emits only the final title", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -516,6 +591,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: workingDir,
           shell: "/bin/zsh",
           env: {
@@ -598,6 +674,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: workingDir,
           shell: "/bin/zsh",
           env: {
@@ -627,6 +704,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures ANSI 16 color codes (mode 1)", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -656,6 +734,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures 256 color codes (mode 2)", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -681,6 +760,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures true color RGB (mode 3)", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -709,6 +789,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures background colors", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ ", TERM: "xterm-256color" },
@@ -735,6 +816,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("receives a snapshot on initial subscription", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: realpathSync(tmpdir()),
         }),
       );
@@ -755,6 +837,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("receives output messages on updates without replay snapshots", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -784,6 +867,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("does not emit snapshot messages for resize-only updates", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -812,6 +896,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("emits output only after getState reflects the new data", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -837,6 +922,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("unsubscribe stops receiving messages", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -866,6 +952,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -885,6 +972,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -902,6 +990,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -921,6 +1010,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -940,6 +1030,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
 
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -953,12 +1044,33 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
       const ack = getLines(session.getState()).find(isDsrOkLine) ?? "";
       expect(ack).toBe("DSR_OK:status");
     });
+
+    it("delivers OSC 11 background-color replies to a foreground app on stdin", async () => {
+      const helperPath = writeOsc11Helper("terminal-osc11-helper-");
+
+      const session = trackSession(
+        await createTerminal({
+          workspaceId: "ws-test",
+          cwd: "/tmp",
+          shell: "/bin/sh",
+          env: { PS1: "$ " },
+        }),
+      );
+      await waitForLines(session, ["$"]);
+
+      session.send({ type: "input", data: `${process.execPath} ${helperPath}\r` });
+      await waitForState(session, hasOsc11OkLine);
+
+      const ack = getLines(session.getState()).find(isOsc11OkLine) ?? "";
+      expect(ack).toBe("OSC11_OK:ESC]11;rgb:0b0b/0b0b/0b0bESC\\");
+    });
   });
 
   describe("stream snapshots", () => {
     it("streams raw output messages without replay metadata", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -986,6 +1098,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("sends the current snapshot to a new subscriber instead of replaying raw output", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1028,6 +1141,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("returns current terminal state with grid", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1051,6 +1165,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("captures cursor presentation modes emitted by terminal apps", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1080,6 +1195,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("grid cells have char and color attributes", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1100,6 +1216,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("preserves scrollback buffer", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1138,6 +1255,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("terminates the shell process", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },
@@ -1156,6 +1274,7 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
     it("send after kill is a no-op", async () => {
       const session = trackSession(
         await createTerminal({
+          workspaceId: "ws-test",
           cwd: "/tmp",
           shell: "/bin/sh",
           env: { PS1: "$ " },

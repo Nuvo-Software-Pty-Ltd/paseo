@@ -3,7 +3,7 @@
 // round-19-fired-failed-bad-cwd.json): failed runs carry a free-form
 // `error: string`, `agentId: null`, and `output: null`. There is NO top-level
 // `failureReason` field on the schedule. See PLAN-app.md Task 1.
-import type { ScheduleRun } from "@server/server/schedule/types";
+import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 
 export type ScheduleFailedRunRowModel =
   | {

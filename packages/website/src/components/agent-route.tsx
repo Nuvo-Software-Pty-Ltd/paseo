@@ -5,7 +5,7 @@ import { pageMeta } from "~/meta";
 export function agentRouteOptions(slug: string) {
   const page = getAgentPage(slug);
   return {
-    head: () => ({ meta: pageMeta(page.metaTitle, page.metaDescription) }),
+    head: () => pageMeta(page.metaTitle, page.metaDescription, `/${slug}`),
     component: function AgentLandingPage() {
       return <LandingPage title={page.title} subtitle={page.subtitle} />;
     },

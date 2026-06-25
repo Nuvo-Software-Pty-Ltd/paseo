@@ -3,8 +3,8 @@ import type {
   DaemonTransportFactory,
   WebSocketFactory,
   WebSocketLike,
-} from "@server/client/daemon-client-transport-types";
-import { createWebSocketTransportFactory } from "@server/client/daemon-client-websocket-transport";
+} from "@getpaseo/client/internal/daemon-client-transport-types";
+import { createWebSocketTransportFactory } from "@getpaseo/client/internal/daemon-client-websocket-transport";
 
 export function createWorkspaceTokenTransportFactory(
   workspaceToken: string,

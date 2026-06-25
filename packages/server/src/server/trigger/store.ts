@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { WebhookTriggerSchema, type WebhookTrigger } from "./types.js";
+import { WebhookTriggerSchema, type WebhookTrigger } from "@getpaseo/protocol/trigger/types";
 
 function generateTriggerId(): string {
   return randomBytes(4).toString("hex");

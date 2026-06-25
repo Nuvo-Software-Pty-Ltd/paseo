@@ -137,7 +137,6 @@ describe("persistence hooks", () => {
     const record = createRecord({
       title: "Voice agent (current)",
       config: {
-        title: "Voice agent (created)",
         modeId: "default",
         model: "gpt-5.4-mini",
         thinkingOptionId: "minimal",
@@ -157,7 +156,6 @@ describe("persistence hooks", () => {
       modeId: "plan",
       model: "gpt-5.4-mini",
       thinkingOptionId: "minimal",
-      title: "Voice agent (created)",
       systemPrompt: "Use speak first.",
       mcpServers: {
         paseo: {
@@ -174,7 +172,6 @@ describe("persistence hooks", () => {
       provider: "codex",
       title: "Renamed title",
       config: {
-        title: "Creation title",
         modeId: "default",
         model: "gpt-5.4-mini",
         systemPrompt: "Confirm and speak first.",
@@ -193,7 +190,6 @@ describe("persistence hooks", () => {
       cwd: "/tmp/project",
       modeId: "plan",
       model: "gpt-5.4-mini",
-      title: "Creation title",
       systemPrompt: "Confirm and speak first.",
       mcpServers: {
         paseo: {
@@ -201,6 +197,54 @@ describe("persistence hooks", () => {
           command: "node",
           args: ["/tmp/bridge.mjs", "--socket", "/tmp/agent.sock"],
         },
+      },
+    });
+  });
+
+  test("buildConfigOverrides drops persisted internal paseo MCP server", () => {
+    const record = createRecord({
+      config: {
+        modeId: "default",
+        model: "gpt-5.4-mini",
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=stale-agent",
+          },
+          custom: {
+            type: "stdio",
+            command: "custom-mcp",
+          },
+        },
+      },
+    });
+
+    expect(buildConfigOverrides(record).mcpServers).toEqual({
+      custom: {
+        type: "stdio",
+        command: "custom-mcp",
+      },
+    });
+  });
+
+  test("buildConfigOverrides preserves user-provided paseo MCP server", () => {
+    const record = createRecord({
+      config: {
+        modeId: "default",
+        model: "gpt-5.4-mini",
+        mcpServers: {
+          paseo: {
+            type: "http",
+            url: "https://example.com/custom-paseo",
+          },
+        },
+      },
+    });
+
+    expect(buildConfigOverrides(record).mcpServers).toEqual({
+      paseo: {
+        type: "http",
+        url: "https://example.com/custom-paseo",
       },
     });
   });

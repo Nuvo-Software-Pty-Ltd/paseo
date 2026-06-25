@@ -5,9 +5,9 @@ import type {
   CreateTriggerOptions,
   UpdateScheduleOptions,
   UpdateTriggerOptions,
-} from "@server/client/daemon-client";
-import type { ScheduleSummary } from "@server/server/schedule/types";
-import type { WebhookTriggerSummary } from "@server/server/trigger/types";
+} from "@getpaseo/client/internal/daemon-client";
+import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+import type { WebhookTriggerSummary } from "@getpaseo/protocol/trigger/types";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { type Automation, mergeAutomations } from "@/lib/automations/automation-model";
