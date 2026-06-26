@@ -41,6 +41,10 @@ export interface GithubRepoPickerProps {
   client: Pick<DaemonClient, "addProjectFromSource">;
   // Called with the added project so the host can refresh its list / open it.
   onProjectAdded: (project: ProjectDescriptorPayload) => void;
+  // When true, render the overlay WITHOUT a <Modal> wrapper — the caller owns
+  // the single on-screen Modal. iOS cannot present a second Modal over an
+  // already-presented one, so the picker must live inside the caller's Modal.
+  embedded?: boolean;
 }
 
 interface RepoRowProps {
@@ -103,6 +107,7 @@ export function GithubRepoPicker({
   workspaceId,
   client,
   onProjectAdded,
+  embedded = false,
 }: GithubRepoPickerProps) {
   const { theme } = useUnistyles();
   const inputRef = useRef<TextInput>(null);
@@ -199,66 +204,77 @@ export function GithubRepoPicker({
 
   const repos = reposQuery.data?.repos ?? [];
 
+  const body = (
+    <View style={styles.overlay}>
+      <Pressable style={styles.backdrop} onPress={handleClose} />
+      <View style={panelStyle} testID="github-repo-picker">
+        <View style={headerStyle}>
+          <Text style={titleStyle}>{GITHUB_PICKER_TITLE}</Text>
+          <TextInput
+            ref={inputRef}
+            value={search}
+            onChangeText={setSearch}
+            placeholder={GITHUB_PICKER_SEARCH_PLACEHOLDER}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={inputStyle}
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus={!isNative}
+            editable={addingRepo === null}
+          />
+        </View>
+
+        <ScrollView
+          style={styles.results}
+          contentContainerStyle={styles.resultsContent}
+          keyboardShouldPersistTaps="always"
+          showsVerticalScrollIndicator={false}
+        >
+          {addingRepo ? (
+            <View style={styles.statusRow}>
+              <ActivityIndicator size="small" color={theme.colors.accent} />
+              <Text style={emptyTextStyle}>{PROJECT_CLONE_PROGRESS_COPY}</Text>
+            </View>
+          ) : null}
+          {!addingRepo && reposQuery.isLoading ? (
+            <View style={styles.statusRow}>
+              <ActivityIndicator size="small" color={theme.colors.accent} />
+            </View>
+          ) : null}
+          {!addingRepo && reposQuery.isError ? (
+            <Text style={errorTextStyle}>
+              {reposQuery.error instanceof Error
+                ? reposQuery.error.message
+                : "Failed to load repositories."}
+            </Text>
+          ) : null}
+          {error ? <Text style={errorTextStyle}>{error}</Text> : null}
+          {!addingRepo && !reposQuery.isLoading && !reposQuery.isError && repos.length === 0 ? (
+            <Text style={emptyTextStyle}>{GITHUB_PICKER_EMPTY}</Text>
+          ) : null}
+          {repos.map((repo) => (
+            <RepoRow
+              key={repo.fullName}
+              repo={repo}
+              disabled={addingRepo !== null}
+              onSelect={handleSelect}
+            />
+          ))}
+        </ScrollView>
+      </View>
+    </View>
+  );
+
+  // Embedded: the parent ProjectPickerModal already owns the single on-screen
+  // Modal. Rendering a second <Modal> here silently fails to present on iOS
+  // (modal-over-modal), so render the overlay inline instead.
+  if (embedded) {
+    return visible ? body : null;
+  }
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
-      <View style={styles.overlay}>
-        <Pressable style={styles.backdrop} onPress={handleClose} />
-        <View style={panelStyle} testID="github-repo-picker">
-          <View style={headerStyle}>
-            <Text style={titleStyle}>{GITHUB_PICKER_TITLE}</Text>
-            <TextInput
-              ref={inputRef}
-              value={search}
-              onChangeText={setSearch}
-              placeholder={GITHUB_PICKER_SEARCH_PLACEHOLDER}
-              placeholderTextColor={theme.colors.foregroundMuted}
-              style={inputStyle}
-              autoCapitalize="none"
-              autoCorrect={false}
-              autoFocus={!isNative}
-              editable={addingRepo === null}
-            />
-          </View>
-
-          <ScrollView
-            style={styles.results}
-            contentContainerStyle={styles.resultsContent}
-            keyboardShouldPersistTaps="always"
-            showsVerticalScrollIndicator={false}
-          >
-            {addingRepo ? (
-              <View style={styles.statusRow}>
-                <ActivityIndicator size="small" color={theme.colors.accent} />
-                <Text style={emptyTextStyle}>{PROJECT_CLONE_PROGRESS_COPY}</Text>
-              </View>
-            ) : null}
-            {!addingRepo && reposQuery.isLoading ? (
-              <View style={styles.statusRow}>
-                <ActivityIndicator size="small" color={theme.colors.accent} />
-              </View>
-            ) : null}
-            {!addingRepo && reposQuery.isError ? (
-              <Text style={errorTextStyle}>
-                {reposQuery.error instanceof Error
-                  ? reposQuery.error.message
-                  : "Failed to load repositories."}
-              </Text>
-            ) : null}
-            {error ? <Text style={errorTextStyle}>{error}</Text> : null}
-            {!addingRepo && !reposQuery.isLoading && !reposQuery.isError && repos.length === 0 ? (
-              <Text style={emptyTextStyle}>{GITHUB_PICKER_EMPTY}</Text>
-            ) : null}
-            {repos.map((repo) => (
-              <RepoRow
-                key={repo.fullName}
-                repo={repo}
-                disabled={addingRepo !== null}
-                onSelect={handleSelect}
-              />
-            ))}
-          </ScrollView>
-        </View>
-      </View>
+      {body}
     </Modal>
   );
 }

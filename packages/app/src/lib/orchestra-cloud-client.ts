@@ -39,7 +39,10 @@ export interface WorkspaceRecord {
 
 function normalizeWorkspaceRecord(raw: unknown): WorkspaceRecord {
   const record = raw as Partial<WorkspaceRecord> & Record<string, unknown>;
-  const rawState = record.state;
+  // The cloud list/get endpoints serialize the DDB `status` attribute and do
+  // not emit `state`; fall back to `status` so archived / billing_locked
+  // workspaces bucket and route correctly instead of defaulting to "active".
+  const rawState = record.state ?? record.status;
   const state: CloudWorkspaceState =
     typeof rawState === "string" && CLOUD_WORKSPACE_STATES.has(rawState as CloudWorkspaceState)
       ? (rawState as CloudWorkspaceState)
