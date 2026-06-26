@@ -1,5 +1,16 @@
-import { deriveCanonicalRepoUrl, normalizeWorkspaceId } from "./workspace-registry-model.js";
+import { deriveCanonicalRepoUrl } from "./workspace-registry-model.js";
 import type { PersistedProjectRecord } from "./workspace-registry.js";
+
+// Cloud `/workspace/<ws>/...` paths are POSIX-absolute — the daemon only runs on
+// Linux (ECS Fargate). Normalize by trimming trailing slashes for a stable
+// comparison; deliberately NOT `node:path` / `normalizeWorkspaceId`, whose
+// `path.resolve` rewrites a POSIX path to drive-letter/backslash form on Windows
+// (CI test runners), which would make every prefix check miss. This code never
+// executes off the Linux daemon, so POSIX semantics are the correct semantics.
+function normalizePosixPath(p: string): string {
+  const trimmed = p.trim().replace(/\/+$/, "");
+  return trimmed.length > 0 ? trimmed : "/";
+}
 
 // workspace-repair — the cloud daemon's /workspace tree is tmpfs and wiped on
 // every recycle, but the project store is durable (DynamoDB). The lazy
@@ -30,7 +41,7 @@ export function selectProjectRepairClone(input: {
   workspaceId: string;
   projects: PersistedProjectRecord[];
 }): ProjectRepairClone | null {
-  const normalizedCwd = normalizeWorkspaceId(input.cwd);
+  const normalizedCwd = normalizePosixPath(input.cwd);
   const base = `/workspace/${input.workspaceId}/`;
   if (!normalizedCwd.startsWith(base)) {
     return null;
@@ -46,7 +57,7 @@ export function selectProjectRepairClone(input: {
       !candidate.archivedAt &&
       candidate.kind === "git" &&
       Boolean(candidate.repoUrl) &&
-      normalizeWorkspaceId(candidate.rootPath) === normalizedCwd,
+      normalizePosixPath(candidate.rootPath) === normalizedCwd,
   );
   if (!project?.repoUrl) {
     return null;
