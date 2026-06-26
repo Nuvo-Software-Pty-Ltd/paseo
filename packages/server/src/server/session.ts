@@ -80,6 +80,7 @@ import {
   fetchWorkspaceRepoUrl,
   parseGitHubRepoUrl,
 } from "./cloud-clone.js";
+import { selectProjectRepairClone } from "./cloud-workspace-repair.js";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { getErrorMessage, getErrorMessageOr } from "@getpaseo/protocol/error-utils";
 import { getAgentStatusPriority } from "@getpaseo/protocol/agent-state-bucket";
@@ -5684,16 +5685,35 @@ export class Session {
       );
     }
 
+    // Resolve WHAT to re-clone for the missing path. Prefer the durable project
+    // record whose rootPath IS this cwd — this rehydrates ANY project: the
+    // primary `.git-canonical` clone OR a secondary `<owner>__<repo>` subdir
+    // added via add_project, keyed by the recycle-surviving DynamoDB project
+    // store. Falls back to the legacy primary repair (describe-workspace →
+    // `.git-canonical`) when the cwd is the container root or carries no matching
+    // durable project row.
+    const target = await this.resolveCloudRepairTarget({
+      cwd,
+      workspaceId,
+      authServiceBaseUrl,
+      hmacKey,
+    });
+    // D-3.5a (T-5) — an empty workspace (created with no repo), or a path with no
+    // recoverable repo identity, has nothing to clone. Clean no-op.
+    if (!target) {
+      return;
+    }
+
     const synthDetail = (status: "running" | "completed" | "failed") => ({
       type: "worktree_setup" as const,
-      worktreePath: `/workspace/${workspaceId}`,
+      worktreePath: target.clonePath,
       branchName: "",
       log: "",
       commands: [
         {
           index: 1,
           command: "git clone --depth=1 <repo>",
-          cwd: `/workspace/${workspaceId}`,
+          cwd: target.clonePath,
           log: "",
           status,
           exitCode: null,
@@ -5712,32 +5732,13 @@ export class Session {
     });
 
     try {
-      const { accountId, repoUrl } = await fetchWorkspaceRepoUrl({
-        authServiceBaseUrl,
-        hmacKey,
-        workspaceId,
-        logger: this.sessionLogger,
-      });
-      // D-3.5a (T-5) — an empty workspace (created with no repo) has no primary
-      // repoUrl. Treat as a clean no-op: nothing to clone, no fail-loud.
-      if (!repoUrl) {
-        this.emit({
-          type: "workspace_setup_progress",
-          payload: {
-            workspaceId,
-            status: "completed",
-            detail: synthDetail("completed"),
-            error: null,
-          },
-        });
-        return;
-      }
       await cloneWorkspaceRepo({
-        accountId,
+        accountId: target.accountId,
         workspaceId,
-        repoUrl,
+        repoUrl: target.repoUrl,
         smClient: new SecretsManagerClient({}),
         logger: this.sessionLogger,
+        destSubdir: target.destSubdir,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5762,6 +5763,62 @@ export class Session {
         error: null,
       },
     });
+  }
+
+  // workspace-repair — pick the repo + clone destination to restore a missing
+  // /workspace path after a recycle wiped tmpfs. A secondary project (added via
+  // add_project) lives at `/workspace/<ws>/<owner>__<repo>`; its identity
+  // (repoUrl) survives in the durable project store but its clone does not, and
+  // the legacy primary-only repair (describe-workspace → `.git-canonical`)
+  // cannot restore it. Prefer the durable git project whose rootPath IS this cwd
+  // and re-clone it into that exact subdir; otherwise fall back to the primary
+  // repair. Returns null when there is nothing to clone.
+  private async resolveCloudRepairTarget(input: {
+    cwd: string;
+    workspaceId: string;
+    authServiceBaseUrl: string;
+    hmacKey: string;
+  }): Promise<{
+    accountId: string;
+    repoUrl: string;
+    destSubdir: string | undefined;
+    clonePath: string;
+  } | null> {
+    const { cwd, workspaceId, authServiceBaseUrl, hmacKey } = input;
+
+    // Prefer the durable git project whose rootPath IS this cwd — rehydrates a
+    // primary OR secondary `<owner>__<repo>` clone (see selectProjectRepairClone).
+    const projectClone = selectProjectRepairClone({
+      cwd,
+      workspaceId,
+      projects: await this.projectRegistry.list(),
+    });
+    if (projectClone) {
+      return {
+        accountId: await this.resolveCloudAccountId(workspaceId),
+        repoUrl: projectClone.repoUrl,
+        destSubdir: projectClone.destSubdir,
+        clonePath: projectClone.clonePath,
+      };
+    }
+
+    // Legacy primary repair — the migrated first project's identity comes from
+    // the auth-service describe-workspace lookup and clones to `.git-canonical`.
+    const { accountId, repoUrl } = await fetchWorkspaceRepoUrl({
+      authServiceBaseUrl,
+      hmacKey,
+      workspaceId,
+      logger: this.sessionLogger,
+    });
+    if (!repoUrl) {
+      return null;
+    }
+    return {
+      accountId,
+      repoUrl,
+      destSubdir: undefined,
+      clonePath: `/workspace/${workspaceId}/.git-canonical`,
+    };
   }
 
   // Build the bootstrap snapshot used by `flushBootstrappedWorkspaceUpdates`
@@ -5940,6 +5997,10 @@ export class Session {
       cwd: source.cwd,
       projectId: source.projectId,
     });
+    // Cloud: rehydrate the source project's clone if a recycle wiped the tmpfs
+    // copy, so `git worktree add` has a repo to branch from instead of failing
+    // "Directory not found". No-op on-host or when the clone already exists.
+    await this.ensureCloudWorkspacePathExists(sourceCwd);
 
     const result = await this.createPaseoWorktreeWorkflow(
       {
@@ -6000,26 +6061,31 @@ export class Session {
   ): Promise<void> {
     const requestedCwd = request.cwd;
     const cwd = expandTilde(requestedCwd);
-    const directoryExists = await this.filesystem.isDirectory(cwd).catch(() => false);
-    if (!directoryExists) {
-      this.sessionLogger.info(
-        { requestedCwd, resolvedCwd: cwd, reason: "directory_not_found" },
-        "Open project rejected",
-      );
-      this.emit({
-        type: "open_project_response",
-        payload: {
-          requestId: request.requestId,
-          workspace: null,
-          error: `Directory not found: ${cwd}`,
-          errorCode: "directory_not_found",
-        },
-      });
-      return;
-    }
-
     try {
-      await this.ensureCloudWorkspacePathExists(request.cwd);
+      // Cloud: the tmpfs /workspace clone is wiped on every recycle. Re-clone the
+      // owning project (primary OR a secondary `<owner>__<repo>` subdir) BEFORE
+      // the existence check, so a recycled workspace self-heals on open instead
+      // of failing "Directory not found". No-op on-host or when already present.
+      await this.ensureCloudWorkspacePathExists(cwd);
+
+      const directoryExists = await this.filesystem.isDirectory(cwd).catch(() => false);
+      if (!directoryExists) {
+        this.sessionLogger.info(
+          { requestedCwd, resolvedCwd: cwd, reason: "directory_not_found" },
+          "Open project rejected",
+        );
+        this.emit({
+          type: "open_project_response",
+          payload: {
+            requestId: request.requestId,
+            workspace: null,
+            error: `Directory not found: ${cwd}`,
+            errorCode: "directory_not_found",
+          },
+        });
+        return;
+      }
+
       const projectsBefore = new Map<string, PersistedProjectRecord>();
       for (const project of await this.projectRegistry.list()) {
         projectsBefore.set(project.projectId, project);
