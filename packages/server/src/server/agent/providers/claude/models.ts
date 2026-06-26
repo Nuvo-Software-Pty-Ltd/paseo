@@ -5,14 +5,14 @@ import type { Logger } from "pino";
 
 import type { AgentModelDefinition } from "../../agent-sdk-types.js";
 
-const CLAUDE_THINKING_OPTIONS = [
+export const CLAUDE_THINKING_OPTIONS = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
   { id: "max", label: "Max" },
 ] as const;
 
-const CLAUDE_OPUS_EXTENDED_THINKING_OPTIONS = [
+export const CLAUDE_OPUS_EXTENDED_THINKING_OPTIONS = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
@@ -20,7 +20,7 @@ const CLAUDE_OPUS_EXTENDED_THINKING_OPTIONS = [
   { id: "max", label: "Max" },
 ] as const;
 
-const CLAUDE_ULTRACODE_THINKING_OPTIONS = [
+export const CLAUDE_ULTRACODE_THINKING_OPTIONS = [
   ...CLAUDE_OPUS_EXTENDED_THINKING_OPTIONS,
   { id: "ultracode", label: "Ultracode" },
 ] as const;
