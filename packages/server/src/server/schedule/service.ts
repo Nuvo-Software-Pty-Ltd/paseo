@@ -8,7 +8,12 @@ import {
   runWithWorkspaceAuth,
   workspaceAuthStorage,
 } from "../cloud-auth.js";
-import { createAutomationSpawn, spawnFromAutomation } from "../automation/spawn.js";
+import {
+  createAutomationSpawn,
+  spawnFromAutomation,
+  type DedicatedWorktreeCreator,
+  type WorkspaceUnarchiver,
+} from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import type { ProviderSnapshotManager } from "../agent/provider-snapshot-manager.js";
@@ -90,6 +95,17 @@ function applyNewAgentConfig(
       delete config.thinkingOptionId;
     }
   }
+  if (patch.workspaceMode !== undefined) {
+    config.workspaceMode = patch.workspaceMode;
+  }
+  if (patch.workspaceId !== undefined) {
+    const trimmed = patch.workspaceId?.trim();
+    if (trimmed) {
+      config.workspaceId = trimmed;
+    } else {
+      delete config.workspaceId;
+    }
+  }
   return { ...target, config };
 }
 
@@ -99,6 +115,16 @@ function normalizeMaxRuns(value: number | null | undefined): number | null {
   }
   if (!Number.isInteger(value) || value <= 0) {
     throw new Error("maxRuns must be a positive integer");
+  }
+  return value;
+}
+
+function normalizeMaxRetainedRuns(value: number | null | undefined): number | null {
+  if (value == null) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("maxRetainedRuns must be a positive integer");
   }
   return value;
 }
@@ -152,6 +178,11 @@ export class ScheduleService {
   ) => Promise<ScheduleExecutionResult>;
   private readonly runningScheduleIds = new Set<string>();
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  // Injected from bootstrap after the worktree/unarchive adapters exist (they
+  // close over wsServer, which is assigned later than this service is built).
+  // Optional: a daemon without these still fires reuse-mode routines unchanged.
+  private dedicatedWorktreeCreator?: DedicatedWorktreeCreator;
+  private workspaceUnarchiver?: WorkspaceUnarchiver;
 
   constructor(options: ScheduleServiceOptions) {
     this.store = options.store;
@@ -161,6 +192,28 @@ export class ScheduleService {
     this.providerSnapshotManager = options.providerSnapshotManager;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
+  }
+
+  /** Bootstrap injects the dedicated-worktree creator (worktree run-location modes). */
+  setDedicatedWorktreeCreator(creator: DedicatedWorktreeCreator): void {
+    this.dedicatedWorktreeCreator = creator;
+  }
+
+  /** Bootstrap injects the workspace auto-unarchiver (reuse + dedicated modes). */
+  setWorkspaceUnarchiver(unarchiver: WorkspaceUnarchiver): void {
+    this.workspaceUnarchiver = unarchiver;
+  }
+
+  /** The automation-spawn deps shared by both fire paths (tick + cloud async). */
+  private automationDeps() {
+    return {
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
+      logger: this.logger,
+      providerSnapshotManager: this.providerSnapshotManager,
+      createDedicatedWorktree: this.dedicatedWorktreeCreator,
+      unarchiveWorkspace: this.workspaceUnarchiver,
+    };
   }
 
   async start(): Promise<void> {
@@ -209,6 +262,7 @@ export class ScheduleService {
       pausedAt: null,
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
+      maxRetainedRuns: normalizeMaxRetainedRuns(input.maxRetainedRuns),
       runs: [],
       cloudOwnerWorkspaceId: cloudOwner?.workspaceId ?? null,
       cloudOwnerAccountId: cloudOwner?.accountId ?? null,
@@ -342,6 +396,10 @@ export class ScheduleService {
       updated = { ...updated, maxRuns: normalizeMaxRuns(input.maxRuns) };
     }
 
+    if (input.maxRetainedRuns !== undefined) {
+      updated = { ...updated, maxRetainedRuns: normalizeMaxRetainedRuns(input.maxRetainedRuns) };
+    }
+
     if (input.expiresAt !== undefined) {
       updated = { ...updated, expiresAt: input.expiresAt };
     }
@@ -446,17 +504,16 @@ export class ScheduleService {
         createAutomationSpawn({
           target: schedule.target,
           wrappedPrompt,
-          newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
+          // Keep the spawned worker (archiveAfterRun:false) so a routine's runs
+          // stay reachable in the active list (attributed to their workspace via
+          // the spawn's workspaceId resolution).
+          newAgent: { runPrompt: schedule.prompt, archiveAfterRun: false },
+          maxRetainedRuns: schedule.maxRetainedRuns,
           labels: {
             "paseo.schedule-id": schedule.id,
             "paseo.schedule-run": runId,
           },
-          deps: {
-            agentManager: this.agentManager,
-            agentStorage: this.agentStorage,
-            logger: this.logger,
-            providerSnapshotManager: this.providerSnapshotManager,
-          },
+          deps: this.automationDeps(),
         }),
       );
     } catch (error) {
@@ -724,22 +781,19 @@ export class ScheduleService {
     return spawnFromAutomation({
       target: schedule.target,
       wrappedPrompt,
-      // Schedule new-agents run the RAW prompt (renders as a normal user turn),
-      // are titled from it, and are archived once the single run settles. The
+      // Schedule new-agents run the RAW prompt (renders as a normal user turn)
+      // and are titled from it. The worker is KEPT (archiveAfterRun:false) so the
+      // run stays reachable in the active list, attributed to its workspace. The
       // wrappedPrompt is used only for existing-agent targets. Provider
       // create-config (unattended mode + feature values) is resolved via
       // providerSnapshotManager in the spawn helper.
-      newAgent: { runPrompt: schedule.prompt, archiveAfterRun: true },
+      newAgent: { runPrompt: schedule.prompt, archiveAfterRun: false },
+      maxRetainedRuns: schedule.maxRetainedRuns,
       labels: {
         "paseo.schedule-id": schedule.id,
         "paseo.schedule-run": runId,
       },
-      deps: {
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.logger,
-        providerSnapshotManager: this.providerSnapshotManager,
-      },
+      deps: this.automationDeps(),
     });
   }
 }

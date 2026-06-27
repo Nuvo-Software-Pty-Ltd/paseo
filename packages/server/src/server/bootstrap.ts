@@ -95,7 +95,10 @@ import {
   createPaseoWorktree as createRegisteredPaseoWorktree,
   createLocalCheckoutWorkspace,
 } from "./paseo-worktree-service.js";
-import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
+import {
+  createPaseoWorktreeWorkflow,
+  type CreatePaseoWorktreeWorkflowDependencies,
+} from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
 import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.js";
@@ -155,6 +158,7 @@ import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
 import { resolveWorkspaceIdForPath } from "./resolve-workspace-id-for-path.js";
 import {
   archivePersistedWorkspaceRecord,
+  unarchivePersistedWorkspaceRecord,
   type ActiveWorkspaceRef,
 } from "./workspace-archive-service.js";
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
@@ -1140,6 +1144,154 @@ export async function createPaseoDaemon(
     wsServer?.broadcast(wrapSessionMessage(message));
   };
 
+  // Shared Paseo-worktree workflow deps — used by the agent MCP `create_worktree`
+  // tool AND by the automation (schedule/trigger) dedicated-worktree creator, so
+  // the worktree-creation path is assembled once. Lazy closures over `wsServer`
+  // (assigned later) match the external adapters above. The return-type
+  // annotation gives the literal contextual typing (callback params inferred).
+  const buildPaseoWorktreeWorkflowDeps = (): CreatePaseoWorktreeWorkflowDependencies => ({
+    paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
+    createPaseoWorktree: async (workflowInput, workflowOptions) => {
+      return createRegisteredPaseoWorktree(workflowInput, {
+        github,
+        ...(workflowOptions?.resolveDefaultBranch
+          ? { resolveDefaultBranch: workflowOptions.resolveDefaultBranch }
+          : {}),
+        projectRegistry,
+        workspaceRegistry,
+        workspaceGitService,
+      });
+    },
+    warmWorkspaceGitData: async (workspace) => {
+      await Promise.all(
+        wsServer
+          ?.listActiveSessions()
+          .map((session) => session.warmWorkspaceGitDataForWorkspace(workspace)) ?? [],
+      );
+    },
+    emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
+      await emitWorkspaceUpdatesExternal([workspaceId]);
+    },
+    cacheWorkspaceSetupSnapshot: () => {},
+    emit: emitExternalSessionMessage,
+    sessionLogger: logger,
+    terminalManager,
+    archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
+    serviceProxy,
+    scriptRuntimeStore,
+    getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
+    getDaemonTcpHost: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.host : null),
+    serviceProxyPublicBaseUrl,
+    onScriptsChanged: null,
+  });
+
+  // Per-run worktree retention: archive the oldest sibling worktrees (those
+  // sharing the routine's per-run branch prefix) beyond `keep`. Keeps the
+  // active list / registry from growing without bound when a routine uses
+  // "fresh-worktree-per-run". (Dir removal for self-host is a follow-up; cloud
+  // worktree dirs are tmpfs and reclaimed on recycle.)
+  const prunePerRunWorktrees = async (branchPrefix: string, keep: number): Promise<void> => {
+    const siblings = (await workspaceRegistry.list())
+      .filter(
+        (w) => !w.archivedAt && w.kind === "worktree" && (w.branch ?? "").startsWith(branchPrefix),
+      )
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    const excess = siblings.slice(0, Math.max(0, siblings.length - keep));
+    for (const workspace of excess) {
+      try {
+        await archiveWorkspaceRecordExternal(workspace.workspaceId);
+      } catch (error) {
+        logger.warn(
+          { err: error, workspaceId: workspace.workspaceId },
+          "Failed to prune old per-run routine worktree",
+        );
+      }
+    }
+    if (excess.length > 0) {
+      logger.info({ pruned: excess.length, keep }, "Pruned old per-run routine worktrees");
+    }
+  };
+
+  // Dedicated-worktree creator injected into the schedule + trigger services.
+  // Idempotent by the deterministic per-routine branch: "dedicated-worktree"
+  // reuses the existing record (stable branch); "fresh-worktree-per-run" always
+  // creates (unique per-run branch) then prunes. After a cloud recycle the
+  // in-memory registry + tmpfs worktree are gone, so it self-heals by recreating.
+  const createDedicatedWorktree = async (input: {
+    sourceCwd: string;
+    slug: string;
+    branchName: string;
+    retention?: { siblingBranchPrefix: string; keep: number };
+  }): Promise<{ cwd: string; workspaceId: string; created: boolean }> => {
+    const existing = (await workspaceRegistry.list()).find(
+      (w) => !w.archivedAt && w.kind === "worktree" && w.branch === input.branchName,
+    );
+    if (existing) {
+      return { cwd: existing.cwd, workspaceId: existing.workspaceId, created: false };
+    }
+    const result = await createPaseoWorktreeWorkflow(buildPaseoWorktreeWorkflowDeps(), {
+      cwd: input.sourceCwd,
+      worktreeSlug: input.slug,
+      branchName: input.branchName,
+    });
+    if (input.retention) {
+      await prunePerRunWorktrees(input.retention.siblingBranchPrefix, input.retention.keep);
+    }
+    return {
+      cwd: result.workspace.cwd,
+      workspaceId: result.workspace.workspaceId,
+      created: result.created,
+    };
+  };
+
+  // Auto-unarchive adapter injected into the schedule + trigger services. Resolves
+  // the spawn's target workspace (by id when known, else by cwd — prefer worktree
+  // then most-recently-updated) and, if archived, clears archivedAt + emits a
+  // workspace_update upsert. Returns the resolved workspaceId for agent
+  // attribution even when no unarchive was needed (the common reuse case); null
+  // when nothing matches (caller then spawns cwd-only).
+  const unarchiveAutomationWorkspace = async (input: {
+    workspaceId?: string;
+    cwd: string;
+  }): Promise<{ workspaceId: string } | null> => {
+    const workspaces = await workspaceRegistry.list();
+    let target = input.workspaceId
+      ? workspaces.find((w) => w.workspaceId === input.workspaceId)
+      : undefined;
+    if (!target) {
+      const targetCwd = path.resolve(input.cwd);
+      target = workspaces
+        .filter((w) => path.resolve(w.cwd) === targetCwd)
+        .sort((a, b) => {
+          if (a.kind === "worktree" && b.kind !== "worktree") return -1;
+          if (b.kind === "worktree" && a.kind !== "worktree") return 1;
+          return a.updatedAt < b.updatedAt ? 1 : -1;
+        })[0];
+    }
+    if (!target) {
+      return null;
+    }
+    if (target.archivedAt) {
+      const restored = await unarchivePersistedWorkspaceRecord({
+        workspaceId: target.workspaceId,
+        workspaceRegistry,
+      });
+      if (restored) {
+        await emitWorkspaceUpdatesExternal([target.workspaceId]);
+      }
+    }
+    return { workspaceId: target.workspaceId };
+  };
+
+  // Late setter-injection (services are constructed above, before these adapters
+  // exist; the adapters close over the later-assigned wsServer). A daemon that
+  // skips this still fires reuse-mode routines; non-"reuse" modes then error.
+  scheduleService.setDedicatedWorktreeCreator(createDedicatedWorktree);
+  scheduleService.setWorkspaceUnarchiver(unarchiveAutomationWorkspace);
+  triggerService.setDedicatedWorktreeCreator(createDedicatedWorktree);
+  triggerService.setWorkspaceUnarchiver(unarchiveAutomationWorkspace);
+
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
     paseoWorktreesBaseRoot: config.worktreesRoot,
@@ -1182,46 +1334,7 @@ export async function createPaseoDaemon(
         ensureWorkspaceForCreate: ensureWorkspaceForCreateExternal,
         createPaseoWorktree: async (input, serviceOptions) => {
           return createPaseoWorktreeWorkflow(
-            {
-              paseoHome: config.paseoHome,
-              worktreesRoot: config.worktreesRoot,
-              createPaseoWorktree: async (workflowInput, workflowOptions) => {
-                return createRegisteredPaseoWorktree(workflowInput, {
-                  github,
-                  ...(workflowOptions?.resolveDefaultBranch
-                    ? {
-                        resolveDefaultBranch: workflowOptions.resolveDefaultBranch,
-                      }
-                    : {}),
-                  projectRegistry,
-                  workspaceRegistry,
-                  workspaceGitService,
-                });
-              },
-              warmWorkspaceGitData: async (workspace) => {
-                await Promise.all(
-                  wsServer
-                    ?.listActiveSessions()
-                    .map((session) => session.warmWorkspaceGitDataForWorkspace(workspace)) ?? [],
-                );
-              },
-              emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
-                await emitWorkspaceUpdatesExternal([workspaceId]);
-              },
-              cacheWorkspaceSetupSnapshot: () => {},
-              emit: emitExternalSessionMessage,
-              sessionLogger: logger,
-              terminalManager,
-              archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
-              serviceProxy,
-              scriptRuntimeStore,
-              getDaemonTcpPort: () =>
-                boundListenTarget?.type === "tcp" ? boundListenTarget.port : null,
-              getDaemonTcpHost: () =>
-                boundListenTarget?.type === "tcp" ? boundListenTarget.host : null,
-              serviceProxyPublicBaseUrl,
-              onScriptsChanged: null,
-            },
+            buildPaseoWorktreeWorkflowDeps(),
             input,
             serviceOptions,
           );

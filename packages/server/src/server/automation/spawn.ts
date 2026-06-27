@@ -29,7 +29,40 @@ export interface AutomationSpawnDeps {
   agentStorage: AgentStore;
   logger: Logger;
   providerSnapshotManager?: AutomationCreateConfigResolver;
+  /**
+   * Create-or-reuse a Paseo worktree for a "dedicated-worktree" /
+   * "fresh-worktree-per-run" routine and register it as a workspace. Returns the
+   * worktree's cwd + workspaceId so the new-agent spawn runs there and is
+   * attributed to it. `created` is true only when a fresh worktree was made (the
+   * fire path persists cwd/workspaceId back onto a dedicated-worktree schedule on
+   * first creation). `retention` (per-run only) archives all but the newest
+   * `keep` sibling worktrees sharing `siblingBranchPrefix`. Injected in
+   * bootstrap; absent ⇒ non-"reuse" modes throw a clear error.
+   */
+  createDedicatedWorktree?: (input: {
+    sourceCwd: string;
+    slug: string;
+    branchName: string;
+    retention?: { siblingBranchPrefix: string; keep: number };
+  }) => Promise<{ cwd: string; workspaceId: string; created: boolean }>;
+  /**
+   * Resolve the workspace the spawn will run in (by workspaceId when known, else
+   * by cwd) and, if it is archived, unarchive it + emit a workspace_update
+   * upsert. Returns the resolved workspaceId for agent attribution — this is what
+   * makes a scheduled agent appear in the active list / history under its
+   * workspace (today the spawn passes no workspaceId at all). Returns null when
+   * no record matches (caller then runs cwd-only). Injected in bootstrap;
+   * absent ⇒ no-op (today's behavior).
+   */
+  unarchiveWorkspace?: (input: {
+    workspaceId?: string;
+    cwd: string;
+  }) => Promise<{ workspaceId: string } | null>;
 }
+
+/** Injected (setter) into the schedule + trigger services from bootstrap. */
+export type DedicatedWorktreeCreator = NonNullable<AutomationSpawnDeps["createDedicatedWorktree"]>;
+export type WorkspaceUnarchiver = NonNullable<AutomationSpawnDeps["unarchiveWorkspace"]>;
 
 /**
  * A spawn whose agent already exists (created, or an existing agent that
@@ -49,6 +82,17 @@ export interface AutomationSpawnDeps {
 export interface AutomationSpawnHandle {
   agentId: string;
   runTurn: () => Promise<ScheduleExecutionResult>;
+  /**
+   * Workspace the spawned agent was attributed to — a resolved/auto-unarchived
+   * reuse workspace, or a freshly-created/reused dedicated worktree. Undefined
+   * when no workspace record resolved (cwd-only spawn). The fire path uses this
+   * to write the dedicated worktree's id back onto the schedule.
+   */
+  resolvedWorkspaceId?: string;
+  /** Effective cwd the agent runs in (the worktree path for worktree modes). */
+  resolvedCwd?: string;
+  /** True when this fire created a fresh worktree (→ caller writes it back). */
+  resolvedCreated?: boolean;
 }
 
 function buildRunOutput(params: {
@@ -98,6 +142,8 @@ export async function createAutomationSpawn(params: {
     /** Archive the new agent after the run settles (and on failure). */
     archiveAfterRun: boolean;
   };
+  /** Per-run worktree retention cap (workspaceMode "fresh-worktree-per-run"). */
+  maxRetainedRuns?: number | null;
 }): Promise<AutomationSpawnHandle> {
   const { target, wrappedPrompt, labels, deps, newAgent } = params;
   const { agentManager, agentStorage, logger, providerSnapshotManager } = deps;
@@ -134,6 +180,64 @@ export async function createAutomationSpawn(params: {
   const runPrompt = newAgent?.runPrompt ?? wrappedPrompt;
   const archiveAfterRun = newAgent?.archiveAfterRun ?? false;
 
+  // Resolve WHERE this new-agent runs and which workspace it attaches to.
+  //  - "reuse" (default): the configured cwd (+ any client-pinned workspaceId).
+  //  - "dedicated-worktree": a per-routine worktree, created once then reused
+  //    (config.workspaceId is daemon-written back after first creation).
+  //  - "fresh-worktree-per-run": a new worktree each fire (bounded retention).
+  const workspaceMode = target.config.workspaceMode ?? "reuse";
+  let effectiveCwd = target.config.cwd;
+  let resolvedWorkspaceId = target.config.workspaceId ?? undefined;
+  let resolvedCreated = false;
+
+  if (workspaceMode === "dedicated-worktree" || workspaceMode === "fresh-worktree-per-run") {
+    const needsCreate = workspaceMode === "fresh-worktree-per-run" || !resolvedWorkspaceId;
+    if (needsCreate) {
+      if (!deps.createDedicatedWorktree) {
+        throw new Error(
+          `Routine run-location "${workspaceMode}" requires worktree support, which is unavailable in this daemon`,
+        );
+      }
+      const automationId = labels["paseo.schedule-id"] ?? labels["paseo.trigger-id"] ?? "routine";
+      const runId = labels["paseo.schedule-run"] ?? labels["paseo.trigger-run"];
+      const slugBase = `routine-${automationId}`;
+      const perRun = workspaceMode === "fresh-worktree-per-run";
+      const slug = perRun && runId ? `${slugBase}-${runId.slice(0, 8)}` : slugBase;
+      const created = await deps.createDedicatedWorktree({
+        sourceCwd: target.config.cwd,
+        slug,
+        branchName: `paseo/${slug}`,
+        retention: perRun
+          ? { siblingBranchPrefix: `paseo/${slugBase}-`, keep: params.maxRetainedRuns ?? 10 }
+          : undefined,
+      });
+      effectiveCwd = created.cwd;
+      resolvedWorkspaceId = created.workspaceId;
+      resolvedCreated = created.created;
+    }
+  }
+
+  // Resolve cwd→workspace and auto-unarchive it (reuse + dedicated modes) so the
+  // routine's agent is reachable even when the workspace was archived while the
+  // schedule kept firing. This ALSO supplies the workspaceId for attribution in
+  // the common (non-archived) reuse case. cwd-only when no record resolves.
+  if (deps.unarchiveWorkspace) {
+    try {
+      const restored = await deps.unarchiveWorkspace({
+        workspaceId: resolvedWorkspaceId,
+        cwd: effectiveCwd,
+      });
+      if (restored) {
+        resolvedWorkspaceId = restored.workspaceId;
+      }
+    } catch (error) {
+      logger.warn(
+        { err: error, cwd: effectiveCwd },
+        "Auto-unarchive of automation workspace failed; spawning anyway",
+      );
+    }
+  }
+
   // Resolve the provider's create-config (unattended mode + feature values) the
   // same way the interactive create path does, so a scheduled/triggered new
   // agent lands in the provider's unattended mode (e.g. bypassPermissions /
@@ -148,7 +252,7 @@ export async function createAutomationSpawn(params: {
   const resolveFallbackCreateConfig = async () =>
     providerSnapshotManager
       ? await providerSnapshotManager.resolveCreateConfig({
-          cwd: target.config.cwd,
+          cwd: effectiveCwd,
           provider: target.config.provider,
           requestedMode: undefined,
           featureValues: target.config.featureValues,
@@ -175,7 +279,7 @@ export async function createAutomationSpawn(params: {
 
   const config: AgentSessionConfig = {
     provider: target.config.provider,
-    cwd: target.config.cwd,
+    cwd: effectiveCwd,
     modeId: resolvedCreateConfig.modeId,
     model: target.config.model,
     thinkingOptionId: target.config.thinkingOptionId,
@@ -193,6 +297,7 @@ export async function createAutomationSpawn(params: {
     labels,
     initialPrompt: newAgent?.runPrompt,
     initialTitle: provisionalTitle,
+    workspaceId: resolvedWorkspaceId,
   });
 
   const runTurn = async (): Promise<ScheduleExecutionResult> => {
@@ -222,7 +327,13 @@ export async function createAutomationSpawn(params: {
     };
   };
 
-  return { agentId: agent.id, runTurn };
+  return {
+    agentId: agent.id,
+    runTurn,
+    resolvedWorkspaceId,
+    resolvedCwd: effectiveCwd,
+    resolvedCreated,
+  };
 }
 
 /**
@@ -243,6 +354,7 @@ export async function spawnFromAutomation(params: {
   labels: Record<string, string>;
   deps: AutomationSpawnDeps;
   newAgent?: { runPrompt: string; archiveAfterRun: boolean };
+  maxRetainedRuns?: number | null;
 }): Promise<ScheduleExecutionResult> {
   const handle = await createAutomationSpawn(params);
   return handle.runTurn();

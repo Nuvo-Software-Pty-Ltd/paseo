@@ -45,6 +45,22 @@ export const ScheduleTargetSchema = z.discriminatedUnion("type", [
         .optional(),
       systemPrompt: z.string().optional(),
       mcpServers: z.record(z.string(), z.unknown()).optional(),
+      // Where a scheduled/triggered new-agent runs:
+      //  - "reuse" (default): run in `cwd`; if that workspace is archived the
+      //    fire path auto-unarchives it (so the agent is reachable again).
+      //  - "dedicated-worktree": ONE Paseo worktree per schedule, created on
+      //    first fire and reused thereafter (cwd + workspaceId are written back
+      //    onto this record).
+      //  - "fresh-worktree-per-run": a NEW worktree each fire (bounded by
+      //    maxRetainedRuns; older ones are archived).
+      workspaceMode: z
+        .enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"])
+        .optional(),
+      // Resolved workspace the spawn attaches to. For "dedicated-worktree" this
+      // is daemon-written after first creation; for "reuse" it MAY be set by the
+      // client to pin the exact workspace (precise auto-unarchive + attribution).
+      // Optional so every pre-existing record parses unchanged.
+      workspaceId: z.string().trim().min(1).optional(),
     }),
   }),
 ]);
@@ -92,6 +108,11 @@ export const StoredScheduleSchema = z.object({
   pausedAt: z.string().nullable(),
   expiresAt: z.string().nullable(),
   maxRuns: z.number().int().positive().nullable(),
+  // Retention cap for kept run-agents / per-run worktrees. Unset (null) keeps
+  // every run's agent (the chosen default); for "fresh-worktree-per-run" the
+  // reaper falls back to a sane cap when this is null so worktree dirs cannot
+  // grow without bound. `.default(null)` keeps pre-upgrade records parseable.
+  maxRetainedRuns: z.number().int().positive().nullable().default(null),
   runs: z.array(ScheduleRunSchema),
   // T-7 cloud-owner persisted claims.
   cloudOwnerWorkspaceId: z.string().nullable().default(null),
@@ -110,6 +131,7 @@ export interface CreateScheduleInput {
   cadence: ScheduleCadence;
   target: ScheduleTarget;
   maxRuns?: number | null;
+  maxRetainedRuns?: number | null;
   expiresAt?: string | null;
   runOnCreate?: boolean | null;
 }
@@ -120,6 +142,10 @@ export interface UpdateScheduleNewAgentConfig {
   modeId?: string | null;
   thinkingOptionId?: string | null;
   cwd?: string;
+  workspaceMode?: "reuse" | "dedicated-worktree" | "fresh-worktree-per-run";
+  // Daemon write-back target after a dedicated worktree is created; also lets a
+  // client pin the reuse-mode workspace. `null` clears a previously-pinned id.
+  workspaceId?: string | null;
 }
 
 export interface UpdateScheduleInput {
@@ -129,6 +155,7 @@ export interface UpdateScheduleInput {
   cadence?: ScheduleCadence;
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
+  maxRetainedRuns?: number | null;
   expiresAt?: string | null;
 }
 

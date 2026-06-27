@@ -78,6 +78,61 @@ describe("scheduleTargetToDraft — thinkingOptionId round-trip", () => {
   });
 });
 
+describe("draftToScheduleTarget — workspaceMode", () => {
+  it("omits workspaceMode when it is the default (reuse)", () => {
+    const { target } = draftToScheduleTarget({
+      ...defaultTargetDraft(),
+      provider: "claude",
+      cwd: "/home/me/web",
+      workspaceMode: "reuse",
+    });
+    expect(target).toEqual({
+      type: "new-agent",
+      config: { provider: "claude", cwd: "/home/me/web" },
+    });
+    expect(target && "config" in target ? "workspaceMode" in target.config : false).toBe(false);
+  });
+
+  it("emits workspaceMode when it is a worktree mode", () => {
+    const { target } = draftToScheduleTarget({
+      ...defaultTargetDraft(),
+      provider: "claude",
+      cwd: "/home/me/web",
+      workspaceMode: "dedicated-worktree",
+    });
+    expect(target).toEqual({
+      type: "new-agent",
+      config: {
+        provider: "claude",
+        cwd: "/home/me/web",
+        workspaceMode: "dedicated-worktree",
+      },
+    });
+  });
+
+  it("round-trips workspaceMode through scheduleTargetToDraft", () => {
+    const target: ScheduleTarget = {
+      type: "new-agent",
+      config: {
+        provider: "claude",
+        cwd: "/home/me/web",
+        workspaceMode: "fresh-worktree-per-run",
+      },
+    };
+    const draft = scheduleTargetToDraft(target);
+    expect(draft.workspaceMode).toBe("fresh-worktree-per-run");
+    expect(draftToScheduleTarget(draft).target).toEqual(target);
+  });
+
+  it("defaults workspaceMode to reuse when the target omits it", () => {
+    const draft = scheduleTargetToDraft({
+      type: "new-agent",
+      config: { provider: "claude", cwd: "/home/me/web" },
+    });
+    expect(draft.workspaceMode).toBe("reuse");
+  });
+});
+
 describe("working-directory project picker helpers", () => {
   it("maps a selected project id to its rootPath (the wire cwd)", () => {
     expect(projectRootPathForId(PROJECTS, "p2")).toBe("/home/me/api");

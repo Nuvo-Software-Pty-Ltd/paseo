@@ -23,6 +23,7 @@ function makeSchedule(overrides: Partial<ScheduleSummary> = {}): ScheduleSummary
     pausedAt: null,
     expiresAt: null,
     maxRuns: null,
+    maxRetainedRuns: null,
     cloudOwnerWorkspaceId: null,
     cloudOwnerAccountId: null,
     ...overrides,
