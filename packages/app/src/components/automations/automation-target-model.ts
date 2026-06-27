@@ -9,6 +9,11 @@ import type { ComboboxOption } from "@/components/ui/combobox";
 
 // Editor state for the spawn target. We keep both the new-agent fields and the
 // chosen existing-agent id around so toggling between modes does not lose input.
+// Where a new-agent routine runs. "reuse" (default) runs in the chosen working
+// directory; the worktree modes give the routine its own workspace so archiving
+// the source never strands it. Mirrors the protocol new-agent config field.
+export type WorkspaceMode = "reuse" | "dedicated-worktree" | "fresh-worktree-per-run";
+
 export interface TargetDraft {
   mode: "new-agent" | "agent";
   provider: string;
@@ -18,6 +23,7 @@ export interface TargetDraft {
   // model's thinking option (Low/Medium/High/Max). Null = provider default.
   thinkingOptionId: string | null;
   cwd: string;
+  workspaceMode: WorkspaceMode;
   agentId: string | null;
 }
 
@@ -29,6 +35,7 @@ export function defaultTargetDraft(): TargetDraft {
     modeId: null,
     thinkingOptionId: null,
     cwd: "",
+    workspaceMode: "reuse",
     agentId: null,
   };
 }
@@ -46,6 +53,7 @@ export function scheduleTargetToDraft(target: ScheduleTarget): TargetDraft {
     modeId: config.modeId ?? null,
     thinkingOptionId: config.thinkingOptionId ?? null,
     cwd: config.cwd,
+    workspaceMode: config.workspaceMode ?? "reuse",
     agentId: null,
   };
 }
@@ -81,6 +89,8 @@ export function draftToScheduleTarget(draft: TargetDraft): TargetValidation {
         ...(draft.model ? { model: draft.model } : {}),
         ...(draft.modeId ? { modeId: draft.modeId } : {}),
         ...(draft.thinkingOptionId ? { thinkingOptionId: draft.thinkingOptionId } : {}),
+        // Omit the default so reuse-mode records stay byte-identical to today's.
+        ...(draft.workspaceMode !== "reuse" ? { workspaceMode: draft.workspaceMode } : {}),
       },
     },
     error: null,

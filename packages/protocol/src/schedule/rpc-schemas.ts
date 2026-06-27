@@ -33,6 +33,7 @@ export const ScheduleCreateRequestSchema = z.object({
   cadence: ScheduleCadenceSchema,
   target: ScheduleCreateTargetSchema,
   maxRuns: z.number().int().positive().optional(),
+  maxRetainedRuns: z.number().int().positive().optional(),
   expiresAt: z.string().optional(),
   runOnCreate: z.boolean().optional(),
 });
@@ -84,6 +85,8 @@ const ScheduleUpdateNewAgentConfigSchema = z.object({
   modeId: z.string().trim().min(1).nullable().optional(),
   thinkingOptionId: z.string().trim().min(1).nullable().optional(),
   cwd: z.string().trim().min(1).optional(),
+  workspaceMode: z.enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"]).optional(),
+  workspaceId: z.string().trim().min(1).nullable().optional(),
 });
 
 export const ScheduleUpdateRequestSchema = z.object({
@@ -95,6 +98,7 @@ export const ScheduleUpdateRequestSchema = z.object({
   cadence: ScheduleCadenceSchema.optional(),
   newAgentConfig: ScheduleUpdateNewAgentConfigSchema.optional(),
   maxRuns: z.number().int().positive().nullable().optional(),
+  maxRetainedRuns: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().nullable().optional(),
 });
 

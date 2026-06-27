@@ -4,7 +4,11 @@ import type { AgentManager } from "../agent/agent-manager.js";
 import type { AgentStore } from "../agent/agent-storage.js";
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
 import { getCurrentWorkspaceAuth, runWithWorkspaceAuth } from "../cloud-auth.js";
-import { createAutomationSpawn } from "../automation/spawn.js";
+import {
+  createAutomationSpawn,
+  type DedicatedWorktreeCreator,
+  type WorkspaceUnarchiver,
+} from "../automation/spawn.js";
 import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 import type { WebhookTriggerStore } from "./store.js";
 import type { TriggerProvisioner } from "./provisioner.js";
@@ -116,6 +120,10 @@ export class TriggerService {
   private readonly agentManager: AgentManager;
   private readonly agentStorage: AgentStore;
   private readonly now: () => Date;
+  // Injected from bootstrap (see ScheduleService). Optional: a webhook trigger
+  // without these still fires reuse-mode targets unchanged.
+  private dedicatedWorktreeCreator?: DedicatedWorktreeCreator;
+  private workspaceUnarchiver?: WorkspaceUnarchiver;
 
   constructor(options: TriggerServiceOptions) {
     this.store = options.store;
@@ -124,6 +132,16 @@ export class TriggerService {
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
     this.now = options.now ?? (() => new Date());
+  }
+
+  /** Bootstrap injects the dedicated-worktree creator (worktree run-location modes). */
+  setDedicatedWorktreeCreator(creator: DedicatedWorktreeCreator): void {
+    this.dedicatedWorktreeCreator = creator;
+  }
+
+  /** Bootstrap injects the workspace auto-unarchiver (reuse + dedicated modes). */
+  setWorkspaceUnarchiver(unarchiver: WorkspaceUnarchiver): void {
+    this.workspaceUnarchiver = unarchiver;
   }
 
   getStore(): WebhookTriggerStore {
@@ -320,6 +338,8 @@ export class TriggerService {
             agentManager: this.agentManager,
             agentStorage: this.agentStorage,
             logger: this.logger,
+            createDedicatedWorktree: this.dedicatedWorktreeCreator,
+            unarchiveWorkspace: this.workspaceUnarchiver,
           },
         }),
       );

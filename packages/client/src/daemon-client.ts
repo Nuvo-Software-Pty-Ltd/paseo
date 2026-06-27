@@ -674,9 +674,12 @@ export interface CreateScheduleOptions {
           extra?: AgentSessionConfig["extra"];
           systemPrompt?: string;
           mcpServers?: AgentSessionConfig["mcpServers"];
+          workspaceMode?: "reuse" | "dedicated-worktree" | "fresh-worktree-per-run";
+          workspaceId?: string;
         };
       };
   maxRuns?: number;
+  maxRetainedRuns?: number;
   expiresAt?: string;
   runOnCreate?: boolean;
   requestId?: string;
@@ -691,6 +694,8 @@ export interface UpdateScheduleNewAgentConfig {
   modeId?: string | null;
   thinkingOptionId?: string | null;
   cwd?: string;
+  workspaceMode?: "reuse" | "dedicated-worktree" | "fresh-worktree-per-run";
+  workspaceId?: string | null;
 }
 export interface UpdateScheduleOptions {
   id: string;
@@ -708,6 +713,7 @@ export interface UpdateScheduleOptions {
       };
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
+  maxRetainedRuns?: number | null;
   expiresAt?: string | null;
   requestId?: string;
 }
@@ -4550,6 +4556,9 @@ export class DaemonClient {
         target: options.target,
         ...(options.name ? { name: options.name } : {}),
         ...(typeof options.maxRuns === "number" ? { maxRuns: options.maxRuns } : {}),
+        ...(typeof options.maxRetainedRuns === "number"
+          ? { maxRetainedRuns: options.maxRetainedRuns }
+          : {}),
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
       },
@@ -4652,6 +4661,9 @@ export class DaemonClient {
         ...(options.cadence !== undefined ? { cadence: options.cadence } : {}),
         ...(options.newAgentConfig !== undefined ? { newAgentConfig: options.newAgentConfig } : {}),
         ...(options.maxRuns !== undefined ? { maxRuns: options.maxRuns } : {}),
+        ...(options.maxRetainedRuns !== undefined
+          ? { maxRetainedRuns: options.maxRetainedRuns }
+          : {}),
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
       },
       responseType: "schedule/update/response",

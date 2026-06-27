@@ -289,6 +289,27 @@ describe("workspace registries", () => {
     expect(await workspaceRegistry.get("/tmp/repo")).toBeNull();
     expect(await workspaceRegistry.list()).toEqual([]);
   });
+
+  test("unarchive clears archivedAt and persists across reload", async () => {
+    await workspaceRegistry.initialize();
+    await workspaceRegistry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "/tmp/wt",
+        projectId: "remote:github.com/acme/repo",
+        cwd: "/tmp/wt",
+        kind: "worktree",
+        displayName: "routine worktree",
+        createdAt: "2026-03-01T00:00:00.000Z",
+        updatedAt: "2026-03-01T00:00:00.000Z",
+      }),
+    );
+    await workspaceRegistry.archive("/tmp/wt", "2026-03-03T00:00:00.000Z");
+    await workspaceRegistry.unarchive("/tmp/wt", "2026-03-04T00:00:00.000Z");
+
+    const restored = await workspaceRegistry.get("/tmp/wt");
+    expect(restored?.archivedAt).toBeNull();
+    expect(restored?.updatedAt).toBe("2026-03-04T00:00:00.000Z");
+  });
 });
 
 describe("InMemoryWorkspaceRegistry (cloud-mode variant)", () => {
@@ -375,6 +396,30 @@ describe("InMemoryWorkspaceRegistry (cloud-mode variant)", () => {
 
   test("archive is a no-op for unknown workspace", async () => {
     await registry.archive("ws_nonexistent", "2026-02-01T00:00:00.000Z");
+    expect(await registry.get("ws_nonexistent")).toBeNull();
+  });
+
+  test("unarchive clears archivedAt and bumps updatedAt", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws_un",
+        projectId: "proj_1",
+        cwd: "/work",
+        kind: "directory",
+        displayName: "work",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await registry.archive("ws_un", "2026-02-01T00:00:00.000Z");
+    await registry.unarchive("ws_un", "2026-03-01T00:00:00.000Z");
+    const restored = await registry.get("ws_un");
+    expect(restored?.archivedAt).toBeNull();
+    expect(restored?.updatedAt).toBe("2026-03-01T00:00:00.000Z");
+  });
+
+  test("unarchive is a no-op for unknown workspace", async () => {
+    await registry.unarchive("ws_nonexistent", "2026-02-01T00:00:00.000Z");
     expect(await registry.get("ws_nonexistent")).toBeNull();
   });
 

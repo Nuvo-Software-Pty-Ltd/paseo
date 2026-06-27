@@ -412,3 +412,32 @@ export async function archivePersistedWorkspaceRecord(input: {
 
   return existingWorkspace;
 }
+
+// Inverse of archivePersistedWorkspaceRecord — clears archivedAt so an archived
+// workspace becomes visible/navigable again. Used by the automation fire path
+// (reuse-mode auto-unarchive): a routine still firing into a workspace is an
+// implicit statement that the workspace is in use, so its spawned agent must be
+// reachable. No-op when already active; null when the record is absent (caller
+// then falls back to a cwd-only spawn). Returns the post-unarchive record so the
+// caller can emit a workspace_update upsert.
+export async function unarchivePersistedWorkspaceRecord(input: {
+  workspaceId: string;
+  workspaceRegistry: Pick<WorkspaceRegistry, "get" | "unarchive">;
+  updatedAt?: string;
+}): Promise<PersistedWorkspaceRecord | null> {
+  const existingWorkspace = await input.workspaceRegistry.get(input.workspaceId);
+  if (!existingWorkspace) {
+    return null;
+  }
+
+  if (!existingWorkspace.archivedAt) {
+    return existingWorkspace;
+  }
+
+  await input.workspaceRegistry.unarchive(
+    input.workspaceId,
+    input.updatedAt ?? new Date().toISOString(),
+  );
+
+  return (await input.workspaceRegistry.get(input.workspaceId)) ?? existingWorkspace;
+}

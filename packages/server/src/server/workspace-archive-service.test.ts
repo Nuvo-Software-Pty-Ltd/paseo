@@ -16,7 +16,9 @@ import {
   type ArchiveDependencies,
   type ArchiveResult,
   resolveWorkspaceIdAtPath,
+  unarchivePersistedWorkspaceRecord,
 } from "./workspace-archive-service.js";
+import { InMemoryWorkspaceRegistry, createPersistedWorkspaceRecord } from "./workspace-registry.js";
 
 const cleanupPaths: string[] = [];
 
@@ -573,5 +575,57 @@ describe("resolveWorkspaceIdAtPath", () => {
     );
 
     expect(result).toBe("ws-nested");
+  });
+});
+
+describe("unarchivePersistedWorkspaceRecord", () => {
+  function seed(archivedAt: string | null) {
+    const registry = new InMemoryWorkspaceRegistry();
+    const record = createPersistedWorkspaceRecord({
+      workspaceId: "ws_target",
+      projectId: "proj_1",
+      cwd: "/work/repo",
+      kind: "local_checkout",
+      displayName: "main",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    return { registry, record: { ...record, archivedAt } };
+  }
+
+  test("clears archivedAt on an archived workspace", async () => {
+    const { registry, record } = seed("2026-02-01T00:00:00.000Z");
+    await registry.upsert(record);
+
+    const result = await unarchivePersistedWorkspaceRecord({
+      workspaceId: "ws_target",
+      workspaceRegistry: registry,
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+
+    expect(result?.archivedAt).toBeNull();
+    expect((await registry.get("ws_target"))?.archivedAt).toBeNull();
+  });
+
+  test("is a no-op when the workspace is already active", async () => {
+    const { registry, record } = seed(null);
+    await registry.upsert(record);
+
+    const result = await unarchivePersistedWorkspaceRecord({
+      workspaceId: "ws_target",
+      workspaceRegistry: registry,
+    });
+
+    expect(result?.archivedAt).toBeNull();
+    expect(result?.updatedAt).toBe("2026-01-01T00:00:00.000Z"); // unchanged
+  });
+
+  test("returns null when the workspace record is absent", async () => {
+    const registry = new InMemoryWorkspaceRegistry();
+    const result = await unarchivePersistedWorkspaceRecord({
+      workspaceId: "ws_missing",
+      workspaceRegistry: registry,
+    });
+    expect(result).toBeNull();
   });
 });

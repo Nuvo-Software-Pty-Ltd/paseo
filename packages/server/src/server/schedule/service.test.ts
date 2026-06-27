@@ -427,7 +427,7 @@ describe("ScheduleService", () => {
     expect((await service.inspect(created.id)).runs[0]?.status).toBe("succeeded");
   });
 
-  test("archives new-agent schedule sessions after the run finishes", async () => {
+  test("keeps new-agent schedule sessions after the run finishes (reachable in active list)", async () => {
     class CountingScheduleSession implements AgentSession {
       readonly provider = "claude";
       readonly capabilities = SCHEDULE_TEST_CAPABILITIES;
@@ -598,10 +598,98 @@ describe("ScheduleService", () => {
     const agentId = inspected.runs[0]?.agentId;
     expect(agentId).toBeTruthy();
     expect(client.sessions).toHaveLength(1);
-    expect(client.sessions[0]?.closed).toBe(true);
-    expect(manager.getAgent(agentId!)).toBeNull();
+    // archiveAfterRun:false — the worker is KEPT so the run stays reachable in
+    // the active list (no longer closed/archived once the run settles).
+    expect(client.sessions[0]?.closed).toBe(false);
+    expect(manager.getAgent(agentId!)).not.toBeNull();
     const storedAgent = await agentStorage.get(agentId!);
-    expect(storedAgent?.archivedAt).toBeTruthy();
+    expect(storedAgent?.archivedAt).toBeFalsy();
+  });
+
+  test("reuse-mode fire auto-unarchives + attributes the resolved workspace", async () => {
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: createTestAgentClients(),
+      registry: agentStorage,
+    });
+    const unarchive = vi.fn(async () => ({ workspaceId: "ws_resolved" }));
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    service.setWorkspaceUnarchiver(unarchive);
+
+    const created = await service.create({
+      prompt: "Respond with exactly hello",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: { provider: "claude", cwd: tempDir, approvalPolicy: "never" },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    expect(unarchive).toHaveBeenCalledWith(expect.objectContaining({ cwd: tempDir }));
+    const inspected = await service.inspect(created.id);
+    const stored = await agentStorage.get(inspected.runs[0]!.agentId!);
+    expect(stored?.workspaceId).toBe("ws_resolved");
+  });
+
+  test("dedicated-worktree fire creates the worktree and spawns into it", async () => {
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: createTestAgentClients(),
+      registry: agentStorage,
+    });
+    const createWorktree = vi.fn(async () => ({
+      cwd: tempDir,
+      workspaceId: "ws_worktree",
+      created: true,
+    }));
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    service.setDedicatedWorktreeCreator(createWorktree);
+
+    const created = await service.create({
+      prompt: "Respond with exactly hello",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          approvalPolicy: "never",
+          workspaceMode: "dedicated-worktree",
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+    expect(createWorktree.mock.calls[0]?.[0]).toMatchObject({
+      sourceCwd: tempDir,
+      slug: `routine-${created.id}`,
+      branchName: `paseo/routine-${created.id}`,
+    });
+    const inspected = await service.inspect(created.id);
+    const stored = await agentStorage.get(inspected.runs[0]!.agentId!);
+    expect(stored?.workspaceId).toBe("ws_worktree");
   });
 
   test("defaults new-agent modeId to provider's unattended mode", async () => {
@@ -646,7 +734,8 @@ describe("ScheduleService", () => {
     expect(agentId).toBeTruthy();
     const agent = await agentStorage.get(agentId!);
     expect(agent?.lastModeId).toBe("bypassPermissions");
-    expect(agent?.archivedAt).toBeTruthy();
+    // Scheduled workers are now kept (not archived) after the run settles.
+    expect(agent?.archivedAt).toBeFalsy();
   });
 
   test("defaults OpenCode new-agent schedules to build plus auto accept", async () => {

@@ -44,12 +44,18 @@ const KIND_TABS: ReadonlyArray<SegmentedTab<FormKind>> = [
 const MULTILINE_INPUT_STYLE = [automationInputStyles.input, automationInputStyles.multiline];
 
 // EDIT (schedule): build the restricted newAgentConfig the daemon accepts
-// (provider/model/modeId/thinkingOptionId/cwd only). Returns undefined for the
-// existing-agent mode, which scheduleUpdate cannot re-target (see FIX #3).
-function buildScheduleNewAgentConfig(
-  targetDraft: TargetDraft,
-):
-  | { provider: string; model?: string; modeId?: string; thinkingOptionId?: string; cwd?: string }
+// (provider/model/modeId/thinkingOptionId/cwd/workspaceMode only). Returns
+// undefined for the existing-agent mode, which scheduleUpdate cannot re-target
+// (see FIX #3).
+function buildScheduleNewAgentConfig(targetDraft: TargetDraft):
+  | {
+      provider: string;
+      model?: string;
+      modeId?: string;
+      thinkingOptionId?: string;
+      cwd?: string;
+      workspaceMode?: "reuse" | "dedicated-worktree" | "fresh-worktree-per-run";
+    }
   | undefined {
   if (targetDraft.mode !== "new-agent") {
     return undefined;
@@ -60,6 +66,7 @@ function buildScheduleNewAgentConfig(
     ...(targetDraft.modeId ? { modeId: targetDraft.modeId } : {}),
     ...(targetDraft.thinkingOptionId ? { thinkingOptionId: targetDraft.thinkingOptionId } : {}),
     ...(targetDraft.cwd.trim() ? { cwd: targetDraft.cwd.trim() } : {}),
+    workspaceMode: targetDraft.workspaceMode,
   };
 }
 

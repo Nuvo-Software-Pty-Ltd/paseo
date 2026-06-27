@@ -16,6 +16,7 @@ import {
   projectRootPathForId,
   shouldUseProjectPicker,
   type TargetDraft,
+  type WorkspaceMode,
 } from "./automation-target-model";
 
 // Re-export the pure model so existing imports
@@ -33,6 +34,27 @@ export {
 const MODE_TABS: ReadonlyArray<SegmentedTab<TargetDraft["mode"]>> = [
   { id: "new-agent", label: "New agent" },
   { id: "agent", label: "Existing agent" },
+];
+
+// Run-location choices for a new-agent routine. "reuse" is the default; the
+// worktree modes give the routine its own workspace so archiving the source
+// directory never strands it. Mirrors the protocol `workspaceMode` enum.
+const WORKSPACE_MODE_OPTIONS: ComboboxOption[] = [
+  {
+    id: "reuse",
+    label: "Reuse working directory",
+    description: "Run in the selected directory; restore it if archived",
+  },
+  {
+    id: "dedicated-worktree",
+    label: "Dedicated worktree",
+    description: "One worktree for this routine, reused every run",
+  },
+  {
+    id: "fresh-worktree-per-run",
+    label: "Fresh worktree each run",
+    description: "A new worktree per run (older runs are pruned)",
+  },
 ];
 
 interface AutomationTargetPickerProps {
@@ -128,6 +150,11 @@ export function AutomationTargetPicker({
     [draft, onChange],
   );
   const setCwd = useCallback((cwd: string) => onChange({ ...draft, cwd }), [draft, onChange]);
+  const setWorkspaceMode = useCallback(
+    (workspaceMode: string) =>
+      onChange({ ...draft, workspaceMode: workspaceMode as WorkspaceMode }),
+    [draft, onChange],
+  );
   const setCwdFromProject = useCallback(
     (projectId: string) => {
       const rootPath = projectRootPathForId(projects, projectId);
@@ -223,6 +250,14 @@ export function AutomationTargetPicker({
               />
             </View>
           )}
+          <AutomationSelect
+            label="Run location"
+            value={draft.workspaceMode}
+            options={WORKSPACE_MODE_OPTIONS}
+            placeholder="Reuse working directory"
+            title="Select run location"
+            onSelect={setWorkspaceMode}
+          />
         </View>
       )}
 

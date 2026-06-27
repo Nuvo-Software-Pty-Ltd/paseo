@@ -123,6 +123,7 @@ export interface WorkspaceRegistry {
   get(workspaceId: string): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord): Promise<void>;
   archive(workspaceId: string, archivedAt: string): Promise<void>;
+  unarchive(workspaceId: string, updatedAt: string): Promise<void>;
   remove(workspaceId: string): Promise<void>;
 }
 
@@ -205,6 +206,21 @@ class FileBackedRegistry<TRecord extends RegistryRecord> {
       ...existing,
       updatedAt: archivedAt,
       archivedAt,
+    });
+    this.cache.set(id, next);
+    await this.enqueuePersist();
+  }
+
+  async unarchive(id: string, updatedAt: string): Promise<void> {
+    await this.load();
+    const existing = this.cache.get(id);
+    if (!existing) {
+      return;
+    }
+    const next = this.schema.parse({
+      ...existing,
+      updatedAt,
+      archivedAt: null,
     });
     this.cache.set(id, next);
     await this.enqueuePersist();
@@ -380,6 +396,19 @@ export class InMemoryWorkspaceRegistry implements WorkspaceRegistry {
         ...existing,
         updatedAt: archivedAt,
         archivedAt,
+      }),
+    );
+  }
+
+  async unarchive(workspaceId: string, updatedAt: string): Promise<void> {
+    const existing = this.cache.get(workspaceId);
+    if (!existing) return;
+    this.cache.set(
+      workspaceId,
+      PersistedWorkspaceRecordSchema.parse({
+        ...existing,
+        updatedAt,
+        archivedAt: null,
       }),
     );
   }
