@@ -111,8 +111,7 @@ interface CreatePaseoWorktreeInBackgroundDependencies {
   onScriptsChanged: ((workspaceId: string, workspaceDirectory: string) => void) | null;
 }
 
-export interface CreatePaseoWorktreeWorkflowDependencies
-  extends CreatePaseoWorktreeInBackgroundDependencies {
+export interface CreatePaseoWorktreeWorkflowDependencies extends CreatePaseoWorktreeInBackgroundDependencies {
   createPaseoWorktree: (
     input: CreatePaseoWorktreeInput,
     options?: {

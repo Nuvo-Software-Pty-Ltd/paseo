@@ -113,6 +113,83 @@ function buildRunOutput(params: {
 }
 
 /**
+ * Resolve where a new-agent automation runs and which workspace it attaches to:
+ * apply the run-location mode (reuse / dedicated-worktree / fresh-worktree-per-
+ * run), then auto-unarchive + resolve the workspaceId for attribution. Extracted
+ * from {@link createAutomationSpawn} to keep that function under the lint
+ * complexity ceiling. Returns the effective cwd + resolved workspaceId (undefined
+ * ⇒ cwd-only spawn) + whether a fresh worktree was created this fire.
+ */
+async function resolveAutomationSpawnWorkspace(params: {
+  target: Extract<ScheduleTarget, { type: "new-agent" }>;
+  labels: Record<string, string>;
+  deps: AutomationSpawnDeps;
+  maxRetainedRuns?: number | null;
+}): Promise<{
+  effectiveCwd: string;
+  resolvedWorkspaceId: string | undefined;
+  resolvedCreated: boolean;
+}> {
+  const { target, labels, deps, maxRetainedRuns } = params;
+  const workspaceMode = target.config.workspaceMode ?? "reuse";
+  let effectiveCwd = target.config.cwd;
+  let resolvedWorkspaceId = target.config.workspaceId ?? undefined;
+  let resolvedCreated = false;
+
+  // "dedicated-worktree" creates once then reuses (skip when already pinned);
+  // "fresh-worktree-per-run" creates every fire.
+  const needsWorktree =
+    workspaceMode === "fresh-worktree-per-run" ||
+    (workspaceMode === "dedicated-worktree" && !resolvedWorkspaceId);
+  if (needsWorktree) {
+    if (!deps.createDedicatedWorktree) {
+      throw new Error(
+        `Routine run-location "${workspaceMode}" requires worktree support, which is unavailable in this daemon`,
+      );
+    }
+    const automationId = labels["paseo.schedule-id"] ?? labels["paseo.trigger-id"] ?? "routine";
+    const runId = labels["paseo.schedule-run"] ?? labels["paseo.trigger-run"];
+    const slugBase = `routine-${automationId}`;
+    const perRun = workspaceMode === "fresh-worktree-per-run";
+    const slug = perRun && runId ? `${slugBase}-${runId.slice(0, 8)}` : slugBase;
+    const created = await deps.createDedicatedWorktree({
+      sourceCwd: target.config.cwd,
+      slug,
+      branchName: `paseo/${slug}`,
+      retention: perRun
+        ? { siblingBranchPrefix: `paseo/${slugBase}-`, keep: maxRetainedRuns ?? 10 }
+        : undefined,
+    });
+    effectiveCwd = created.cwd;
+    resolvedWorkspaceId = created.workspaceId;
+    resolvedCreated = created.created;
+  }
+
+  // Auto-unarchive the target (reuse + dedicated) so the routine's agent is
+  // reachable even when the workspace was archived while the schedule kept
+  // firing. ALSO supplies the workspaceId for attribution in the common
+  // (non-archived) reuse case. cwd-only when no record resolves.
+  if (deps.unarchiveWorkspace) {
+    try {
+      const restored = await deps.unarchiveWorkspace({
+        workspaceId: resolvedWorkspaceId,
+        cwd: effectiveCwd,
+      });
+      if (restored) {
+        resolvedWorkspaceId = restored.workspaceId;
+      }
+    } catch (error) {
+      deps.logger.warn(
+        { err: error, cwd: effectiveCwd },
+        "Auto-unarchive of automation workspace failed; spawning anyway",
+      );
+    }
+  }
+
+  return { effectiveCwd, resolvedWorkspaceId, resolvedCreated };
+}
+
+/**
  * Create-phase of an automation spawn. Awaits everything up to and
  * including a successful `createAgent` (new-agent target) / the pre-run
  * validation (existing-agent target), then returns a handle whose
@@ -180,63 +257,16 @@ export async function createAutomationSpawn(params: {
   const runPrompt = newAgent?.runPrompt ?? wrappedPrompt;
   const archiveAfterRun = newAgent?.archiveAfterRun ?? false;
 
-  // Resolve WHERE this new-agent runs and which workspace it attaches to.
-  //  - "reuse" (default): the configured cwd (+ any client-pinned workspaceId).
-  //  - "dedicated-worktree": a per-routine worktree, created once then reused
-  //    (config.workspaceId is daemon-written back after first creation).
-  //  - "fresh-worktree-per-run": a new worktree each fire (bounded retention).
-  const workspaceMode = target.config.workspaceMode ?? "reuse";
-  let effectiveCwd = target.config.cwd;
-  let resolvedWorkspaceId = target.config.workspaceId ?? undefined;
-  let resolvedCreated = false;
-
-  if (workspaceMode === "dedicated-worktree" || workspaceMode === "fresh-worktree-per-run") {
-    const needsCreate = workspaceMode === "fresh-worktree-per-run" || !resolvedWorkspaceId;
-    if (needsCreate) {
-      if (!deps.createDedicatedWorktree) {
-        throw new Error(
-          `Routine run-location "${workspaceMode}" requires worktree support, which is unavailable in this daemon`,
-        );
-      }
-      const automationId = labels["paseo.schedule-id"] ?? labels["paseo.trigger-id"] ?? "routine";
-      const runId = labels["paseo.schedule-run"] ?? labels["paseo.trigger-run"];
-      const slugBase = `routine-${automationId}`;
-      const perRun = workspaceMode === "fresh-worktree-per-run";
-      const slug = perRun && runId ? `${slugBase}-${runId.slice(0, 8)}` : slugBase;
-      const created = await deps.createDedicatedWorktree({
-        sourceCwd: target.config.cwd,
-        slug,
-        branchName: `paseo/${slug}`,
-        retention: perRun
-          ? { siblingBranchPrefix: `paseo/${slugBase}-`, keep: params.maxRetainedRuns ?? 10 }
-          : undefined,
-      });
-      effectiveCwd = created.cwd;
-      resolvedWorkspaceId = created.workspaceId;
-      resolvedCreated = created.created;
-    }
-  }
-
-  // Resolve cwd→workspace and auto-unarchive it (reuse + dedicated modes) so the
-  // routine's agent is reachable even when the workspace was archived while the
-  // schedule kept firing. This ALSO supplies the workspaceId for attribution in
-  // the common (non-archived) reuse case. cwd-only when no record resolves.
-  if (deps.unarchiveWorkspace) {
-    try {
-      const restored = await deps.unarchiveWorkspace({
-        workspaceId: resolvedWorkspaceId,
-        cwd: effectiveCwd,
-      });
-      if (restored) {
-        resolvedWorkspaceId = restored.workspaceId;
-      }
-    } catch (error) {
-      logger.warn(
-        { err: error, cwd: effectiveCwd },
-        "Auto-unarchive of automation workspace failed; spawning anyway",
-      );
-    }
-  }
+  // Resolve WHERE this new-agent runs + which workspace it attaches to (run-
+  // location mode + auto-unarchive). Extracted to a helper to keep this function
+  // under the lint complexity ceiling.
+  const { effectiveCwd, resolvedWorkspaceId, resolvedCreated } =
+    await resolveAutomationSpawnWorkspace({
+      target,
+      labels,
+      deps,
+      maxRetainedRuns: params.maxRetainedRuns,
+    });
 
   // Resolve the provider's create-config (unattended mode + feature values) the
   // same way the interactive create path does, so a scheduled/triggered new

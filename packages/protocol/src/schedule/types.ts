@@ -53,9 +53,7 @@ export const ScheduleTargetSchema = z.discriminatedUnion("type", [
       //    onto this record).
       //  - "fresh-worktree-per-run": a NEW worktree each fire (bounded by
       //    maxRetainedRuns; older ones are archived).
-      workspaceMode: z
-        .enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"])
-        .optional(),
+      workspaceMode: z.enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"]).optional(),
       // Resolved workspace the spawn attaches to. For "dedicated-worktree" this
       // is daemon-written after first creation; for "reuse" it MAY be set by the
       // client to pin the exact workspace (precise auto-unarchive + attribution).

@@ -85,9 +85,7 @@ const ScheduleUpdateNewAgentConfigSchema = z.object({
   modeId: z.string().trim().min(1).nullable().optional(),
   thinkingOptionId: z.string().trim().min(1).nullable().optional(),
   cwd: z.string().trim().min(1).optional(),
-  workspaceMode: z
-    .enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"])
-    .optional(),
+  workspaceMode: z.enum(["reuse", "dedicated-worktree", "fresh-worktree-per-run"]).optional(),
   workspaceId: z.string().trim().min(1).nullable().optional(),
 });
 

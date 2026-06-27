@@ -18,10 +18,7 @@ import {
   resolveWorkspaceIdAtPath,
   unarchivePersistedWorkspaceRecord,
 } from "./workspace-archive-service.js";
-import {
-  InMemoryWorkspaceRegistry,
-  createPersistedWorkspaceRecord,
-} from "./workspace-registry.js";
+import { InMemoryWorkspaceRegistry, createPersistedWorkspaceRecord } from "./workspace-registry.js";
 
 const cleanupPaths: string[] = [];
 
