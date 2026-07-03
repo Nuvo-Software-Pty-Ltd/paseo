@@ -3,6 +3,11 @@ import * as Linking from "expo-linking";
 import * as WebBrowser from "expo-web-browser";
 import { isWeb } from "@/constants/platform";
 import { deriveDaemonWsUrlForWorkspace } from "@/utils/orchestra-daemon-url";
+import {
+  clearRefreshToken,
+  getRefreshToken,
+  storeRefreshToken,
+} from "./orchestra-refresh-token-store";
 
 const SESSION_TOKEN_KEY = "orchestra:session_token";
 
@@ -96,31 +101,168 @@ async function getSessionToken(): Promise<string | null> {
   return AsyncStorage.getItem(SESSION_TOKEN_KEY);
 }
 
-async function requireSessionToken(): Promise<string> {
-  const token = await getSessionToken();
-  if (!token) {
+const SESSION_REFRESH_PATH = "/api/v1/cloud/session/refresh";
+const SESSION_LOGOUT_PATH = "/api/v1/cloud/session/logout";
+
+// Proactively refresh when the access token is within this window of its `exp`,
+// so an in-flight request rarely races the 1h expiry. Purely a client-side
+// heuristic on the decoded (UNVERIFIED) `exp` — the server is the source of
+// truth on validity, and a skewed clock only costs an extra refresh round-trip,
+// never a bounce.
+const ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 300;
+
+// Thrown when a refresh is unavailable/transient (no refresh token yet, old
+// auth without the route (404), 5xx, offline). Distinct from an authoritative
+// rejection (OrchestraSessionExpiredError): a transient failure degrades to the
+// still-valid access token instead of bouncing.
+class RefreshUnavailableError extends Error {}
+
+// Decode a JWT's `exp` (epoch seconds) WITHOUT verifying the signature — this
+// only drives proactive-refresh timing. Buffer is polyfilled app-wide; convert
+// base64url→base64 first since the "base64" decoder doesn't remap -/_.
+function decodeAccessTokenExp(token: string): number | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as {
+      exp?: unknown;
+    };
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+// Single-flight guard: N concurrent 401s (or near-expiry calls) collapse into
+// ONE /refresh round-trip. Every caller awaits the same promise; it clears on
+// settle so the next cycle starts fresh.
+let refreshSessionInFlight: Promise<string> | null = null;
+
+function refreshSession(): Promise<string> {
+  if (!refreshSessionInFlight) {
+    refreshSessionInFlight = doRefreshSession().finally(() => {
+      refreshSessionInFlight = null;
+    });
+  }
+  return refreshSessionInFlight;
+}
+
+async function doRefreshSession(): Promise<string> {
+  const refreshToken = await getRefreshToken();
+  if (!refreshToken) {
+    throw new RefreshUnavailableError("no refresh token");
+  }
+  // Plain fetch — NOT authedFetch — so a refresh never recurses through the
+  // 401 interceptor.
+  let res: Response;
+  try {
+    res = await fetch(`${getAuthBaseUrl()}${SESSION_REFRESH_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+  } catch {
+    throw new RefreshUnavailableError("refresh request failed"); // offline/network
+  }
+
+  if (res.ok) {
+    const body = (await res.json().catch(() => null)) as {
+      token?: unknown;
+      refreshToken?: unknown;
+    } | null;
+    if (!body || typeof body.token !== "string" || typeof body.refreshToken !== "string") {
+      throw new RefreshUnavailableError("malformed refresh response");
+    }
+    await storeSessionToken(body.token);
+    await storeRefreshToken(body.refreshToken);
+    return body.token;
+  }
+
+  if (res.status === 401) {
+    // The server rejected THIS refresh token. A concurrent refresher (another
+    // tab) may already have rotated it — if the stored token changed out from
+    // under us, retry against the winner's fresh access token rather than bounce.
+    const latest = await getRefreshToken();
+    if (latest && latest !== refreshToken) {
+      const at = await getSessionToken();
+      if (at) return at;
+    }
+    await clearRefreshToken();
+    throw new OrchestraSessionExpiredError(); // authoritative — caller bounces
+  }
+
+  // 404 (old auth) / 5xx — transient. Retain the refresh token; the caller
+  // degrades to the current access token.
+  throw new RefreshUnavailableError(`refresh failed: ${res.status}`);
+}
+
+// Resolve an access token to attach, refreshing proactively when the current
+// one is near expiry. Replaces the old requireSessionToken; callers of
+// authedFetch see no API change.
+async function getFreshAccessToken(): Promise<string> {
+  const at = await getSessionToken();
+  const exp = at ? decodeAccessTokenExp(at) : null;
+  const nowSeconds = Date.now() / 1000;
+  if (at && exp !== null && exp - nowSeconds > ACCESS_TOKEN_REFRESH_SKEW_SECONDS) {
+    return at; // comfortably valid — no refresh
+  }
+  const rt = await getRefreshToken();
+  if (!rt) {
+    // Legacy AT-only session (or signed out) — preserve prior behavior exactly.
+    if (at) return at;
     signalSessionExpired();
     throw new OrchestraSessionExpiredError();
   }
-  return token;
+  try {
+    return await refreshSession();
+  } catch (err) {
+    if (err instanceof OrchestraSessionExpiredError) {
+      signalSessionExpired();
+      throw err;
+    }
+    // Transient/unavailable refresh — degrade to the live access token so a
+    // deploy-window 404 / offline blip near expiry doesn't bounce.
+    if (at) return at;
+    signalSessionExpired();
+    throw new OrchestraSessionExpiredError();
+  }
 }
 
 async function authedFetch(path: string, init?: RequestInit): Promise<Response> {
-  const token = await requireSessionToken();
   const url = `${getAuthBaseUrl()}${path}`;
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      ...init?.headers,
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-  });
-  if (res.status === 401) {
+  const doFetch = (bearer: string): Promise<Response> =>
+    fetch(url, {
+      ...init,
+      headers: {
+        ...init?.headers,
+        Authorization: `Bearer ${bearer}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+  const res = await doFetch(await getFreshAccessToken());
+  if (res.status !== 401) {
+    return res;
+  }
+
+  // Reactive path: the access token was rejected. The AT is already bad, so ANY
+  // refresh failure here (dead or transient) is unrecoverable → one bounce.
+  let freshToken: string;
+  try {
+    freshToken = await refreshSession();
+  } catch {
     signalSessionExpired();
     throw new OrchestraSessionExpiredError();
   }
-  return res;
+  const retry = await doFetch(freshToken);
+  if (retry.status === 401) {
+    // A freshly-minted access token still rejected → server-side account
+    // problem, not a stale token.
+    signalSessionExpired();
+    throw new OrchestraSessionExpiredError();
+  }
+  return retry;
 }
 
 export async function storeSessionToken(token: string): Promise<void> {
@@ -128,12 +270,28 @@ export async function storeSessionToken(token: string): Promise<void> {
 }
 
 export async function clearSession(): Promise<void> {
+  // Best-effort server-side revoke — fire-and-forget so a hanging/offline
+  // logout never stalls the caller (the session bounce awaits clearSession
+  // before it navigates). The local clear is what actually ends the session.
+  const refreshToken = await getRefreshToken();
+  if (refreshToken) {
+    void fetch(`${getAuthBaseUrl()}${SESSION_LOGOUT_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    }).catch(() => {
+      // ignore — logout is best-effort; the family also dies at its 30d expiry
+    });
+  }
   await AsyncStorage.removeItem(SESSION_TOKEN_KEY);
+  await clearRefreshToken();
 }
 
 export async function hasSession(): Promise<boolean> {
-  const token = await getSessionToken();
-  return token !== null;
+  // A live refresh token counts as a session even if the access token has
+  // expired — a cold start with only the RT must not flash the welcome screen.
+  const [at, rt] = await Promise.all([getSessionToken(), getRefreshToken()]);
+  return at !== null || rt !== null;
 }
 
 // The native OAuth redirect carries the session JWT in the URL FRAGMENT
@@ -141,21 +299,31 @@ export async function hasSession(): Promise<boolean> {
 // lands in server access logs or a Referer header. Keep this in sync with the
 // auth service's native delivery in oauth-github.ts.
 const SESSION_FRAGMENT_KEY = "orchestra_session";
+const REFRESH_FRAGMENT_KEY = "orchestra_refresh";
 
-// Pure extractor: pull the session token out of the deep-link URL that
-// ASWebAuthenticationSession hands back. Exported for unit testing. Returns
-// null when the fragment is absent or carries no token (caller treats that as a
-// failed sign-in rather than storing an empty token).
-export function parseSessionTokenFromRedirectUrl(url: string): string | null {
+export interface ParsedRedirectTokens {
+  token: string | null;
+  refreshToken: string | null;
+}
+
+// Pure extractor: pull the session + refresh tokens out of the deep-link URL
+// that ASWebAuthenticationSession hands back. Exported for unit testing.
+// URLSearchParams handles the multi-param fragment and percent-decoding; a
+// missing/empty value yields null. A null `token` means a failed sign-in; a
+// null `refreshToken` is normal against an auth service that predates 30-day
+// sessions (the caller then keeps a legacy 1h session).
+export function parseSessionTokenFromRedirectUrl(url: string): ParsedRedirectTokens {
   const hashIndex = url.indexOf("#");
   if (hashIndex === -1) {
-    return null;
+    return { token: null, refreshToken: null };
   }
-  // URLSearchParams handles percent-decoding; the auth service encodeURIComponent's
-  // the token (a no-op for base64url JWT chars, but symmetric and defensive).
   const params = new URLSearchParams(url.slice(hashIndex + 1));
   const token = params.get(SESSION_FRAGMENT_KEY)?.trim();
-  return token ? token : null;
+  const refreshToken = params.get(REFRESH_FRAGMENT_KEY)?.trim();
+  return {
+    token: token ? token : null,
+    refreshToken: refreshToken ? refreshToken : null,
+  };
 }
 
 // Native sign-in handshake. Opens the GitHub OAuth flow in an in-app auth
@@ -182,14 +350,18 @@ export async function loginWithOAuthNative(): Promise<{ accountId: string }> {
     throw new Error(`Orchestra sign-in did not complete (${result.type})`);
   }
 
-  const token = parseSessionTokenFromRedirectUrl(result.url);
+  const { token, refreshToken } = parseSessionTokenFromRedirectUrl(result.url);
   if (!token) {
     throw new Error("Orchestra sign-in redirect did not contain a session token");
   }
 
-  // Reuse the existing storage + connect path verbatim.
+  // Reuse the existing storage + connect path verbatim; persist the refresh
+  // token too when present (absent → legacy 1h session against an old auth).
   await storeSessionToken(token);
-  // The native redirect delivers only the token; the accountId is derived from
+  if (refreshToken) {
+    await storeRefreshToken(refreshToken);
+  }
+  // The native redirect delivers the tokens only; the accountId is derived from
   // the session bearer on subsequent calls. The welcome screen ignores this
   // value, so "unknown" matches the web popup's fallback shape.
   return { accountId: "unknown" };
@@ -224,13 +396,19 @@ export function loginWithOAuthPopup(): Promise<{ accountId: string }> {
       window.removeEventListener("message", onMessage);
       clearInterval(pollTimer);
 
-      const { token, accountId } = event.data as {
+      const { token, refreshToken, accountId } = event.data as {
         type: string;
         token: string;
+        refreshToken?: string;
         accountId?: string;
       };
 
-      void storeSessionToken(token).then(() => {
+      void (async () => {
+        await storeSessionToken(token);
+        if (typeof refreshToken === "string" && refreshToken.length > 0) {
+          await storeRefreshToken(refreshToken);
+        }
+      })().then(() => {
         resolve({ accountId: accountId ?? "unknown" });
         return undefined;
       });
