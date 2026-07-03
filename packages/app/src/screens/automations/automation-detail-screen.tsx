@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Alert, Modal, ScrollView, Text, View } from "react-native";
+import { Modal, ScrollView, Text, View } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
@@ -31,8 +31,10 @@ import {
   webhookTriggersQueryKey,
 } from "@/hooks/use-automations";
 import { buildHostAgentDetailRoute } from "@/utils/host-routes";
+import { confirmDialog } from "@/utils/confirm-dialog";
 import { i18n } from "@/i18n/i18next";
 import { AutomationCreateForm, type AutomationEditContext } from "./automation-create-form";
+import { requestDeleteAutomation } from "./delete-automation-flow";
 
 const ThemedSpinner = withUnistyles(LoadingSpinner, (theme) => ({
   color: theme.colors.foregroundMuted,
@@ -167,18 +169,18 @@ function AutomationDetailScreenContent({
 
   const handleDelete = useCallback(() => {
     if (!detail) return;
-    Alert.alert("Delete automation", "This cannot be undone.", [
-      { text: "Cancel", style: "cancel" },
+    // `confirmDialog` routes to window.confirm on web; react-native's Alert.alert
+    // is a no-op on react-native-web, which made this button do nothing there.
+    void requestDeleteAutomation(
+      { id: automationId, kind: detail.kind },
       {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          void deleteAutomation
-            .mutateAsync({ id: automationId, kind: detail.kind })
-            .then(() => router.back());
-        },
+        confirm: confirmDialog,
+        deleteAutomation: (input) => deleteAutomation.mutateAsync(input),
+        onDeleted: () => router.back(),
+        reportError: (error) =>
+          console.error("[AutomationDetail] Failed to delete automation", error),
       },
-    ]);
+    );
   }, [automationId, deleteAutomation, detail]);
 
   const handleEditClose = useCallback(() => {
