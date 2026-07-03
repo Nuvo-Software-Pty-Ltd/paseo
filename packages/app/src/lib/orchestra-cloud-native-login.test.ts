@@ -45,6 +45,7 @@ const JWT = "eyJhbGciOiJSUzI1NiJ9.eyJhY2NvdW50X2lkIjoiYWNjdF8xIn0.sig-part";
 beforeEach(async () => {
   vi.clearAllMocks();
   await AsyncStorage.removeItem("orchestra:session_token");
+  await AsyncStorage.removeItem("orchestra:refresh_token");
   delete process.env.EXPO_PUBLIC_ORCHESTRA_AUTH_URL;
 });
 
@@ -53,26 +54,41 @@ afterEach(() => {
 });
 
 describe("parseSessionTokenFromRedirectUrl", () => {
-  it("extracts the token from the URL fragment", () => {
-    expect(parseSessionTokenFromRedirectUrl(`paseo://welcome#orchestra_session=${JWT}`)).toBe(JWT);
+  const RT = "acct_1.fam_abc.secret-xyz";
+
+  it("extracts the session token from the URL fragment (refresh null when absent)", () => {
+    const parsed = parseSessionTokenFromRedirectUrl(`paseo://welcome#orchestra_session=${JWT}`);
+    expect(parsed.token).toBe(JWT);
+    expect(parsed.refreshToken).toBeNull();
   });
 
-  it("returns null when there is no fragment", () => {
-    expect(parseSessionTokenFromRedirectUrl("paseo://welcome")).toBeNull();
-    expect(parseSessionTokenFromRedirectUrl("paseo://welcome?orchestra_session=" + JWT)).toBeNull();
+  it("extracts both session and refresh tokens when both are present", () => {
+    const url = `paseo://welcome#orchestra_session=${JWT}&orchestra_refresh=${encodeURIComponent(RT)}`;
+    const parsed = parseSessionTokenFromRedirectUrl(url);
+    expect(parsed.token).toBe(JWT);
+    expect(parsed.refreshToken).toBe(RT);
   });
 
-  it("returns null when the fragment lacks the session key", () => {
-    expect(parseSessionTokenFromRedirectUrl("paseo://welcome#offer=abc")).toBeNull();
+  it("returns null token when there is no fragment", () => {
+    expect(parseSessionTokenFromRedirectUrl("paseo://welcome").token).toBeNull();
+    expect(
+      parseSessionTokenFromRedirectUrl("paseo://welcome?orchestra_session=" + JWT).token,
+    ).toBeNull();
   });
 
-  it("returns null for an empty token value", () => {
-    expect(parseSessionTokenFromRedirectUrl("paseo://welcome#orchestra_session=")).toBeNull();
+  it("returns null token when the fragment lacks the session key", () => {
+    expect(parseSessionTokenFromRedirectUrl("paseo://welcome#offer=abc").token).toBeNull();
   });
 
-  it("percent-decodes the token value", () => {
+  it("returns null token for an empty token value", () => {
+    expect(parseSessionTokenFromRedirectUrl("paseo://welcome#orchestra_session=").token).toBeNull();
+  });
+
+  it("percent-decodes the token value and ignores unrelated params", () => {
     const url = `paseo://welcome#orchestra_session=${encodeURIComponent(JWT)}&foo=bar`;
-    expect(parseSessionTokenFromRedirectUrl(url)).toBe(JWT);
+    const parsed = parseSessionTokenFromRedirectUrl(url);
+    expect(parsed.token).toBe(JWT);
+    expect(parsed.refreshToken).toBeNull();
   });
 });
 
@@ -101,6 +117,18 @@ describe("loginWithOAuthNative", () => {
     // Token persisted via the existing storeSessionToken path.
     expect(await hasSession()).toBe(true);
     expect(await AsyncStorage.getItem("orchestra:session_token")).toBe(JWT);
+  });
+
+  it("stores the refresh token too when the redirect carries one", async () => {
+    const RT = "acct_1.fam_abc.secret-xyz";
+    openAuthSessionAsync.mockResolvedValueOnce({
+      type: "success",
+      url: `paseo://welcome#orchestra_session=${JWT}&orchestra_refresh=${encodeURIComponent(RT)}`,
+    });
+    await loginWithOAuthNative();
+    expect(await AsyncStorage.getItem("orchestra:session_token")).toBe(JWT);
+    // The web-resolved refresh-token store persists to AsyncStorage in tests.
+    expect(await AsyncStorage.getItem("orchestra:refresh_token")).toBe(RT);
   });
 
   it("throws and stores nothing when the user cancels", async () => {
