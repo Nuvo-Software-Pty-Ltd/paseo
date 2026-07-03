@@ -279,6 +279,32 @@ export function useRotateWebhookSecret(serverId: string | null) {
   });
 }
 
+// Optimistic list-cache removal for delete. The global query client disables
+// auto-refetch (`refetchOnMount:false`, staleTime/gcTime Infinity — see
+// query/query-client.ts) and native-stack unmounts the list while the detail
+// screen is open. So invalidating on delete does NOT refetch the list
+// (invalidate only refetches ACTIVE queries) and the remounted list won't
+// refetch either — the deleted row lingers until an app restart. Drop the row
+// synchronously so the list is correct regardless of mount state. Mirrors
+// `removeAgentFromCachedLists` in use-archive-agent.
+export function removeScheduleFromListPayload<
+  T extends { schedules: ScheduleSummary[] } | undefined,
+>(payload: T, id: string): T {
+  if (!payload || !Array.isArray(payload.schedules)) {
+    return payload;
+  }
+  return { ...payload, schedules: payload.schedules.filter((schedule) => schedule.id !== id) } as T;
+}
+
+export function removeTriggerFromListPayload<
+  T extends { triggers: WebhookTriggerSummary[] } | undefined,
+>(payload: T, id: string): T {
+  if (!payload || !Array.isArray(payload.triggers)) {
+    return payload;
+  }
+  return { ...payload, triggers: payload.triggers.filter((trigger) => trigger.id !== id) } as T;
+}
+
 export function useDeleteAutomation(serverId: string | null) {
   const client = useRequireClient(serverId);
   const queryClient = useQueryClient();
@@ -293,6 +319,19 @@ export function useDeleteAutomation(serverId: string | null) {
       return client.triggerDelete({ id: input.id });
     },
     onSuccess: (_result, input) => {
+      // Remove the deleted row from the cached list first so it disappears even
+      // when the list screen is unmounted (native) and won't refetch on remount.
+      if (input.kind === "schedule") {
+        queryClient.setQueryData<{ schedules: ScheduleSummary[] }>(
+          schedulesQueryKey(serverId),
+          (prev) => removeScheduleFromListPayload(prev, input.id),
+        );
+      } else {
+        queryClient.setQueryData<{ triggers: WebhookTriggerSummary[] }>(
+          webhookTriggersQueryKey(serverId),
+          (prev) => removeTriggerFromListPayload(prev, input.id),
+        );
+      }
       const queryKey =
         input.kind === "schedule" ? schedulesQueryKey(serverId) : webhookTriggersQueryKey(serverId);
       void queryClient.invalidateQueries({ queryKey });
