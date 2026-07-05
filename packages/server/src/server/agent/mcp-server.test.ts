@@ -548,6 +548,7 @@ function createPaseoWorktreeForMcpTest(options: {
         : {}),
       projectRegistry: {
         get: async (projectId) => projects.get(projectId) ?? null,
+        list: async () => Array.from(projects.values()),
         upsert: async (record) => {
           projects.set(record.projectId, record);
         },

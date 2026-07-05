@@ -9,6 +9,7 @@ import {
 } from "./workspace-registry.js";
 import {
   classifyDirectoryForProjectMembership,
+  deriveProjectGroupingKey,
   deriveProjectGroupingName,
   generateWorkspaceId,
 } from "./workspace-registry-model.js";
@@ -56,7 +57,7 @@ export interface AttemptFirstAgentBranchAutoNameResult {
 }
 
 export interface CreatePaseoWorktreeDeps extends CreateWorktreeCoreDeps {
-  projectRegistry: Pick<ProjectRegistry, "get" | "upsert">;
+  projectRegistry: Pick<ProjectRegistry, "get" | "list" | "upsert">;
   workspaceRegistry: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
   workspaceGitService: WorkspaceGitService;
 }
@@ -422,7 +423,10 @@ async function resolveSourceProjectForWorktree(options: {
   projectId?: string;
   repoRoot: string;
   existingWorkspace: PersistedWorkspaceRecord | null;
-  deps: Pick<CreatePaseoWorktreeDeps, "projectRegistry" | "workspaceRegistry">;
+  deps: Pick<
+    CreatePaseoWorktreeDeps,
+    "projectRegistry" | "workspaceRegistry" | "workspaceGitService"
+  >;
 }): Promise<SourceProjectForWorktree> {
   if (options.projectId) {
     return resolveExplicitProjectForWorktree({
@@ -447,10 +451,73 @@ async function resolveSourceProjectForWorktree(options: {
     });
   }
 
+  // No explicit projectId and no live source workspace (the cloud scheduled-
+  // worktree case: ephemeral tmpfs registry has no checkout at the baked cwd).
+  // Resolve the durable parent project by git remote/rootPath before minting a
+  // path-keyed fallback that would mis-nest as its own top-level sidebar project.
+  const durableProject = await resolveDurableProjectForWorktree({
+    inputCwd: options.inputCwd,
+    repoRoot: options.repoRoot,
+    deps: options.deps,
+  });
+  if (durableProject) {
+    return durableProject;
+  }
+
   return resolveFallbackProjectForWorktree({
     repoRoot: options.repoRoot,
     projectRegistry: options.deps.projectRegistry,
   });
+}
+
+// Resolve a worktree's durable parent project when no projectId was supplied and
+// no live source workspace matched. Primary path: the git remote — any checkout
+// OR worktree of a repo shares its remote, so the durable `remote:<host>/…`
+// project resolves regardless of the source cwd's exact filesystem path (robust
+// to cloud tmpfs re-clones and recycles). Fallback: match a durable project by
+// rootPath (the schedule's baked cwd is definitionally a project rootPath).
+// Returns null when nothing durable matches, so the caller keeps the existing
+// path-keyed fallback behavior.
+async function resolveDurableProjectForWorktree(options: {
+  inputCwd: string;
+  repoRoot: string;
+  deps: Pick<CreatePaseoWorktreeDeps, "projectRegistry" | "workspaceGitService">;
+}): Promise<SourceProjectForWorktree | null> {
+  for (const cwd of [options.inputCwd, options.repoRoot]) {
+    let remoteKey: string | null = null;
+    try {
+      const checkout = await options.deps.workspaceGitService.getCheckout(cwd);
+      const key = deriveProjectGroupingKey({
+        cwd,
+        remoteUrl: checkout.remoteUrl,
+        mainRepoRoot: checkout.mainRepoRoot,
+      });
+      // Only a real remote gives a durable, path-independent key. Otherwise
+      // deriveProjectGroupingKey returns a filesystem path, which would risk
+      // matching a stale path-keyed record — so ignore it and try rootPath.
+      remoteKey = key.startsWith("remote:") ? key : null;
+    } catch {
+      remoteKey = null;
+    }
+    if (remoteKey) {
+      const project = await options.deps.projectRegistry.get(remoteKey);
+      if (project && !project.archivedAt) {
+        return sourceProjectFromRecord(project);
+      }
+    }
+  }
+
+  const projects = await options.deps.projectRegistry.list();
+  const normalizedRepoRoot = resolve(options.repoRoot);
+  const normalizedInputCwd = resolve(options.inputCwd);
+  const match =
+    projects.find(
+      (project) => !project.archivedAt && resolve(project.rootPath) === normalizedRepoRoot,
+    ) ??
+    projects.find(
+      (project) => !project.archivedAt && resolve(project.rootPath) === normalizedInputCwd,
+    );
+  return match ? sourceProjectFromRecord(match) : null;
 }
 
 async function findWorkspaceForSource(options: {

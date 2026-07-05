@@ -279,6 +279,7 @@ function createPaseoWorktreeForTest(options: {
         : {}),
       projectRegistry: {
         get: async (projectId) => projects.get(projectId) ?? null,
+        list: async () => Array.from(projects.values()),
         upsert: async (record) => {
           options.events?.push(`project:${record.projectId}`);
           projects.set(record.projectId, record);
