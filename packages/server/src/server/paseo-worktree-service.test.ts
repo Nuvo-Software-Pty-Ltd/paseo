@@ -109,6 +109,105 @@ test("registers a new worktree in the existing root project after the main check
   expect(Array.from(deps.projects.keys()).sort()).toEqual(["remote:github.com/acme/repo"]);
 });
 
+// Scheduled-automation worktrees (routines) are created with no projectId AND,
+// in the cloud, no live source workspace at the baked cwd (ephemeral tmpfs
+// registry). Without a durable-project fallback they mint a path-keyed project
+// and mis-nest as a separate top-level sidebar entry. These three cover the
+// resolution added for that case.
+test("attributes a no-projectId worktree to the durable project by git remote when no source workspace exists", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const events: string[] = [];
+  const deps = createDeps({ events });
+  // Durable project keyed by remote. rootPath is deliberately NOT the source cwd,
+  // so only a remote-based match (not a rootPath match) can resolve it.
+  const durableProject = createPersistedProjectRecordForTest({
+    projectId: "remote:github.com/acme/repo",
+    rootPath: path.join(tempDir, "unrelated-root"),
+    displayName: "acme/repo",
+  });
+  deps.projects.set(durableProject.projectId, durableProject);
+  // No workspace record at the source cwd — the cloud tmpfs/recycle case.
+  deps.workspaceGitService.getCheckout = vi.fn(async (cwd: string) => ({
+    cwd,
+    isGit: true,
+    currentBranch: "main",
+    remoteUrl: "https://github.com/acme/repo.git",
+    worktreeRoot: null,
+    isPaseoOwnedWorktree: false,
+    mainRepoRoot: repoDir,
+  }));
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      worktreeSlug: "routine-abc12345-def67890",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(result.workspace.projectId).toBe("remote:github.com/acme/repo");
+  // No new path-keyed project was minted (the bug): only the durable project was
+  // (re-)upserted, then the worktree workspace.
+  expect(events).toEqual([
+    "project:remote:github.com/acme/repo",
+    `workspace:${result.workspace.workspaceId}`,
+  ]);
+});
+
+test("attributes a no-projectId worktree to the durable project by rootPath when the remote is unavailable", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const events: string[] = [];
+  const deps = createDeps({ events });
+  // Durable project whose rootPath IS the source cwd; getCheckout returns no
+  // remote (default stub), so resolution must fall to the rootPath match.
+  const durableProject = createPersistedProjectRecordForTest({
+    projectId: "remote:github.com/acme/repo",
+    rootPath: repoDir,
+    displayName: "acme/repo",
+  });
+  deps.projects.set(durableProject.projectId, durableProject);
+  // No workspace record at the source cwd.
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      worktreeSlug: "routine-abc12345-aaa11111",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(result.workspace.projectId).toBe("remote:github.com/acme/repo");
+  expect(events).toEqual([
+    "project:remote:github.com/acme/repo",
+    `workspace:${result.workspace.workspaceId}`,
+  ]);
+});
+
+test("falls back to a repo-root-keyed project when no durable project matches (unchanged tier-3 behavior)", async () => {
+  const { repoDir, tempDir } = createGitRepo();
+  cleanupPaths.push(tempDir);
+  const deps = createDeps();
+  // Nothing seeded: no project, no workspace, no remote.
+
+  const result = await createPaseoWorktree(
+    {
+      cwd: repoDir,
+      worktreeSlug: "routine-abc12345-bbb22222",
+      runSetup: false,
+      paseoHome: path.join(tempDir, ".paseo"),
+    },
+    deps,
+  );
+
+  expect(path.resolve(result.workspace.projectId)).toBe(path.resolve(result.repoRoot));
+});
+
 // POSIX-only: Windows git worktree paths need separate canonicalization coverage.
 test.skipIf(isPlatform("win32"))(
   "reuses an existing worktree and still upserts the workspace",
