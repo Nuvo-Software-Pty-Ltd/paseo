@@ -8,6 +8,7 @@ import {
   createAutomationSpawn,
   type DedicatedWorktreeCreator,
   type WorkspaceUnarchiver,
+  type WorkspaceRepoRepairer,
 } from "../automation/spawn.js";
 import type { ScheduleRun } from "@getpaseo/protocol/schedule/types";
 import type { WebhookTriggerStore } from "./store.js";
@@ -124,6 +125,7 @@ export class TriggerService {
   // without these still fires reuse-mode targets unchanged.
   private dedicatedWorktreeCreator?: DedicatedWorktreeCreator;
   private workspaceUnarchiver?: WorkspaceUnarchiver;
+  private workspaceRepoRepairer?: WorkspaceRepoRepairer;
 
   constructor(options: TriggerServiceOptions) {
     this.store = options.store;
@@ -142,6 +144,11 @@ export class TriggerService {
   /** Bootstrap injects the workspace auto-unarchiver (reuse + dedicated modes). */
   setWorkspaceUnarchiver(unarchiver: WorkspaceUnarchiver): void {
     this.workspaceUnarchiver = unarchiver;
+  }
+
+  /** Bootstrap injects the missing-source-repo repair (re-clone before worktree). */
+  setWorkspaceRepoRepairer(repairer: WorkspaceRepoRepairer): void {
+    this.workspaceRepoRepairer = repairer;
   }
 
   getStore(): WebhookTriggerStore {
@@ -340,6 +347,7 @@ export class TriggerService {
             logger: this.logger,
             createDedicatedWorktree: this.dedicatedWorktreeCreator,
             unarchiveWorkspace: this.workspaceUnarchiver,
+            repairMissingWorkspaceRepo: this.workspaceRepoRepairer,
           },
         }),
       );

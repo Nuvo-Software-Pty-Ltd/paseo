@@ -201,6 +201,7 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { maybeExposeGithubTokenToEnv } from "./cloud-clone.js";
+import { ensureCloudWorkspaceRepoCloned } from "./cloud-workspace-repair.js";
 import { buildGithubTokenEnvDefaults } from "./cloud-github-token.js";
 import { materializeGitCredentialHelper } from "./cloud-git-credential.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
@@ -1284,13 +1285,22 @@ export async function createPaseoDaemon(
     return { workspaceId: target.workspaceId };
   };
 
+  // Re-clone a routine's source repo when a recycle wiped its tmpfs clone, before
+  // a worktree is branched off it. Reuses the exact repair the interactive open /
+  // create-worktree handlers run (cloud-workspace-repair.ts). Idempotent no-op
+  // on-host / when the repo is already present.
+  const repairMissingWorkspaceRepo = (cwd: string): Promise<void> =>
+    ensureCloudWorkspaceRepoCloned({ cwd, projectRegistry, logger });
+
   // Late setter-injection (services are constructed above, before these adapters
   // exist; the adapters close over the later-assigned wsServer). A daemon that
   // skips this still fires reuse-mode routines; non-"reuse" modes then error.
   scheduleService.setDedicatedWorktreeCreator(createDedicatedWorktree);
   scheduleService.setWorkspaceUnarchiver(unarchiveAutomationWorkspace);
+  scheduleService.setWorkspaceRepoRepairer(repairMissingWorkspaceRepo);
   triggerService.setDedicatedWorktreeCreator(createDedicatedWorktree);
   triggerService.setWorkspaceUnarchiver(unarchiveAutomationWorkspace);
+  triggerService.setWorkspaceRepoRepairer(repairMissingWorkspaceRepo);
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,

@@ -692,6 +692,58 @@ describe("ScheduleService", () => {
     expect(stored?.workspaceId).toBe("ws_worktree");
   });
 
+  test("worktree fire repairs the source repo before creating the worktree", async () => {
+    // A cloud recycle wipes the tmpfs clone of a secondary source repo, so the
+    // worktree modes must re-clone it (via the injected repairer) BEFORE
+    // `git worktree add` runs, or creation fails "requires a git repository".
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: createTestAgentClients(),
+      registry: agentStorage,
+    });
+    const repair = vi.fn(async () => {});
+    const createWorktree = vi.fn(async () => ({
+      cwd: tempDir,
+      workspaceId: "ws_worktree",
+      created: true,
+    }));
+    const service = new ScheduleService({
+      store: makeStore(tempDir),
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+    });
+    service.setWorkspaceRepoRepairer(repair);
+    service.setDedicatedWorktreeCreator(createWorktree);
+
+    await service.create({
+      prompt: "Respond with exactly hello",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: {
+        type: "new-agent",
+        config: {
+          provider: "claude",
+          cwd: tempDir,
+          approvalPolicy: "never",
+          workspaceMode: "fresh-worktree-per-run",
+        },
+      },
+      maxRuns: 1,
+    });
+
+    now = new Date("2026-01-01T00:01:00.000Z");
+    await service.tick();
+
+    expect(repair).toHaveBeenCalledWith(tempDir);
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+    // Repair MUST precede worktree creation (the whole point — heal, then branch).
+    expect(repair.mock.invocationCallOrder[0]!).toBeLessThan(
+      createWorktree.mock.invocationCallOrder[0]!,
+    );
+  });
+
   test("defaults new-agent modeId to provider's unattended mode", async () => {
     const manager = new AgentManager({
       logger: createTestLogger(),

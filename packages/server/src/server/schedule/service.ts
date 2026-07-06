@@ -13,6 +13,7 @@ import {
   spawnFromAutomation,
   type DedicatedWorktreeCreator,
   type WorkspaceUnarchiver,
+  type WorkspaceRepoRepairer,
 } from "../automation/spawn.js";
 import type { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
@@ -183,6 +184,7 @@ export class ScheduleService {
   // Optional: a daemon without these still fires reuse-mode routines unchanged.
   private dedicatedWorktreeCreator?: DedicatedWorktreeCreator;
   private workspaceUnarchiver?: WorkspaceUnarchiver;
+  private workspaceRepoRepairer?: WorkspaceRepoRepairer;
 
   constructor(options: ScheduleServiceOptions) {
     this.store = options.store;
@@ -204,6 +206,11 @@ export class ScheduleService {
     this.workspaceUnarchiver = unarchiver;
   }
 
+  /** Bootstrap injects the missing-source-repo repair (re-clone before worktree). */
+  setWorkspaceRepoRepairer(repairer: WorkspaceRepoRepairer): void {
+    this.workspaceRepoRepairer = repairer;
+  }
+
   /** The automation-spawn deps shared by both fire paths (tick + cloud async). */
   private automationDeps() {
     return {
@@ -213,6 +220,7 @@ export class ScheduleService {
       providerSnapshotManager: this.providerSnapshotManager,
       createDedicatedWorktree: this.dedicatedWorktreeCreator,
       unarchiveWorkspace: this.workspaceUnarchiver,
+      repairMissingWorkspaceRepo: this.workspaceRepoRepairer,
     };
   }
 
