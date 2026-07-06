@@ -58,11 +58,21 @@ export interface AutomationSpawnDeps {
     workspaceId?: string;
     cwd: string;
   }) => Promise<{ workspaceId: string } | null>;
+  /**
+   * Re-clone the routine's source repo when its `/workspace` clone was wiped by a
+   * recycle (cloud tmpfs is ephemeral) BEFORE a worktree is branched off it —
+   * mirrors the interactive open / create-worktree repair. Idempotent: no-op when
+   * the path already exists, off-cloud, or no durable git project matches the cwd.
+   * Injected in bootstrap; absent ⇒ no-op (on-host / older daemons), where the
+   * source repo is always present so no repair is needed.
+   */
+  repairMissingWorkspaceRepo?: (cwd: string) => Promise<void>;
 }
 
 /** Injected (setter) into the schedule + trigger services from bootstrap. */
 export type DedicatedWorktreeCreator = NonNullable<AutomationSpawnDeps["createDedicatedWorktree"]>;
 export type WorkspaceUnarchiver = NonNullable<AutomationSpawnDeps["unarchiveWorkspace"]>;
+export type WorkspaceRepoRepairer = NonNullable<AutomationSpawnDeps["repairMissingWorkspaceRepo"]>;
 
 /**
  * A spawn whose agent already exists (created, or an existing agent that
@@ -152,6 +162,10 @@ async function resolveAutomationSpawnWorkspace(params: {
     const slugBase = `routine-${automationId}`;
     const perRun = workspaceMode === "fresh-worktree-per-run";
     const slug = perRun && runId ? `${slugBase}-${runId.slice(0, 8)}` : slugBase;
+    // Cloud: re-clone the source repo if a recycle wiped its tmpfs clone, so
+    // `git worktree add` has a repo to branch from (mirrors the interactive
+    // open/create-worktree repair). Idempotent no-op on-host / when present.
+    await deps.repairMissingWorkspaceRepo?.(target.config.cwd);
     const created = await deps.createDedicatedWorktree({
       sourceCwd: target.config.cwd,
       slug,

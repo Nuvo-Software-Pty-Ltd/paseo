@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Logger } from "pino";
 
-import { selectProjectRepairClone } from "./cloud-workspace-repair.js";
+import {
+  ensureCloudWorkspaceRepoCloned,
+  selectProjectRepairClone,
+} from "./cloud-workspace-repair.js";
 import { createPersistedProjectRecord, type PersistedProjectRecord } from "./workspace-registry.js";
 
 const WS = "ws_3ea432ff";
@@ -85,5 +89,22 @@ describe("selectProjectRepairClone", () => {
     const cwd = `/workspace/ws_other/Owner__repo`;
     const projects = [project({ rootPath: cwd })];
     expect(selectProjectRepairClone({ cwd, workspaceId: WS, projects })).toBeNull();
+  });
+});
+
+describe("ensureCloudWorkspaceRepoCloned", () => {
+  it("no-ops off-cloud (never touches the project registry, never throws)", async () => {
+    // PASEO_CLOUD_MODE is unset in the test env → isPaseoCloudMode() is false, so
+    // the repair returns immediately without listing projects or cloning. This is
+    // what makes the automation path safe to call unconditionally on-host.
+    const list = vi.fn(async () => [] as PersistedProjectRecord[]);
+    await expect(
+      ensureCloudWorkspaceRepoCloned({
+        cwd: `/workspace/${WS}/Owner__repo`,
+        projectRegistry: { list },
+        logger: { info() {}, warn() {}, error() {} } as unknown as Logger,
+      }),
+    ).resolves.toBeUndefined();
+    expect(list).not.toHaveBeenCalled();
   });
 });
