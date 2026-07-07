@@ -1,3 +1,5 @@
+import { mkdir } from "node:fs/promises";
+
 const PASEO_NODE_ENV = "PASEO_NODE_ENV";
 const ELECTRON_RUN_AS_NODE = "ELECTRON_RUN_AS_NODE";
 
@@ -169,4 +171,43 @@ export function buildToolchainEnvDefaults(
     MAMBA_ROOT_PREFIX: `${prefix}/micromamba`,
     PATH: basePath ? `${pathPrepend}:${basePath}` : pathPrepend,
   };
+}
+
+// COMPAT(toolchainDirsOnBoot): the cloud RunTask injects PASEO_TOOLCHAIN_PREFIX
+// and `buildToolchainEnvDefaults` redirects a spawn's TMPDIR + tool caches under
+// it, but `/workspace` is tmpfs (wiped on every recycle) and nothing else creates
+// that tree — so the Claude Code CLI's per-run settings write into TMPDIR fails
+// `ENOENT: .../.toolchain/tmp/claude-settings-<hash>.json`. Materialize the whole
+// tree once at daemon boot. The dir list is DERIVED from `buildToolchainEnvDefaults`
+// so it can never drift from the env it mirrors (same drift hazard the profile
+// script at :138-140 already calls out). No-op when the prefix is unset (on-host /
+// desktop). Best-effort: a failed mkdir is logged, never thrown, so it can't crash
+// boot. Delete once `/workspace` is durable storage.
+export async function ensureToolchainDirs(
+  env: NodeJS.ProcessEnv = process.env,
+  logger?: { warn(obj: unknown, msg: string): void },
+): Promise<void> {
+  const prefix = env.PASEO_TOOLCHAIN_PREFIX?.trim();
+  if (!prefix) {
+    return;
+  }
+  const dirs = new Set<string>();
+  for (const [key, value] of Object.entries(buildToolchainEnvDefaults(env))) {
+    if (key === "PATH") {
+      for (const entry of value.split(":")) {
+        if (entry.startsWith(prefix)) {
+          dirs.add(entry);
+        }
+      }
+    } else if (value.startsWith(prefix)) {
+      dirs.add(value);
+    }
+  }
+  for (const dir of dirs) {
+    try {
+      await mkdir(dir, { recursive: true });
+    } catch (err) {
+      logger?.warn({ err, dir }, "toolchain dir ensure failed");
+    }
+  }
 }
