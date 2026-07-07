@@ -483,8 +483,8 @@ export async function createPaseoDaemon(
   const daemonVersion = resolveDaemonVersion(import.meta.url);
   // Materialize the toolchain prefix tree (TMPDIR + tool caches) before anything
   // spawns: /workspace is tmpfs and the cloud RunTask injects PASEO_TOOLCHAIN_PREFIX
-  // but never creates the tree, so the Claude CLI's per-run settings write into
-  // TMPDIR ENOENTs without it. No-op on-host (prefix unset); best-effort (never throws).
+  // but never creates the tree, so a spawned agent CLI's per-run settings write
+  // into TMPDIR ENOENT without it. No-op on-host (prefix unset); best-effort (never throws).
   await ensureToolchainDirs(process.env, logger);
   const daemonConfigStore = new DaemonConfigStore(
     config.paseoHome,
