@@ -204,7 +204,7 @@ import { maybeExposeGithubTokenToEnv } from "./cloud-clone.js";
 import { ensureCloudWorkspaceRepoCloned } from "./cloud-workspace-repair.js";
 import { buildGithubTokenEnvDefaults } from "./cloud-github-token.js";
 import { materializeGitCredentialHelper } from "./cloud-git-credential.js";
-import { isPaseoCloudMode } from "./paseo-env.js";
+import { ensureToolchainDirs, isPaseoCloudMode } from "./paseo-env.js";
 import { createInternalRoutes } from "./internal-routes.js";
 import {
   DynamoPermissionStore,
@@ -481,6 +481,11 @@ export async function createPaseoDaemon(
   const bootstrapStart = performance.now();
   const elapsed = () => `${(performance.now() - bootstrapStart).toFixed(0)}ms`;
   const daemonVersion = resolveDaemonVersion(import.meta.url);
+  // Materialize the toolchain prefix tree (TMPDIR + tool caches) before anything
+  // spawns: /workspace is tmpfs and the cloud RunTask injects PASEO_TOOLCHAIN_PREFIX
+  // but never creates the tree, so the Claude CLI's per-run settings write into
+  // TMPDIR ENOENTs without it. No-op on-host (prefix unset); best-effort (never throws).
+  await ensureToolchainDirs(process.env, logger);
   const daemonConfigStore = new DaemonConfigStore(
     config.paseoHome,
     {

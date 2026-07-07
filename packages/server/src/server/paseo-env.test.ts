@@ -1,10 +1,14 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildSelfNodeCommand,
   buildToolchainEnvDefaults,
   createExternalCommandProcessEnv,
   createExternalProcessEnv,
   createPaseoInternalEnv,
+  ensureToolchainDirs,
   isPaseoCloudMode,
   resolvePaseoNodeEnv,
   resolveProjectSource,
@@ -69,6 +73,38 @@ describe("buildToolchainEnvDefaults (BYO-runtimes L0)", () => {
     expect(buildToolchainEnvDefaults({ PASEO_TOOLCHAIN_PREFIX: "/tc" }).PATH).toBe(
       "/tc/bin:/tc/npm-global/bin:/tc/node/bin:/tc/uv/bin",
     );
+  });
+});
+
+describe("ensureToolchainDirs (BYO-runtimes L0 dir materialization)", () => {
+  let base: string;
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "paseo-toolchain-"));
+  });
+  afterEach(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test("creates the toolchain dir tree incl TMPDIR (the claude-settings ENOENT site)", async () => {
+    const prefix = join(base, ".toolchain");
+    await ensureToolchainDirs({ PASEO_TOOLCHAIN_PREFIX: prefix, PATH: "/usr/bin" });
+    // TMPDIR = ${prefix}/tmp is where the Claude Code CLI writes claude-settings-<hash>.json.
+    expect(existsSync(join(prefix, "tmp"))).toBe(true);
+    // a PATH-prepend bin dir and a nested cache dir, to prove the full tree is made.
+    expect(existsSync(join(prefix, "npm-global", "bin"))).toBe(true);
+    expect(existsSync(join(prefix, "cache", "uv"))).toBe(true);
+  });
+
+  test("is a no-op when PASEO_TOOLCHAIN_PREFIX is unset (on-host/desktop)", async () => {
+    await expect(ensureToolchainDirs({})).resolves.toBeUndefined();
+    expect(readdirSync(base)).toHaveLength(0);
+  });
+
+  test("is idempotent — safe to call on every boot", async () => {
+    const prefix = join(base, ".toolchain");
+    await ensureToolchainDirs({ PASEO_TOOLCHAIN_PREFIX: prefix });
+    await expect(ensureToolchainDirs({ PASEO_TOOLCHAIN_PREFIX: prefix })).resolves.toBeUndefined();
+    expect(existsSync(join(prefix, "tmp"))).toBe(true);
   });
 });
 
