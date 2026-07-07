@@ -5,6 +5,7 @@ import {
   ensureCloudWorkspaceRepoCloned,
   selectProjectRepairClone,
 } from "./cloud-workspace-repair.js";
+import { deriveRepoUrlFromRemoteProjectKey } from "./workspace-registry-model.js";
 import { createPersistedProjectRecord, type PersistedProjectRecord } from "./workspace-registry.js";
 
 const WS = "ws_3ea432ff";
@@ -57,6 +58,34 @@ describe("selectProjectRepairClone", () => {
     );
   });
 
+  it("derives the URL from the remote: projectId when repoUrl was nulled (the clobber regression)", () => {
+    // A fire can rewrite the durable project record and drop repoUrl → null. The
+    // projectId (the immutable DDB sort key) is the durable source of truth, so
+    // the repair must still resolve a clone URL from it.
+    const cwd = `/workspace/${WS}/Nuvo-Software-Pty-Ltd__indexing-shopify-app`;
+    const projects = [
+      project({
+        projectId: "remote:github.com/Nuvo-Software-Pty-Ltd/indexing-shopify-app",
+        rootPath: cwd,
+        displayName: "Nuvo-Software-Pty-Ltd/indexing-shopify-app",
+        repoUrl: null,
+      }),
+    ];
+
+    expect(selectProjectRepairClone({ cwd, workspaceId: WS, projects })).toEqual({
+      repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/indexing-shopify-app",
+      destSubdir: "Nuvo-Software-Pty-Ltd__indexing-shopify-app",
+      clonePath: cwd,
+    });
+  });
+
+  it("defers (null) for a repoUrl-less git project with a non-remote (path) key", () => {
+    // No repoUrl AND no remote: key → no URL to derive → defer to the primary repair.
+    const cwd = `/workspace/${WS}/Owner__repo`;
+    const projects = [project({ rootPath: cwd, projectId: cwd, repoUrl: null })];
+    expect(selectProjectRepairClone({ cwd, workspaceId: WS, projects })).toBeNull();
+  });
+
   it("defers (null) for the container root so the primary repair runs", () => {
     const cwd = `/workspace/${WS}`;
     expect(selectProjectRepairClone({ cwd, workspaceId: WS, projects: [project({})] })).toBeNull();
@@ -106,5 +135,21 @@ describe("ensureCloudWorkspaceRepoCloned", () => {
       }),
     ).resolves.toBeUndefined();
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+describe("deriveRepoUrlFromRemoteProjectKey", () => {
+  it("reconstructs the canonical https URL from a remote: project key", () => {
+    expect(deriveRepoUrlFromRemoteProjectKey("remote:github.com/Owner/repo")).toBe(
+      "https://github.com/Owner/repo",
+    );
+  });
+
+  it("returns null for a filesystem-path project key (tier-3 fallback rows)", () => {
+    expect(deriveRepoUrlFromRemoteProjectKey("/workspace/ws_x/Owner__repo")).toBeNull();
+  });
+
+  it("returns null for a remote: key with no path segment", () => {
+    expect(deriveRepoUrlFromRemoteProjectKey("remote:github.com")).toBeNull();
   });
 });
