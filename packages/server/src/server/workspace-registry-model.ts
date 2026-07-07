@@ -126,6 +126,21 @@ export function deriveCanonicalRepoUrl(remoteUrl: string | null): string | null 
   return `https://${parsed.host}/${parsed.cleanedPath}`;
 }
 
+// Reverse of `deriveRemoteProjectKey`: reconstruct the canonical
+// `https://<host>/<owner>/<repo>` clone URL from a `remote:<host>/<owner>/<repo>`
+// project key. The project key is the durable DynamoDB sort key (immutable), so
+// this is a recycle- and clobber-proof source of the clone URL when a project
+// record's persisted `repoUrl` was dropped. Returns null for a filesystem-path
+// key (tier-3 fallback rows) or a malformed remote key with no path segment.
+export function deriveRepoUrlFromRemoteProjectKey(projectKey: string): string | null {
+  const REMOTE_PREFIX = "remote:";
+  if (!projectKey.startsWith(REMOTE_PREFIX)) {
+    return null;
+  }
+  const remainder = projectKey.slice(REMOTE_PREFIX.length);
+  return remainder.includes("/") ? `https://${remainder}` : null;
+}
+
 export function deriveProjectGroupingKey(options: {
   cwd: string;
   remoteUrl: string | null;

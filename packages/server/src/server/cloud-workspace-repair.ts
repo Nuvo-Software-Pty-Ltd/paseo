@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 import type { Logger } from "pino";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { deriveCanonicalRepoUrl } from "./workspace-registry-model.js";
+import {
+  deriveCanonicalRepoUrl,
+  deriveRepoUrlFromRemoteProjectKey,
+} from "./workspace-registry-model.js";
 import type { PersistedProjectRecord, ProjectRegistry } from "./workspace-registry.js";
 import { isPaseoCloudMode } from "./paseo-env.js";
 import { cloneWorkspaceRepo, fetchWorkspaceRepoUrl } from "./cloud-clone.js";
@@ -61,14 +64,24 @@ export function selectProjectRepairClone(input: {
     (candidate) =>
       !candidate.archivedAt &&
       candidate.kind === "git" &&
-      Boolean(candidate.repoUrl) &&
       normalizePosixPath(candidate.rootPath) === normalizedCwd,
   );
-  if (!project?.repoUrl) {
+  if (!project) {
+    return null;
+  }
+  // Prefer the persisted repoUrl; fall back to reconstructing it from the
+  // immutable `remote:` project key. A fire can rewrite the durable record and
+  // null the persisted repoUrl, but the project key (sort key) survives — so the
+  // repair stays functional across that clobber. Null when neither yields a URL
+  // (a path-keyed git project with no repoUrl) → defer to the primary repair.
+  const repoUrl =
+    (project.repoUrl ? (deriveCanonicalRepoUrl(project.repoUrl) ?? project.repoUrl) : null) ??
+    deriveRepoUrlFromRemoteProjectKey(project.projectId);
+  if (!repoUrl) {
     return null;
   }
   return {
-    repoUrl: deriveCanonicalRepoUrl(project.repoUrl) ?? project.repoUrl,
+    repoUrl,
     destSubdir,
     clonePath: `/workspace/${input.workspaceId}/${destSubdir}`,
   };
