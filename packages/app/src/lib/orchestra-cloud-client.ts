@@ -148,7 +148,7 @@ function refreshSession(): Promise<string> {
   return refreshSessionInFlight;
 }
 
-async function doRefreshSession(): Promise<string> {
+async function doRefreshSession(isRetry = false): Promise<string> {
   const refreshToken = await getRefreshToken();
   if (!refreshToken) {
     throw new RefreshUnavailableError("no refresh token");
@@ -174,19 +174,30 @@ async function doRefreshSession(): Promise<string> {
     if (!body || typeof body.token !== "string" || typeof body.refreshToken !== "string") {
       throw new RefreshUnavailableError("malformed refresh response");
     }
-    await storeSessionToken(body.token);
+    // Persist the ROTATED refresh token FIRST — it is the recovery credential (a
+    // live RT always re-mints an AT; a live AT without the new RT cannot), so an
+    // interrupt after this point leaves the recoverable token on disk.
     await storeRefreshToken(body.refreshToken);
+    await storeSessionToken(body.token);
     return body.token;
   }
 
   if (res.status === 401) {
-    // The server rejected THIS refresh token. A concurrent refresher (another
-    // tab) may already have rotated it — if the stored token changed out from
-    // under us, retry against the winner's fresh access token rather than bounce.
+    const code = await read401RefreshCode(res);
+    // A concurrent refresher (another tab) may already have rotated the token —
+    // if the stored token changed out from under us, use the winner's fresh
+    // access token rather than bounce.
     const latest = await getRefreshToken();
     if (latest && latest !== refreshToken) {
       const at = await getSessionToken();
       if (at) return at;
+    }
+    // "refresh_reused" is the server's authoritative theft signal (the family is
+    // already revoked) → bounce now. Any other 401 (refresh_invalid / a lost
+    // conditional race) does NOT revoke server-side, so make ONE retry with a
+    // freshly re-read RT before discarding a possibly-still-live 30-day session.
+    if (code !== "refresh_reused" && !isRetry) {
+      return doRefreshSession(true);
     }
     await clearRefreshToken();
     throw new OrchestraSessionExpiredError(); // authoritative — caller bounces
@@ -195,6 +206,18 @@ async function doRefreshSession(): Promise<string> {
   // 404 (old auth) / 5xx — transient. Retain the refresh token; the caller
   // degrades to the current access token.
   throw new RefreshUnavailableError(`refresh failed: ${res.status}`);
+}
+
+// Reads the { code } discriminator off a 401 /refresh body without throwing (the
+// body may be absent/empty). "refresh_reused" is the server's theft signal; any
+// other value (including none) is a soft failure eligible for one retry.
+async function read401RefreshCode(res: Response): Promise<string | null> {
+  try {
+    const body = (await res.json()) as { code?: unknown } | null;
+    return body && typeof body.code === "string" ? body.code : null;
+  } catch {
+    return null;
+  }
 }
 
 // Resolve an access token to attach, refreshing proactively when the current

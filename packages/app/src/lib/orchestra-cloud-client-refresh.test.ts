@@ -159,6 +159,68 @@ describe("authedFetch reactive refresh", () => {
     expect(bounces).toBe(0);
     expect(await AsyncStorage.getItem(RT_KEY)).toBe("rt-new"); // winner's token preserved
   });
+
+  it("bounces immediately on refresh_reused (authoritative theft) without retrying", async () => {
+    await seed(jwt(nowSec() + 3600), RT);
+    let refreshCalls = 0;
+    routeFetch((url) => {
+      if (url.includes("/session/refresh")) {
+        refreshCalls++;
+        return { status: 401, body: { code: "refresh_reused" } };
+      }
+      return { status: 401 };
+    });
+
+    await expect(listWorkspaces()).rejects.toBeInstanceOf(OrchestraSessionExpiredError);
+    expect(refreshCalls).toBe(1); // theft is authoritative — no retry
+    expect(bounces).toBe(1);
+    expect(await AsyncStorage.getItem(RT_KEY)).toBeNull();
+  });
+
+  it("on refresh_invalid, retries the refresh ONCE and recovers without bouncing", async () => {
+    await seed(jwt(nowSec() + 3600), RT); // AT valid → the API 401 drives the refresh
+    let refreshCalls = 0;
+    let apiCalls = 0;
+    routeFetch((url) => {
+      if (url.includes("/session/refresh")) {
+        refreshCalls++;
+        // First attempt loses a conditional race (invalid, NOT reused); the
+        // retry with a re-read RT succeeds.
+        return refreshCalls === 1
+          ? { status: 401, body: { code: "refresh_invalid" } }
+          : {
+              status: 200,
+              body: { token: jwt(nowSec() + 3600), refreshToken: "acct_1.fam_abc.secret-2" },
+            };
+      }
+      apiCalls++;
+      return apiCalls === 1 ? { status: 401 } : { status: 200, body: { workspaces: [] } };
+    });
+
+    await expect(listWorkspaces()).resolves.toEqual([]);
+    expect(refreshCalls).toBe(2); // initial invalid + successful retry
+    expect(bounces).toBe(0);
+    expect(await AsyncStorage.getItem(RT_KEY)).toBe("acct_1.fam_abc.secret-2");
+  });
+
+  it("persists the rotated refresh token BEFORE the access token", async () => {
+    await seed(jwt(nowSec() + 60), RT); // near expiry → proactive refresh
+    vi.mocked(AsyncStorage.setItem).mockClear(); // ignore the seed writes
+    routeFetch((url) =>
+      url.includes("/session/refresh")
+        ? {
+            status: 200,
+            body: { token: jwt(nowSec() + 3600), refreshToken: "acct_1.fam_abc.secret-2" },
+          }
+        : { status: 200, body: { workspaces: [] } },
+    );
+
+    await listWorkspaces();
+    const keys = vi.mocked(AsyncStorage.setItem).mock.calls.map(([k]) => k);
+    expect(keys).toContain(RT_KEY);
+    expect(keys).toContain(AT_KEY);
+    expect(keys.indexOf(RT_KEY)).toBeLessThan(keys.indexOf(AT_KEY)); // RT persisted first
+  });
 });
 
 describe("authedFetch proactive refresh", () => {
