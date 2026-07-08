@@ -94,6 +94,7 @@ import { withTimeout } from "../../../../utils/promise-timeout.js";
 import { execCommand } from "../../../../utils/spawn.js";
 import { composeSystemPromptParts } from "../../system-prompt.js";
 import { isPaseoCloudMode } from "../../../paseo-env.js";
+import { resolveCloudProvisioningNotices } from "../../../cloud-provisioning-notices.js";
 import {
   provisionCloudClaudeHome,
   type MaterializedClaudeHome,
@@ -3006,6 +3007,34 @@ class ClaudeAgentSession implements AgentSession {
     });
   }
 
+  // Emitted at most once per agent: turns a bare-workspace state (no GitHub
+  // token / wiped toolchain after a recycle) into a visible transcript notice
+  // instead of silent degradation. Best-effort — never blocks or fails a turn.
+  private provisioningNoticesEmitted = false;
+
+  // Gate + fire-and-forget wrapper so buildOptions stays simple: emits at most
+  // once per agent, cloud-mode only, and never blocks the turn.
+  private maybeEmitCloudProvisioningNotices(env: NodeJS.ProcessEnv): void {
+    if (!isPaseoCloudMode() || this.provisioningNoticesEmitted) return;
+    this.provisioningNoticesEmitted = true;
+    void this.emitCloudProvisioningNotices(env);
+  }
+
+  private async emitCloudProvisioningNotices(env: NodeJS.ProcessEnv): Promise<void> {
+    try {
+      const notices = await resolveCloudProvisioningNotices({ env, logger: this.logger });
+      for (const text of notices) {
+        this.notifySubscribers({
+          type: "timeline",
+          provider: "claude",
+          item: { type: "assistant_message", text },
+        });
+      }
+    } catch (err) {
+      this.logger.warn({ err }, "Failed to emit cloud provisioning notices");
+    }
+  }
+
   private async buildOptions(): Promise<ClaudeOptions> {
     const { thinking, effort, ultracode } = this.resolveThinkingConfig();
     const appendedSystemPrompt = this.buildAppendedSystemPrompt();
@@ -3031,6 +3060,10 @@ class ClaudeAgentSession implements AgentSession {
     }
     const sdkEnv = this.buildSdkEnv(extraClaudeOptions, cloudEnvOverlay);
     assertClaudeAutoModeEligible(this.currentMode, sdkEnv);
+
+    // Surface any degraded cloud provisioning (missing GitHub token / toolchain)
+    // once per agent, using the fully-resolved spawn env (fire-and-forget).
+    this.maybeEmitCloudProvisioningNotices(sdkEnv);
 
     const claudeBinary = await this.resolveBinary();
     this.logger.debug(
