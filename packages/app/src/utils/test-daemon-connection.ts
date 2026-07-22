@@ -12,8 +12,8 @@ import {
   buildLocalDaemonTransportUrl,
   createDesktopLocalDaemonTransportFactory,
 } from "@/desktop/daemon/desktop-daemon-transport";
-import { createWorkspaceTokenRefreshingTransportFactory } from "@/lib/orchestra-cloud-transport";
-import { mintWorkspaceToken } from "@/lib/orchestra-cloud-client";
+import { createSeededWorkspaceTokenTransportFactory } from "@/lib/orchestra-cloud-transport";
+import { mintWorkspaceToken, type MintWorkspaceTokenResult } from "@/lib/orchestra-cloud-client";
 
 export interface DaemonProbeClient {
   readonly lastError: string | null;
@@ -33,6 +33,7 @@ export interface DaemonConnectionDependencies<TClient extends DaemonProbeClient>
   createLocalTransportFactory(): DaemonClientConfig["transportFactory"] | null;
   buildLocalTransportUrl(input: LocalTransportUrlInput): string;
   createClient(config: DaemonClientConfig): TClient;
+  mintWorkspaceToken(workspaceId: string): Promise<MintWorkspaceTokenResult>;
 }
 
 const defaultDaemonConnectionDependencies: DaemonConnectionDependencies<DaemonClient> = {
@@ -41,6 +42,7 @@ const defaultDaemonConnectionDependencies: DaemonConnectionDependencies<DaemonCl
   createLocalTransportFactory: createDesktopLocalDaemonTransportFactory,
   buildLocalTransportUrl: buildLocalDaemonTransportUrl,
   createClient: (config) => new DaemonClient(config),
+  mintWorkspaceToken,
 };
 
 function normalizeNonEmptyString(value: unknown): string | null {
@@ -101,7 +103,11 @@ export async function buildClientConfig(
   serverId?: string,
   deps: Pick<
     DaemonConnectionDependencies<DaemonProbeClient>,
-    "getClientId" | "resolveAppVersion" | "createLocalTransportFactory" | "buildLocalTransportUrl"
+    | "getClientId"
+    | "resolveAppVersion"
+    | "createLocalTransportFactory"
+    | "buildLocalTransportUrl"
+    | "mintWorkspaceToken"
   > = defaultDaemonConnectionDependencies,
 ): Promise<DaemonClientConfig> {
   const clientId = await deps.getClientId();
@@ -134,18 +140,29 @@ export async function buildClientConfig(
       // the `paseo.workspace.<jwt>` subprotocol, matching the runtime active
       // path. The on-host bcrypt-Bearer path is mutually exclusive with this.
       const workspaceId = connection.workspaceId;
-      // PLAN-auth-and-shared Task 16: /token can return five non-active
-      // variants. The probe path needs a string; non-active surfaces as a
-      // probe failure so the caller treats it the same as any other
-      // unreachable-host outcome.
-      const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
-        tokenProvider: async () => {
-          const result = await mintWorkspaceToken(workspaceId);
-          if (result.status !== "active") {
-            throw new Error(`Workspace token unavailable: status=${result.status}`);
-          }
-          return result.token;
-        },
+      const mintToken = async (): Promise<string> => {
+        // PLAN-auth-and-shared Task 16: /token can return five non-active
+        // variants. The probe path needs a string; non-active surfaces as a
+        // probe failure so the caller treats it the same as any other
+        // unreachable-host outcome.
+        const result = await deps.mintWorkspaceToken(workspaceId);
+        if (result.status !== "active") {
+          throw new Error(`Workspace token unavailable: status=${result.status}`);
+        }
+        return result.token;
+      };
+      // Fix A: mint the token HERE — buildClientConfig runs BEFORE
+      // connectAndProbe arms its 6s connect timer — so the mint, and any
+      // access-token refresh it triggers, sits OUTSIDE the connect deadline.
+      // (A slow mid-connect refresh would otherwise open the WS too late for the
+      // `hello` handshake to complete before the timeout, leaving the app stuck
+      // "connecting".) The seeded factory serves this pre-minted token on the
+      // first connect and re-mints on reconnects — the short-lived token is
+      // never reused across reconnects.
+      const initialToken = await mintToken();
+      const transportFactory = createSeededWorkspaceTokenTransportFactory({
+        initialToken,
+        tokenProvider: mintToken,
       });
       return {
         ...base,

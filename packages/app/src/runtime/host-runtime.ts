@@ -543,6 +543,13 @@ export function createDefaultDeps(): HostRuntimeControllerDeps {
           // host-runtime's existing reconnect cycle handles the retry, and
           // the cold-resume splash (Task 6) reads workspace state from the
           // /workspaces list directly, not from this throw.
+          //
+          // This createClient builds only the adaptive-switch / recovery clients
+          // (switchToConnection without an existingClient), which connect under
+          // the DaemonClient's 15s internal timeout. The first cloud connect
+          // goes through the probe path (utils/test-daemon-connection.ts), whose
+          // 6s deadline is why THAT path pre-mints outside the timer via the
+          // *seeded* factory (fix A); a lazy mint is fine at 15s, so this stays.
           const transportFactory = createWorkspaceTokenRefreshingTransportFactory({
             tokenProvider: async () => {
               const result = await mintWorkspaceToken(workspaceId);

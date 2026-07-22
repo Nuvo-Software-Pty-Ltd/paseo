@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonClientConfig } from "@getpaseo/client/internal/daemon-client";
+import type { MintWorkspaceTokenResult } from "@/lib/orchestra-cloud-client";
 import type { DaemonConnectionDependencies, DaemonProbeClient } from "./test-daemon-connection";
 
 class FakeDaemonClient implements DaemonProbeClient {
@@ -37,6 +38,12 @@ class FakeDaemonProbe {
   nextConnectError: Error | null = null;
   nextLastError: string | null = null;
 
+  // Controllable per test — the cloud (workspaceId) path mints through this.
+  mint = vi.fn(
+    (workspaceId: string): Promise<MintWorkspaceTokenResult> =>
+      Promise.resolve({ status: "active", token: `wtok_${workspaceId}`, expiresAt: 0 }),
+  );
+
   readonly deps: DaemonConnectionDependencies<FakeDaemonClient> = {
     getClientId: async () => {
       this.clientIdsRequested += 1;
@@ -51,6 +58,7 @@ class FakeDaemonProbe {
       this.createdClients.push(client);
       return client;
     },
+    mintWorkspaceToken: (workspaceId) => this.mint(workspaceId),
   };
 
   failNextConnection(error: Error, lastError: string | null): void {
@@ -187,6 +195,67 @@ describe("test-daemon-connection connectToDaemon", () => {
     ).rejects.toMatchObject({
       message: "Incorrect password",
     });
+  });
+
+  it("pre-mints the cloud workspace token before creating the client (outside the connect timeout)", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+
+    // A deferred mint stands in for a slow token mint / access-token refresh.
+    let releaseMint!: (result: MintWorkspaceTokenResult) => void;
+    probe.mint.mockImplementationOnce(
+      () =>
+        new Promise<MintWorkspaceTokenResult>((resolve) => {
+          releaseMint = resolve;
+        }),
+    );
+
+    const pending = connectToDaemon(
+      {
+        id: "direct:ws-x",
+        type: "directTcp",
+        endpoint: "ws-x.dev:443",
+        useTls: true,
+        workspaceId: "ws_x",
+      },
+      undefined,
+      probe.deps,
+    );
+
+    // Fix A: the mint (and any refresh it triggers) must complete BEFORE the
+    // client is created — i.e. before connectAndProbe arms its 6s timer — so a
+    // slow refresh can never eat the WS+hello connect budget.
+    await vi.waitFor(() => expect(probe.mint).toHaveBeenCalledWith("ws_x"));
+    expect(probe.createdClients.length).toBe(0);
+
+    releaseMint({ status: "active", token: "wtok_live", expiresAt: 0 });
+    const result = await pending;
+    await result.client.close();
+
+    expect(probe.createdClients.length).toBe(1);
+    expect(probe.createdConfigs()[0]?.transportFactory).toBeDefined();
+  });
+
+  it("rejects the probe (no client created) when the workspace token mint is not active", async () => {
+    const { connectToDaemon } = await import("./test-daemon-connection");
+    probe.mint.mockResolvedValueOnce({ status: "resuming", retryAfterMs: 1500 });
+
+    await expect(
+      connectToDaemon(
+        {
+          id: "direct:ws-y",
+          type: "directTcp",
+          endpoint: "ws-y.dev:443",
+          useTls: true,
+          workspaceId: "ws_y",
+        },
+        undefined,
+        probe.deps,
+      ),
+    ).rejects.toThrow(/status=resuming/);
+
+    // Pre-mint failed before the timed connect, so no client is ever created;
+    // the probe cycle treats this the same as any unreachable-host outcome.
+    expect(probe.createdClients.length).toBe(0);
   });
 
   it("keeps generic transport failures generic when a password was supplied", async () => {

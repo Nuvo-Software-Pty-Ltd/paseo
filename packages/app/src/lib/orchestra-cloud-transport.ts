@@ -113,3 +113,28 @@ export function createWorkspaceTokenRefreshingTransportFactory(input: {
     };
   };
 }
+
+// Like the refreshing factory, but the FIRST connect uses a token that was
+// already minted OUTSIDE the connect timeout (fix A: the workspace-token mint +
+// access-token refresh must not run inside the 6s connect deadline, or a slow
+// refresh opens the WS too late for the `hello` handshake to finish → stuck
+// "connecting"). Subsequent connects (reconnects) fall back to `tokenProvider`,
+// re-minting a fresh short-lived token — the token is never reused across
+// reconnects (same invariant as above).
+export function createSeededWorkspaceTokenTransportFactory(input: {
+  initialToken: string;
+  tokenProvider: () => Promise<string>;
+  webSocketFactory?: WebSocketFactory;
+}): DaemonTransportFactory {
+  let consumed = false;
+  return createWorkspaceTokenRefreshingTransportFactory({
+    ...(input.webSocketFactory ? { webSocketFactory: input.webSocketFactory } : {}),
+    tokenProvider: async () => {
+      if (!consumed) {
+        consumed = true;
+        return input.initialToken;
+      }
+      return input.tokenProvider();
+    },
+  });
+}

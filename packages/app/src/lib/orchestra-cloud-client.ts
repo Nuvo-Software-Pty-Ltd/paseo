@@ -317,6 +317,27 @@ export async function hasSession(): Promise<boolean> {
   return at !== null || rt !== null;
 }
 
+// Fix B: proactively refresh the access token on app launch / foreground so the
+// workspace WebSocket connect path (which mints a token inside a tight connect
+// deadline) rarely has to refresh mid-connect. Best-effort and self-gating:
+//   - no session → no-op (never signals session-expired just because we're
+//     logged out);
+//   - AT comfortably valid → getFreshAccessToken returns it with no network;
+//   - AT near/at expiry → one single-flighted /session/refresh (shared with any
+//     concurrent authedFetch call via refreshSessionInFlight);
+//   - transient failure → swallowed (the reactive authedFetch path remains the
+//     source of truth for real session-expired bounces).
+export async function proactivelyRefreshSession(): Promise<void> {
+  try {
+    if (!(await hasSession())) {
+      return;
+    }
+    await getFreshAccessToken();
+  } catch {
+    // best-effort — a background refresh must never throw or bounce on its own
+  }
+}
+
 // The native OAuth redirect carries the session JWT in the URL FRAGMENT
 // (#orchestra_session=<jwt>) rather than the query string, so the token never
 // lands in server access logs or a Referer header. Keep this in sync with the

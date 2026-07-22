@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WebSocketLike } from "@getpaseo/client/internal/daemon-client-transport-types";
-import { createWorkspaceTokenRefreshingTransportFactory } from "./orchestra-cloud-transport";
+import {
+  createSeededWorkspaceTokenTransportFactory,
+  createWorkspaceTokenRefreshingTransportFactory,
+} from "./orchestra-cloud-transport";
 
 class FakeWebSocket implements WebSocketLike {
   readyState = 0;
@@ -116,5 +119,45 @@ describe("createWorkspaceTokenRefreshingTransportFactory", () => {
       expect(errorHandler).toHaveBeenCalledTimes(1);
       expect(closeHandler).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("createSeededWorkspaceTokenTransportFactory", () => {
+  it("uses the pre-minted token on the first connect without minting, then mints on reconnect", async () => {
+    // The seeded token was minted OUTSIDE the connect timeout (fix A), so the
+    // first connect must not incur a network mint. Reconnects re-mint because
+    // the workspace token is short-lived and must not be reused (transport
+    // invariant).
+    const tokenProvider = vi.fn().mockResolvedValueOnce("reconnect-token");
+    const constructed: FakeWebSocket[] = [];
+    const webSocketFactory = (url: string, opts?: { protocols?: string[] }) => {
+      const ws = new FakeWebSocket(url, opts);
+      constructed.push(ws);
+      return ws;
+    };
+
+    const factory = createSeededWorkspaceTokenTransportFactory({
+      initialToken: "seed-token",
+      tokenProvider,
+      webSocketFactory,
+    });
+
+    // First connect: uses the seeded token, no mint.
+    const transport1 = factory({ url: "wss://example.test/ws" });
+    transport1.onOpen(() => {});
+    await vi.waitFor(() => {
+      expect(constructed.length).toBe(1);
+    });
+    expect(tokenProvider).not.toHaveBeenCalled();
+    expect(constructed[0]?.protocols).toEqual(["paseo.workspace.seed-token"]);
+
+    // Second connect (reconnect): mints a fresh token.
+    const transport2 = factory({ url: "wss://example.test/ws" });
+    transport2.onOpen(() => {});
+    await vi.waitFor(() => {
+      expect(constructed.length).toBe(2);
+    });
+    expect(tokenProvider).toHaveBeenCalledTimes(1);
+    expect(constructed[1]?.protocols).toEqual(["paseo.workspace.reconnect-token"]);
   });
 });

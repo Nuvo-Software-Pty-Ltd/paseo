@@ -27,6 +27,7 @@ import {
   listWorkspaces,
   clearSession,
   hasSession,
+  proactivelyRefreshSession,
   OrchestraSessionExpiredError,
   onOrchestraSessionExpired,
 } from "./orchestra-cloud-client";
@@ -275,6 +276,82 @@ describe("authedFetch proactive refresh", () => {
     expect(apiCalls).toBe(1);
     expect(bounces).toBe(0);
     expect(await AsyncStorage.getItem(RT_KEY)).toBe(RT);
+  });
+});
+
+describe("proactivelyRefreshSession", () => {
+  it("refreshes the session when the access token is near expiry", async () => {
+    await seed(jwt(nowSec() + 60), RT); // 60s < 300s skew → refresh
+    let refreshCalls = 0;
+    routeFetch((url) => {
+      if (url.includes("/session/refresh")) {
+        refreshCalls++;
+        return {
+          status: 200,
+          body: { token: jwt(nowSec() + 3600), refreshToken: "acct_1.fam_abc.secret-2" },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+
+    await proactivelyRefreshSession();
+    expect(refreshCalls).toBe(1);
+    expect(await AsyncStorage.getItem(RT_KEY)).toBe("acct_1.fam_abc.secret-2"); // rotated + stored
+    expect(bounces).toBe(0);
+  });
+
+  it("does NOT hit the network when the access token is comfortably valid", async () => {
+    await seed(jwt(nowSec() + 3600), RT); // > 300s skew → no refresh
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      return { status: 200, body: {} };
+    });
+
+    await proactivelyRefreshSession();
+    expect(calls).toBe(0);
+  });
+
+  it("is a no-op (no network, no bounce) when there is no session", async () => {
+    await seed(null, null); // logged out
+    let calls = 0;
+    routeFetch(() => {
+      calls++;
+      return { status: 200, body: {} };
+    });
+
+    await proactivelyRefreshSession();
+    expect(calls).toBe(0);
+    expect(bounces).toBe(0); // must NOT signal session-expired when simply logged out
+  });
+
+  it("collapses with a concurrent API call into a SINGLE refresh (single-flight)", async () => {
+    await seed(jwt(nowSec() + 60), RT);
+    let refreshCalls = 0;
+    routeFetch((url) => {
+      if (url.includes("/session/refresh")) {
+        refreshCalls++;
+        return {
+          status: 200,
+          body: { token: jwt(nowSec() + 3600), refreshToken: "acct_1.fam_abc.secret-2" },
+        };
+      }
+      return { status: 200, body: { workspaces: [] } };
+    });
+
+    await Promise.all([proactivelyRefreshSession(), listWorkspaces()]);
+    expect(refreshCalls).toBe(1);
+  });
+
+  it("swallows a transient refresh failure without throwing or bouncing", async () => {
+    await seed(jwt(nowSec() + 60), RT);
+    routeFetch((url) =>
+      url.includes("/session/refresh") ? { status: 500 } : { status: 200, body: {} },
+    );
+
+    await expect(proactivelyRefreshSession()).resolves.toBeUndefined();
+    expect(bounces).toBe(0);
+    expect(await AsyncStorage.getItem(RT_KEY)).toBe(RT); // retained — transient, not authoritative
   });
 });
 
