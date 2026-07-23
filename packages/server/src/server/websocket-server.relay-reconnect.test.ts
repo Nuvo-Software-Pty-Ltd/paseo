@@ -83,8 +83,10 @@ vi.mock("./session.js", () => ({
 }));
 
 vi.mock("./push/token-store.js", () => ({
-  PushTokenStore: class {
-    getAllTokens(): string[] {
+  FileBackedPushTokenStore: class {
+    async addToken(): Promise<void> {}
+    async removeToken(): Promise<void> {}
+    async getAllTokens(): Promise<string[]> {
       return [];
     }
   },

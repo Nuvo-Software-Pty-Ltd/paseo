@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
@@ -108,4 +108,21 @@ export function usePushTokenRegistration(params: { client: DaemonClient; serverI
     }
     return unsubscribe;
   }, [client, registerIfPossible]);
+
+  // Re-register the push token whenever the app returns to the foreground.
+  // The daemon may have recycled while we were backgrounded; even though
+  // tokens now persist in DynamoDB across recycles, re-sending on every
+  // foreground is a cheap safety net (a single WS message) that also covers a
+  // token that rotated while the app was backgrounded. Clearing
+  // `lastSentTokenRef` forces the (otherwise deduped) re-send.
+  useEffect(() => {
+    if (isWeb) return;
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        lastSentTokenRef.current = null;
+        void registerIfPossible();
+      }
+    });
+    return () => subscription.remove();
+  }, [registerIfPossible]);
 }

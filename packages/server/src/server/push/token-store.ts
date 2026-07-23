@@ -4,11 +4,30 @@ import { existsSync, readFileSync } from "node:fs";
 import { ensurePrivateFile, writePrivateFileAtomicSync } from "../private-files.js";
 
 /**
- * Store for Expo push tokens.
+ * Persistence for the Expo push tokens registered by connected clients.
  *
- * Tokens are persisted to disk so pushes still work after daemon restarts.
+ * Consumers depend on this interface. On-host the backing is
+ * {@link FileBackedPushTokenStore} (a private JSON file under
+ * `$PASEO_HOME`); in cloud mode the daemon injects `DynamoPushTokenStore`
+ * instead, because `$PASEO_HOME` is tmpfs and is wiped on every ECS task
+ * replacement — a file-backed store would silently drop every token on a
+ * recycle, so turn-complete pushes stop until the app reconnects. See
+ * `dynamo-token-store.ts`.
  */
-export class PushTokenStore {
+export interface PushTokenStore {
+  addToken(token: string): Promise<void>;
+  removeToken(token: string): Promise<void>;
+  getAllTokens(): Promise<string[]>;
+}
+
+/**
+ * File-backed {@link PushTokenStore}. Tokens are persisted to a private
+ * JSON file and reloaded in the constructor, so pushes survive a daemon
+ * restart **on hosts with durable disk** (self-host / desktop). NOT
+ * suitable for the cloud daemon's tmpfs `$PASEO_HOME` — cloud mode uses
+ * `DynamoPushTokenStore`.
+ */
+export class FileBackedPushTokenStore implements PushTokenStore {
   private readonly logger: pino.Logger;
   private tokens: Set<string> = new Set();
   private readonly filePath: string;
@@ -19,7 +38,7 @@ export class PushTokenStore {
     this.loadFromDisk();
   }
 
-  addToken(token: string): void {
+  async addToken(token: string): Promise<void> {
     const normalized = token.trim();
     if (!normalized) return;
     if (this.tokens.has(normalized)) return;
@@ -28,7 +47,7 @@ export class PushTokenStore {
     this.logger.debug({ total: this.tokens.size }, "Added token");
   }
 
-  removeToken(token: string): void {
+  async removeToken(token: string): Promise<void> {
     const normalized = token.trim();
     if (!normalized) return;
     const deleted = this.tokens.delete(normalized);
@@ -38,7 +57,7 @@ export class PushTokenStore {
     }
   }
 
-  getAllTokens(): string[] {
+  async getAllTokens(): Promise<string[]> {
     return Array.from(this.tokens);
   }
 

@@ -5,7 +5,7 @@ import type pino from "pino";
 import { describe, expect, test } from "vitest";
 
 import { PRIVATE_FILE_MODE } from "../private-files.js";
-import { PushTokenStore } from "./token-store.js";
+import { FileBackedPushTokenStore } from "./token-store.js";
 
 const MODE_MASK = 0o777;
 const PERMISSIVE_FILE_MODE = 0o644;
@@ -24,14 +24,14 @@ function modeOf(filePath: string): number {
   return statSync(filePath).mode & MODE_MASK;
 }
 
-describe.skipIf(process.platform === "win32")("PushTokenStore file permissions", () => {
-  test("persists push tokens with private permissions", () => {
+describe.skipIf(process.platform === "win32")("FileBackedPushTokenStore file permissions", () => {
+  test("persists push tokens with private permissions", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "paseo-push-tokens-"));
     const tokenPath = path.join(home, "push-tokens.json");
     try {
-      const store = new PushTokenStore(createLogger(), tokenPath);
+      const store = new FileBackedPushTokenStore(createLogger(), tokenPath);
 
-      store.addToken("ExponentPushToken[test]");
+      await store.addToken("ExponentPushToken[test]");
 
       expect(modeOf(tokenPath)).toBe(PRIVATE_FILE_MODE);
     } finally {
@@ -39,16 +39,16 @@ describe.skipIf(process.platform === "win32")("PushTokenStore file permissions",
     }
   });
 
-  test("repairs existing push token file permissions when loading", () => {
+  test("repairs existing push token file permissions when loading", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "paseo-push-tokens-"));
     const tokenPath = path.join(home, "push-tokens.json");
     try {
       writeFileSync(tokenPath, JSON.stringify({ tokens: ["ExponentPushToken[test]"] }));
       chmodSync(tokenPath, PERMISSIVE_FILE_MODE);
 
-      const store = new PushTokenStore(createLogger(), tokenPath);
+      const store = new FileBackedPushTokenStore(createLogger(), tokenPath);
 
-      expect(store.getAllTokens()).toEqual(["ExponentPushToken[test]"]);
+      expect(await store.getAllTokens()).toEqual(["ExponentPushToken[test]"]);
       expect(modeOf(tokenPath)).toBe(PRIVATE_FILE_MODE);
     } finally {
       rmSync(home, { recursive: true, force: true });

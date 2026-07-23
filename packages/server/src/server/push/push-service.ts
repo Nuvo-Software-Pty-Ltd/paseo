@@ -80,13 +80,16 @@ export class PushService {
       }
 
       const result = (await response.json()) as { data: ExpoPushTicket[] };
-      this.handleTickets(messages, result.data);
+      await this.handleTickets(messages, result.data);
     } catch (error) {
       this.logger.error({ err: error }, "Failed to send push notifications");
     }
   }
 
-  private handleTickets(messages: ExpoPushMessage[], tickets: ExpoPushTicket[]): void {
+  private async handleTickets(
+    messages: ExpoPushMessage[],
+    tickets: ExpoPushTicket[],
+  ): Promise<void> {
     for (let i = 0; i < tickets.length; i++) {
       const ticket = tickets[i];
       const message = messages[i];
@@ -102,7 +105,7 @@ export class PushService {
           ticket.details?.error === "DeviceNotRegistered" ||
           ticket.details?.error === "InvalidCredentials"
         ) {
-          this.tokenStore.removeToken(message.to);
+          await this.tokenStore.removeToken(message.to);
         }
       }
     }

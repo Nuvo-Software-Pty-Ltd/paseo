@@ -42,7 +42,7 @@ import type { WorkspaceGitRuntimeSnapshot, WorkspaceGitService } from "./workspa
 import type { ScopedEnvResolver } from "./env/scoped-env-resolver.js";
 import type { EnvVarStore } from "./env/env-var-store.js";
 import { buildWorkspaceGitMetadataFromSnapshot } from "./workspace-git-metadata.js";
-import { PushTokenStore } from "./push/token-store.js";
+import { FileBackedPushTokenStore, type PushTokenStore } from "./push/token-store.js";
 import { createPushNotificationSender, type PushNotificationSender } from "./push/notifications.js";
 import type { ScriptHealthState } from "./script-health-monitor.js";
 import type { ServiceProxySubsystem } from "./service-proxy.js";
@@ -510,6 +510,7 @@ export class VoiceAssistantWebSocketServer {
     resolveScopedEnv?: ScopedEnvResolver,
     envVarStore?: EnvVarStore,
     triggerService?: TriggerService,
+    pushTokenStore?: PushTokenStore,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.serverId = serverId;
@@ -576,7 +577,9 @@ export class VoiceAssistantWebSocketServer {
     });
 
     const pushLogger = this.logger.child({ module: "push" });
-    this.pushTokenStore = new PushTokenStore(pushLogger, join(paseoHome, "push-tokens.json"));
+    this.pushTokenStore =
+      pushTokenStore ??
+      new FileBackedPushTokenStore(pushLogger, join(paseoHome, "push-tokens.json"));
     this.pushNotificationSender =
       pushNotificationSender ?? createPushNotificationSender(pushLogger, this.pushTokenStore);
 

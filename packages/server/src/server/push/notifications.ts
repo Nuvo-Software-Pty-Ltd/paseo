@@ -17,7 +17,7 @@ export function createPushNotificationSender(
 
   return {
     async send(payload) {
-      const tokens = tokenStore.getAllTokens();
+      const tokens = await tokenStore.getAllTokens();
       logger.info({ tokenCount: tokens.length }, "Sending push notification");
       if (tokens.length === 0) {
         return;
