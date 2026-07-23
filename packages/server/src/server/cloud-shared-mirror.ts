@@ -71,6 +71,14 @@ export interface CloudSharedKeys {
   // both scopes (workspace/project) live in the one partition so every
   // row is already under the per-workspace key.
   workspaceEnvVar(workspaceId: string, scope: string, scopeId: string, key: string): DdbKey;
+  // ANTI-DRIFT: mirror of
+  // `@orchestra/cloud-shared/src/keys.ts:workspacePushToken`. The
+  // DynamoPushTokenStore one-row-per-device partition; replaces the tmpfs
+  // `$PASEO_HOME/push-tokens.json` file store in cloud mode so Expo push
+  // tokens survive daemon recycles. pk = `<ws>#push-token`, sk = `<expo
+  // push token>`. The cloud `LeadingKeys` grant must include
+  // `<ws>#push-token` (+ `<ws>#push-token#*`) for tenant isolation.
+  workspacePushToken(workspaceId: string, token: string): DdbKey;
 }
 
 // ANTI-DRIFT: matches `LOOP_STEP_SEQ_WIDTH` in cloud-shared keys.ts.
@@ -130,6 +138,9 @@ export function createCloudSharedKeys(): CloudSharedKeys {
     },
     workspaceEnvVar(workspaceId: string, scope: string, scopeId: string, key: string): DdbKey {
       return { pk: `${workspaceId}#envvar`, sk: `${scope}#${scopeId}#${key}` };
+    },
+    workspacePushToken(workspaceId: string, token: string): DdbKey {
+      return { pk: `${workspaceId}#push-token`, sk: token };
     },
   };
 }

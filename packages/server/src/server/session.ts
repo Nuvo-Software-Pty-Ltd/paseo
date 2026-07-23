@@ -190,7 +190,7 @@ import { AgentConfigSession } from "./session/agent-config/agent-config-session.
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
-import { PushTokenStore } from "./push/token-store.js";
+import type { PushTokenStore } from "./push/token-store.js";
 import { buildMetadataPrompt } from "../utils/build-metadata-prompt.js";
 import {
   archivePersistedWorkspaceRecord,
@@ -2266,7 +2266,7 @@ export class Session {
         await this.handleListCommandsRequest(msg);
         return;
       case "register_push_token":
-        this.handleRegisterPushToken(msg.token);
+        await this.handleRegisterPushToken(msg.token);
         return;
     }
   }
@@ -3878,8 +3878,8 @@ export class Session {
   /**
    * Handle push token registration
    */
-  private handleRegisterPushToken(token: string): void {
-    this.pushTokenStore.addToken(token);
+  private async handleRegisterPushToken(token: string): Promise<void> {
+    await this.pushTokenStore.addToken(token);
     this.sessionLogger.info("Registered push token");
   }
 

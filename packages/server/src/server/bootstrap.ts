@@ -134,6 +134,8 @@ import {
 import { DynamoProjectStore } from "./project/dynamo-project-store.js";
 import { FileBackedEnvVarStore, type EnvVarStore } from "./env/env-var-store.js";
 import { DynamoEnvVarStore } from "./env/dynamo-env-var-store.js";
+import { FileBackedPushTokenStore, type PushTokenStore } from "./push/token-store.js";
+import { DynamoPushTokenStore } from "./push/dynamo-token-store.js";
 import { createScopedEnvResolver, resolveAmbientContainerId } from "./env/scoped-env-resolver.js";
 import { createProjectForCwdResolver } from "./env/project-for-cwd.js";
 import { ChatService } from "./chat/chat-service.js";
@@ -1647,6 +1649,7 @@ export async function createPaseoDaemon(
               resolveScopedEnv,
               d3Stores.envVar,
               triggerService,
+              d3Stores.pushToken,
             );
 
             if (relayEnabled) {
@@ -2094,6 +2097,15 @@ export interface D3DaemonStores {
    */
   envVar: EnvVarStore;
   /**
+   * Push-token store. On-host this is `FileBackedPushTokenStore`
+   * (`$PASEO_HOME/push-tokens.json`); cloud mode swaps in
+   * `DynamoPushTokenStore` (partition `<ws>#push-token`) because the tmpfs
+   * file is wiped on every ECS task replacement — losing every registered
+   * device token and silently dropping turn-complete pushes until the app
+   * reconnects. Both satisfy the `PushTokenStore` interface.
+   */
+  pushToken: PushTokenStore;
+  /**
    * The DynamoLike client backing the four stores in cloud mode.
    * `null` in on-host mode (no DDB construction). The caller uses
    * this to issue the boot-time self-probe (`selfProbeDdb`).
@@ -2124,6 +2136,7 @@ export async function buildD3DaemonStores(deps: {
         logger,
       ),
       envVar: new FileBackedEnvVarStore({ paseoHome, logger }),
+      pushToken: new FileBackedPushTokenStore(logger, path.join(paseoHome, "push-tokens.json")),
       dynamoLike: null,
     };
   }
@@ -2177,6 +2190,11 @@ export async function buildD3DaemonStores(deps: {
       workspaceId: cloudWorkspaceId,
       logger,
     }),
+    pushToken: new DynamoPushTokenStore({
+      client: dynamoLike,
+      workspaceId: cloudWorkspaceId,
+      logger,
+    }),
     dynamoLike,
   };
 }
@@ -2207,6 +2225,11 @@ export const DAEMON_OWNED_PARTITION_PREFIXES = [
   // LeadingKeys) must grant `<ws>#envvar` + `<ws>#envvar#*` alongside
   // this; add both together.
   "envvar",
+  // Cloud push-token store partition (`<ws>#push-token`). The cloud IAM
+  // template (workspace-role-template.ts WorkspaceDynamoDb LeadingKeys)
+  // must grant `<ws>#push-token` + `<ws>#push-token#*` alongside this; add
+  // both together.
+  "push-token",
 ] as const;
 
 export type DaemonOwnedPartitionPrefix = (typeof DAEMON_OWNED_PARTITION_PREFIXES)[number];
