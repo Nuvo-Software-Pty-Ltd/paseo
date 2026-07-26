@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 
 import {
   ensureCloudWorkspaceRepoCloned,
+  isCloudRepairableMissingWorkspace,
   selectProjectRepairClone,
 } from "./cloud-workspace-repair.js";
 import { deriveRepoUrlFromRemoteProjectKey } from "./workspace-registry-model.js";
@@ -118,6 +119,109 @@ describe("selectProjectRepairClone", () => {
     const cwd = `/workspace/ws_other/Owner__repo`;
     const projects = [project({ rootPath: cwd })];
     expect(selectProjectRepairClone({ cwd, workspaceId: WS, projects })).toBeNull();
+  });
+});
+
+describe("isCloudRepairableMissingWorkspace", () => {
+  // The predicate is cloud-gated, and PASEO_CLOUD_MODE is unset in the test env.
+  // Set it per-test so the off-cloud case below is a genuine control.
+  function inCloudMode<T>(fn: () => T): T {
+    const previous = process.env.PASEO_CLOUD_MODE;
+    process.env.PASEO_CLOUD_MODE = "1";
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.PASEO_CLOUD_MODE;
+      else process.env.PASEO_CLOUD_MODE = previous;
+    }
+  }
+
+  it("defers a secondary repo the lazy repair can re-clone (the vanished-sidebar bug)", () => {
+    const cwd = `/workspace/${WS}/Nuvo-Software-Pty-Ltd__agora`;
+    const projects = [
+      project({
+        projectId: "remote:github.com/Nuvo-Software-Pty-Ltd/agora",
+        rootPath: cwd,
+        displayName: "Nuvo-Software-Pty-Ltd/agora",
+        repoUrl: "https://github.com/Nuvo-Software-Pty-Ltd/agora",
+      }),
+    ];
+
+    expect(inCloudMode(() => isCloudRepairableMissingWorkspace({ cwd, projects }))).toBe(true);
+  });
+
+  it("defers a project row whose repoUrl was nulled but keeps its remote: key", () => {
+    const cwd = `/workspace/${WS}/Owner__repo`;
+    const projects = [project({ rootPath: cwd, repoUrl: null })];
+
+    expect(inCloudMode(() => isCloudRepairableMissingWorkspace({ cwd, projects }))).toBe(true);
+  });
+
+  it("defers this container's primary .git-canonical clone, which carries no project row", () => {
+    // Its identity lives in the auth-service describe-workspace lookup, so the
+    // legacy repair restores it even with no matching durable project.
+    expect(
+      inCloudMode(() =>
+        isCloudRepairableMissingWorkspace({
+          cwd: `/workspace/${WS}/.git-canonical`,
+          projects: [],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("also defers another workspace's leftover .git-canonical (matches the repair's own scoping)", () => {
+    // Pins the deliberate choice documented on the predicate: the ws id comes
+    // from the path, exactly as ensureCloudWorkspaceRepoCloned derives it, so
+    // the deferral set and the repair set cannot drift. The cost is that a relic
+    // row lingers in the list until opened; the benefit is one definition of
+    // "restorable".
+    expect(
+      inCloudMode(() =>
+        isCloudRepairableMissingWorkspace({
+          cwd: "/workspace/ws_b6e79fef/.git-canonical",
+          projects: [],
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("archives stale routine worktrees under the daemon home", () => {
+    // The 38 `/var/lib/paseo/worktrees/...` records from scheduled runs: genuinely
+    // gone with the tmpfs, and re-cloning a parent would not bring them back.
+    expect(
+      inCloudMode(() =>
+        isCloudRepairableMissingWorkspace({
+          cwd: "/var/lib/paseo/worktrees/3qsp2k16/routine-34b3a34b-201d359b",
+          projects: [],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("archives a nested paseo worktree below a repairable clone", () => {
+    const root = `/workspace/${WS}/Owner__repo`;
+    const projects = [project({ rootPath: root })];
+
+    expect(
+      inCloudMode(() =>
+        isCloudRepairableMissingWorkspace({ cwd: `${root}/.paseo/worktrees/foo`, projects }),
+      ),
+    ).toBe(false);
+  });
+
+  it("archives once the durable project row is archived (the deferral is self-bounding)", () => {
+    const cwd = `/workspace/${WS}/Owner__repo`;
+    const projects = [project({ rootPath: cwd, archivedAt: NOW })];
+
+    expect(inCloudMode(() => isCloudRepairableMissingWorkspace({ cwd, projects }))).toBe(false);
+  });
+
+  it("returns false off-cloud, so a deleted desktop directory still archives", () => {
+    const cwd = `/workspace/${WS}/Owner__repo`;
+    const projects = [project({ rootPath: cwd })];
+
+    expect(isCloudRepairableMissingWorkspace({ cwd, projects })).toBe(false);
   });
 });
 

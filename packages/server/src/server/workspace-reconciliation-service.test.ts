@@ -61,6 +61,16 @@ function createTestRegistries() {
   return { projects, workspaces, projectRegistry, workspaceRegistry };
 }
 
+// Top-level (callback-depth 1) predicate stubs — oxlint max-nested-callbacks = 3,
+// and the deferral tests below already sit three describe/test levels deep.
+function alwaysDefer(): boolean {
+  return true;
+}
+
+function neverDefer(): boolean {
+  return false;
+}
+
 function createTestLogger() {
   const logger = {
     child: () => logger,
@@ -775,6 +785,125 @@ describe("WorkspaceReconciliationService", () => {
       },
     ]);
     expect(projects.get("p1")!.archivedAt).toBeFalsy();
+  });
+
+  describe("shouldDeferMissingWorkspaceArchive", () => {
+    // FORK(cloud): the cloud daemon's /workspace tree is tmpfs and empty on every
+    // boot, so an unguarded directory_missing sweep archived 42 of 43 workspaces
+    // moments after bootstrap rehydrated them from DynamoDB — emptying the user's
+    // sidebar on each recycle. The predicate lets the caller mark a missing
+    // directory as restorable-on-open instead of gone.
+    function seedGhostWorkspace() {
+      const registries = createTestRegistries();
+      registries.projects.set(
+        "p1",
+        createPersistedProjectRecord({
+          projectId: "p1",
+          rootPath: "/tmp/does-not-exist-defer-test",
+          kind: "non_git",
+          displayName: "ghost",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      registries.workspaces.set(
+        "w1",
+        createPersistedWorkspaceRecord({
+          workspaceId: "w1",
+          projectId: "p1",
+          cwd: "/tmp/does-not-exist-defer-test",
+          kind: "directory",
+          displayName: "ghost",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      );
+      return registries;
+    }
+
+    test("skips the archive when the predicate defers", async () => {
+      const { workspaces, projectRegistry, workspaceRegistry } = seedGhostWorkspace();
+
+      const result = await new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        shouldDeferMissingWorkspaceArchive: alwaysDefer,
+      }).runOnce();
+
+      expect(result.changesApplied).toEqual([]);
+      expect(workspaces.get("w1")!.archivedAt).toBeFalsy();
+    });
+
+    test("archives when the predicate declines", async () => {
+      const { workspaces, projectRegistry, workspaceRegistry } = seedGhostWorkspace();
+
+      const result = await new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        shouldDeferMissingWorkspaceArchive: neverDefer,
+      }).runOnce();
+
+      expect(result.changesApplied).toEqual([
+        {
+          kind: "workspace_archived",
+          workspaceId: "w1",
+          directory: "/tmp/does-not-exist-defer-test",
+          reason: "directory_missing",
+        },
+      ]);
+      expect(workspaces.get("w1")!.archivedAt).toBeTruthy();
+    });
+
+    test("archives when no predicate is supplied (upstream parity)", async () => {
+      const { workspaces, projectRegistry, workspaceRegistry } = seedGhostWorkspace();
+
+      await new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+      }).runOnce();
+
+      expect(workspaces.get("w1")!.archivedAt).toBeTruthy();
+    });
+
+    test("consults the predicate once per missing workspace, with the full project list", async () => {
+      // Pins the no-extra-registry-call contract: reconcile passes the project
+      // list it already loaded, including archived rows, because the cloud
+      // selector applies its own archivedAt filter.
+      const { projects, projectRegistry, workspaceRegistry } = seedGhostWorkspace();
+      projects.set(
+        "p-archived",
+        createPersistedProjectRecord({
+          projectId: "p-archived",
+          rootPath: "/tmp/does-not-exist-defer-test-archived",
+          kind: "git",
+          displayName: "archived",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          archivedAt: timestamp,
+        }),
+      );
+      const listSpy = vi.spyOn(projectRegistry, "list");
+      const predicate = vi.fn(alwaysDefer);
+
+      await new WorkspaceReconciliationService({
+        projectRegistry,
+        workspaceRegistry,
+        logger: createTestLogger(),
+        shouldDeferMissingWorkspaceArchive: predicate,
+      }).runOnce();
+
+      expect(listSpy).toHaveBeenCalledTimes(1);
+      expect(predicate).toHaveBeenCalledTimes(1);
+      expect(predicate).toHaveBeenCalledWith({
+        cwd: "/tmp/does-not-exist-defer-test",
+        projects: expect.arrayContaining([
+          expect.objectContaining({ projectId: "p-archived", archivedAt: timestamp }),
+        ]),
+      });
+    });
   });
 
   test("does not log reconciliation when no changes are applied", async () => {
