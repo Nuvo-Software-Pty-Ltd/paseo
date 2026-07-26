@@ -20,6 +20,12 @@ function normalizePosixPath(p: string): string {
   return trimmed.length > 0 ? trimmed : "/";
 }
 
+// Matches a path inside SOME cloud container's `/workspace/<ws>` tree, capturing
+// the `ws_*` id. Shared by the repair itself and the reconciliation deferral
+// below so the "is this a cloud workspace path" test can never diverge between
+// the two.
+const CLOUD_WORKSPACE_PATH_PATTERN = /^\/workspace\/(ws_[A-Za-z0-9_-]+)(\/|$)/;
+
 // workspace-repair — the cloud daemon's /workspace tree is tmpfs and wiped on
 // every recycle, but the project store is durable (DynamoDB). The lazy
 // "re-clone on missing path" repair historically restored only the PRIMARY
@@ -87,6 +93,57 @@ export function selectProjectRepairClone(input: {
   };
 }
 
+// COMPAT(workspaceRepairOnMissing): reconciliation's counterpart to the repair
+// above. `WorkspaceReconciliationService` archives any active workspace whose
+// directory is gone — correct on the desktop, catastrophic in cloud, where the
+// whole /workspace tree is tmpfs and empty on every boot. Left alone it archived
+// 42 of 43 workspaces ~13ms after bootstrap rehydrated them from DynamoDB,
+// emptying the user's sidebar on every recycle.
+//
+// This predicate answers "is this missing directory a tmpfs casualty the lazy
+// open-path repair can restore?" — if so, reconciliation leaves the record
+// alone and `ensureCloudWorkspaceRepoCloned` re-clones it when the user opens
+// it. Deliberately pure and synchronous: it runs against the project list
+// reconcile has already loaded, so it costs no I/O and no cold-start time (we
+// do NOT pre-clone at boot — cold start is already over budget).
+//
+// The deferral is self-bounding: it is recomputed from the live durable list on
+// every pass, so the moment the project row is archived or removed the next
+// pass archives the workspace normally. No counter or TTL is needed — and none
+// would survive anyway, since the session call site builds a fresh service per
+// call.
+//
+// Returns false off-cloud, so desktop behavior is byte-identical to upstream.
+export function isCloudRepairableMissingWorkspace(input: {
+  cwd: string;
+  projects: PersistedProjectRecord[];
+}): boolean {
+  if (!isPaseoCloudMode()) {
+    return false;
+  }
+  const match = CLOUD_WORKSPACE_PATH_PATTERN.exec(input.cwd);
+  if (!match) {
+    return false;
+  }
+  const workspaceId = match[1]!;
+  // Any project row (primary or secondary) the selector can re-clone.
+  if (selectProjectRepairClone({ cwd: input.cwd, workspaceId, projects: input.projects })) {
+    return true;
+  }
+  // The primary clone often carries no durable project row of its own — its
+  // identity lives in the auth-service describe-workspace lookup, which the
+  // legacy repair path uses. Defer on it too.
+  //
+  // Note this keys off the ws id in the PATH, not the container's own id, so a
+  // relic row from another workspace also defers. That is deliberate: the
+  // invariant is "defer exactly when the repair would attempt a restore", and
+  // `ensureCloudWorkspaceRepoCloned` derives its workspace id the same way. A
+  // deferral the repair cannot honor surfaces as a visible error on open, which
+  // is strictly better than the silent divergence we'd get from two different
+  // notions of which paths are restorable.
+  return normalizePosixPath(input.cwd) === `/workspace/${workspaceId}/.git-canonical`;
+}
+
 // COMPAT(workspaceRepairOnMissing): the cloud container-local /workspace/<id>
 // tree is tmpfs and wiped on every ECS roll, while the project store is durable
 // (DynamoDB). This repair re-clones a missing path from the user's GitHub repo
@@ -117,7 +174,7 @@ export async function ensureCloudWorkspaceRepoCloned(input: {
   if (!isPaseoCloudMode()) {
     return;
   }
-  const match = /^\/workspace\/(ws_[A-Za-z0-9_-]+)(\/|$)/.exec(cwd);
+  const match = CLOUD_WORKSPACE_PATH_PATTERN.exec(cwd);
   if (!match) {
     return;
   }

@@ -65,6 +65,15 @@ export interface WorkspaceReconciliationServiceOptions {
   intervalMs?: number;
   onChanges?: (changes: ReconciliationChange[]) => void;
   workspaceGitService?: Pick<WorkspaceGitService, "getWorkspaceGitMetadata">;
+  // FORK(cloud): escape hatch for environments where a missing directory is
+  // recoverable rather than deleted — the cloud daemon's /workspace tree is
+  // tmpfs and empty on every boot, while the project store is durable, so the
+  // lazy repair can re-clone on open. Return true to skip the directory_missing
+  // archive for that workspace. Omitted/false → upstream behavior exactly.
+  shouldDeferMissingWorkspaceArchive?: (input: {
+    cwd: string;
+    projects: PersistedProjectRecord[];
+  }) => boolean;
 }
 
 export class WorkspaceReconciliationService {
@@ -74,6 +83,9 @@ export class WorkspaceReconciliationService {
   private readonly intervalMs: number;
   private readonly onChanges: ((changes: ReconciliationChange[]) => void) | null;
   private readonly workspaceGitService: Pick<WorkspaceGitService, "getWorkspaceGitMetadata"> | null;
+  private readonly shouldDeferMissingWorkspaceArchive:
+    | ((input: { cwd: string; projects: PersistedProjectRecord[] }) => boolean)
+    | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -84,6 +96,7 @@ export class WorkspaceReconciliationService {
     this.intervalMs = options.intervalMs ?? DEFAULT_RECONCILE_INTERVAL_MS;
     this.onChanges = options.onChanges ?? null;
     this.workspaceGitService = options.workspaceGitService ?? null;
+    this.shouldDeferMissingWorkspaceArchive = options.shouldDeferMissingWorkspaceArchive ?? null;
   }
 
   start(): void {
@@ -135,7 +148,21 @@ export class WorkspaceReconciliationService {
     }
 
     // 1. Archive workspaces whose directories no longer exist
-    const missingWorkspaces = activeWorkspaces.filter((workspace) => !existsSync(workspace.cwd));
+    const missingWorkspaces = activeWorkspaces.filter((workspace) => {
+      if (existsSync(workspace.cwd)) return false;
+      // FORK(cloud): pass the FULL list — the deferral selector applies its own
+      // archivedAt filter, matching how the repair path calls it.
+      if (
+        this.shouldDeferMissingWorkspaceArchive?.({ cwd: workspace.cwd, projects: allProjects })
+      ) {
+        this.logger.debug(
+          { workspaceId: workspace.workspaceId, cwd: workspace.cwd },
+          "Deferring directory_missing archive — restorable from the durable project store",
+        );
+        return false;
+      }
+      return true;
+    });
     await Promise.all(
       missingWorkspaces.map(async (workspace) => {
         const timestamp = new Date().toISOString();

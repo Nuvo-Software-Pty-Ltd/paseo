@@ -203,7 +203,10 @@ import {
 import { createJwksWorkspaceAuthCallback } from "./cloud-auth.js";
 import { createCloudTurnEndHook } from "./cloud-turn-end-hook.js";
 import { maybeExposeGithubTokenToEnv } from "./cloud-clone.js";
-import { ensureCloudWorkspaceRepoCloned } from "./cloud-workspace-repair.js";
+import {
+  ensureCloudWorkspaceRepoCloned,
+  isCloudRepairableMissingWorkspace,
+} from "./cloud-workspace-repair.js";
 import { buildGithubTokenEnvDefaults } from "./cloud-github-token.js";
 import { materializeGitCredentialHelper } from "./cloud-git-credential.js";
 import { ensureToolchainDirs, isPaseoCloudMode } from "./paseo-env.js";
@@ -994,6 +997,10 @@ export async function createPaseoDaemon(
     workspaceRegistry,
     logger,
     workspaceGitService,
+    // Without this, the pass below archives every cloud workspace it just
+    // rehydrated: /workspace is tmpfs and empty this early in boot. No-ops
+    // off-cloud.
+    shouldDeferMissingWorkspaceArchive: isCloudRepairableMissingWorkspace,
   });
   void (async () => {
     try {

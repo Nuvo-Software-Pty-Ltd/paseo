@@ -79,7 +79,10 @@ import {
   fetchWorkspaceRepoUrl,
   parseGitHubRepoUrl,
 } from "./cloud-clone.js";
-import { ensureCloudWorkspaceRepoCloned } from "./cloud-workspace-repair.js";
+import {
+  ensureCloudWorkspaceRepoCloned,
+  isCloudRepairableMissingWorkspace,
+} from "./cloud-workspace-repair.js";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { getErrorMessage, getErrorMessageOr } from "@getpaseo/protocol/error-utils";
 import { getAgentStatusPriority } from "@getpaseo/protocol/agent-state-bucket";
@@ -5282,6 +5285,11 @@ export class Session {
       workspaceRegistry: this.workspaceRegistry,
       logger: this.sessionLogger,
       workspaceGitService: this.workspaceGitService,
+      // Load-bearing alongside the identical wiring in bootstrap: this pass runs
+      // on the first fetch_workspaces_request, and its archives also tear the
+      // workspace down. Fixing only boot would let the first client fetch
+      // re-destroy the list.
+      shouldDeferMissingWorkspaceArchive: isCloudRepairableMissingWorkspace,
     });
     const result = await service.runOnce();
     const changedWorkspaceIds = new Set<string>();
