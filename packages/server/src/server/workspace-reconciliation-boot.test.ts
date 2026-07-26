@@ -73,7 +73,13 @@ function archivedWorkspaceCwds(result: { changesApplied: Array<Record<string, un
     .map((change) => change.directory);
 }
 
-describe("cloud boot: bootstrap then reconcile", () => {
+// Linux-only, like the daemon this reproduces. `bootstrapWorkspaceRegistries`
+// normalizes checkout paths through `node:path.resolve`, which on a Windows CI
+// runner rewrites `/workspace/<ws>/...` to a drive-letter/backslash path — so the
+// materialized records would no longer match the POSIX literals asserted below.
+// That is the same rewrite cloud-workspace-repair.ts avoids by hand-rolling its
+// path normalization; the code under test never executes off the Linux daemon.
+describe.skipIf(process.platform === "win32")("cloud boot: bootstrap then reconcile", () => {
   let tmpDir: string;
   let paseoHome: string;
   let agentStorage: AgentStorage;
