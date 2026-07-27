@@ -1101,8 +1101,8 @@ export function NewWorkspaceScreen({
     useWorkspaceIsolation({
       supportsMultiplicity: supportsWorkspaceMultiplicity,
       selectedIsGit: resolveSelectedIsGit({
-        probeIsGit: checkoutStatusQuery.data?.isGit,
-        projectCanCreateWorktree: selectedProject?.canCreateWorktree,
+        checkoutStatus: checkoutStatusQuery.data,
+        selectedProject,
       }),
     });
 

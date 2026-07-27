@@ -9,9 +9,14 @@
 // So fall back to the durable project kind (`canCreateWorktree`, derived from
 // the persisted projectKind), which survives a recycle; the server repairs the
 // clone before branching off it.
+//
+// Takes the nullable records rather than pre-narrowed booleans so the call site
+// stays free of optional chaining — `NewWorkspaceScreen` sits right on the
+// oxlint complexity ceiling.
 export function resolveSelectedIsGit(input: {
-  probeIsGit: boolean | undefined;
-  projectCanCreateWorktree: boolean | undefined;
+  checkoutStatus: { isGit: boolean } | null | undefined;
+  selectedProject: { canCreateWorktree: boolean } | null | undefined;
 }): boolean {
-  return input.probeIsGit === true || input.projectCanCreateWorktree === true;
+  if (input.checkoutStatus?.isGit === true) return true;
+  return input.selectedProject?.canCreateWorktree === true;
 }

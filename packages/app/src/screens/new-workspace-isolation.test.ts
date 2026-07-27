@@ -10,8 +10,8 @@ describe("resolveSelectedIsGit", () => {
     // "Directory not found: /workspace/ws_.../Nuvo-Software-Pty-Ltd__sii-google-ads".
     expect(
       resolveSelectedIsGit({
-        probeIsGit: false,
-        projectCanCreateWorktree: true,
+        checkoutStatus: { isGit: false },
+        selectedProject: { canCreateWorktree: true },
       }),
     ).toBe(true);
   });
@@ -19,8 +19,8 @@ describe("resolveSelectedIsGit", () => {
   it("keeps it available while the probe is still in flight", () => {
     expect(
       resolveSelectedIsGit({
-        probeIsGit: undefined,
-        projectCanCreateWorktree: true,
+        checkoutStatus: undefined,
+        selectedProject: { canCreateWorktree: true },
       }),
     ).toBe(true);
   });
@@ -28,8 +28,8 @@ describe("resolveSelectedIsGit", () => {
   it("trusts a positive probe even for a project with no durable git kind", () => {
     expect(
       resolveSelectedIsGit({
-        probeIsGit: true,
-        projectCanCreateWorktree: false,
+        checkoutStatus: { isGit: true },
+        selectedProject: { canCreateWorktree: false },
       }),
     ).toBe(true);
   });
@@ -37,14 +37,14 @@ describe("resolveSelectedIsGit", () => {
   it("stays false for a genuinely non-git project", () => {
     expect(
       resolveSelectedIsGit({
-        probeIsGit: false,
-        projectCanCreateWorktree: false,
+        checkoutStatus: { isGit: false },
+        selectedProject: { canCreateWorktree: false },
       }),
     ).toBe(false);
     expect(
       resolveSelectedIsGit({
-        probeIsGit: undefined,
-        projectCanCreateWorktree: undefined,
+        checkoutStatus: undefined,
+        selectedProject: undefined,
       }),
     ).toBe(false);
   });
