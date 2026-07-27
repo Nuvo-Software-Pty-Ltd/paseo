@@ -62,6 +62,7 @@ import {
   type PickerCheckoutRequest,
   type PickerItem,
 } from "./new-workspace-picker-item";
+import { resolveSelectedIsGit } from "./new-workspace-isolation";
 import { findCheckoutHintPrAttachment, syncPickerPrAttachment } from "./new-workspace-picker-state";
 
 function resolveCheckoutRequest(
@@ -1099,7 +1100,10 @@ export function NewWorkspaceScreen({
   const { effectiveIsolation, setIsolation, canCreateWorktree, showRefPicker } =
     useWorkspaceIsolation({
       supportsMultiplicity: supportsWorkspaceMultiplicity,
-      selectedIsGit: checkoutStatusQuery.data?.isGit === true,
+      selectedIsGit: resolveSelectedIsGit({
+        checkoutStatus: checkoutStatusQuery.data,
+        selectedProject,
+      }),
     });
 
   const branchSuggestionsQuery = useQuery({

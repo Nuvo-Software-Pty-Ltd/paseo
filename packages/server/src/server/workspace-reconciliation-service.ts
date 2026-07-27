@@ -199,7 +199,18 @@ export class WorkspaceReconciliationService {
     const projectsToReconcile = activeProjects.filter((project) => {
       if (project.archivedAt) return false;
       if (archivedProjectIds.has(project.projectId)) return false;
-      if (!existsSync(project.rootPath)) return false;
+      if (!existsSync(project.rootPath)) {
+        // Skipped, not archived: in cloud the rootPath is tmpfs and absent until
+        // the lazy repair re-clones it, so archiving here would delete a healthy
+        // project. The cost is that a genuinely unrepairable row is never cleaned
+        // up and keeps being offered in the UI — log it so that ghost is at least
+        // diagnosable rather than silent.
+        this.logger.debug(
+          { projectId: project.projectId, rootPath: project.rootPath },
+          "Skipping project reconciliation — rootPath missing",
+        );
+        return false;
+      }
       return true;
     });
     await Promise.all(
