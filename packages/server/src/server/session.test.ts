@@ -119,6 +119,10 @@ const paseoWorktreeServiceMocks = vi.hoisted(() => ({
   createPaseoWorktree: vi.fn(),
 }));
 
+const cloudWorkspaceRepairMocks = vi.hoisted(() => ({
+  ensureCloudWorkspaceRepoCloned: vi.fn(async () => {}),
+}));
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -160,6 +164,14 @@ vi.mock("./paseo-worktree-service.js", async (importOriginal) => {
   return {
     ...actual,
     createPaseoWorktree: paseoWorktreeServiceMocks.createPaseoWorktree,
+  };
+});
+
+vi.mock("./cloud-workspace-repair.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./cloud-workspace-repair.js")>();
+  return {
+    ...actual,
+    ensureCloudWorkspaceRepoCloned: cloudWorkspaceRepairMocks.ensureCloudWorkspaceRepoCloned,
   };
 });
 
@@ -4502,6 +4514,81 @@ describe("agent config setters", () => {
         accepted: false,
         error: "thinking boom",
       },
+    });
+  });
+});
+
+// COMPAT(workspaceRepairOnMissing): cloud's /workspace tree is tmpfs, so a valid
+// project's clone is absent after every recycle and must be re-cloned lazily
+// before any handler concludes the directory is gone. The repair was originally
+// wired into open_project and the worktree branch only; these handlers bypassed
+// it and failed hard with "Directory not found" — which the New Workspace screen
+// hit, because a missing clone reads as non-git and silently downgraded a
+// Worktree request into the unrepaired `directory` branch.
+describe("cloud workspace repair call sites", () => {
+  const repair = cloudWorkspaceRepairMocks.ensureCloudWorkspaceRepoCloned;
+
+  afterEach(() => {
+    repair.mockClear();
+  });
+
+  test("workspace.create.request{directory} repairs before the existence check", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({ messages });
+    const missing = "/workspace/ws_3ea432ff/Nuvo-Software-Pty-Ltd__sii-google-ads";
+
+    await session.handleMessage({
+      type: "workspace.create.request",
+      requestId: "req-create-local",
+      source: { kind: "directory", path: missing, projectId: "remote:github.com/Nuvo/x" },
+    } as SessionInboundMessage);
+
+    expect(repair).toHaveBeenCalledWith(expect.objectContaining({ cwd: missing }));
+    // The repair is stubbed out here, so the directory is still missing and the
+    // pre-existing error still surfaces. What this pins is the ordering: the
+    // repair ran first and had its chance.
+    const response = messages.find((m) => m.type === "workspace.create.response");
+    expect(response).toMatchObject({
+      payload: { error: `Directory not found: ${missing}`, errorCode: "directory_not_found" },
+    });
+  });
+
+  test("project.add.request repairs before the existence check", async () => {
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({ messages });
+    const missing = "/workspace/ws_3ea432ff/Nuvo-Software-Pty-Ltd__sii-google-ads";
+
+    await session.handleMessage({
+      type: "project.add.request",
+      requestId: "req-add-project",
+      cwd: missing,
+    } as SessionInboundMessage);
+
+    expect(repair).toHaveBeenCalledWith(expect.objectContaining({ cwd: missing }));
+    const response = messages.find((m) => m.type === "project.add.response");
+    expect(response).toMatchObject({
+      payload: { error: `Directory not found: ${missing}`, errorCode: "directory_not_found" },
+    });
+  });
+
+  test("a repair failure degrades to the original error rather than replacing it", async () => {
+    // A missing ORCHESTRA_AUTH_INTERNAL_URL / a clone error must not swap the
+    // precise "directory_not_found" the client keys its message off for an
+    // opaque one. The failure is logged; the handler re-checks and falls through.
+    const messages: SessionOutboundMessage[] = [];
+    const session = createSessionForTest({ messages });
+    const missing = "/workspace/ws_3ea432ff/Owner__repo";
+    repair.mockRejectedValueOnce(new Error("ORCHESTRA_INTERNAL_HMAC_KEY is not set"));
+
+    await session.handleMessage({
+      type: "workspace.create.request",
+      requestId: "req-create-repair-fails",
+      source: { kind: "directory", path: missing },
+    } as SessionInboundMessage);
+
+    const response = messages.find((m) => m.type === "workspace.create.response");
+    expect(response).toMatchObject({
+      payload: { error: `Directory not found: ${missing}`, errorCode: "directory_not_found" },
     });
   });
 });

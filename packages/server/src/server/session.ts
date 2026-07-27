@@ -5707,6 +5707,24 @@ export class Session {
     });
   }
 
+  // COMPAT(workspaceRepairOnMissing): `ensureCloudWorkspacePathExists` for the
+  // handlers that already have a precise "directory_not_found" failure to fall
+  // back on. A repair failure (missing internal-auth env, clone error, no
+  // durable identity) must NOT replace that specific error with an opaque one —
+  // the caller re-checks existence right after, so a failed repair degrades to
+  // exactly the pre-fix behavior. The cause is logged and, for interactive
+  // callers, already surfaced as a failed `workspace_setup_progress` emit.
+  private async repairCloudWorkspacePathBestEffort(cwd: string, origin: string): Promise<void> {
+    try {
+      await this.ensureCloudWorkspacePathExists(cwd);
+    } catch (error) {
+      this.sessionLogger.warn(
+        { err: error, cwd, origin },
+        "Cloud workspace repair failed; falling back to the directory existence check",
+      );
+    }
+  }
+
   // Build the bootstrap snapshot used by `flushBootstrappedWorkspaceUpdates`
   // to decide which pending updates to drop. Captures the status,
   // statusEnteredAt, and activityAt (parsed to ms) for each workspace entry
@@ -5784,6 +5802,13 @@ export class Session {
     }
 
     const cwd = expandTilde(request.source.path);
+    // COMPAT(workspaceRepairOnMissing): cloud's /workspace tree is tmpfs and is
+    // wiped on every recycle, so a perfectly valid project's clone can be absent.
+    // Re-clone it BEFORE the existence check — same ordering as
+    // `handleOpenProjectRequest` and the worktree branch below. Without this a
+    // recycled workspace fails "Directory not found" on a create that the
+    // worktree branch would have self-healed. No-op on-host / when present.
+    await this.repairCloudWorkspacePathBestEffort(cwd, "workspace.create.request");
     const directoryExists = await this.filesystem.isDirectory(cwd).catch(() => false);
     if (!directoryExists) {
       this.emit({
@@ -6185,6 +6210,9 @@ export class Session {
   ): Promise<void> {
     const requestedCwd = request.cwd;
     const cwd = expandTilde(requestedCwd);
+    // COMPAT(workspaceRepairOnMissing): as in `handleWorkspaceCreateLocal` —
+    // re-clone a tmpfs-wiped cloud clone before deciding the directory is gone.
+    await this.repairCloudWorkspacePathBestEffort(cwd, "project.add.request");
     const directoryExists = await this.filesystem.isDirectory(cwd).catch(() => false);
     if (!directoryExists) {
       this.sessionLogger.info(
@@ -6583,6 +6611,14 @@ export class Session {
       setupContinuation?: CreatePaseoWorktreeSetupContinuationInput;
     },
   ): Promise<CreatePaseoWorktreeWorkflowResult> {
+    // COMPAT(workspaceRepairOnMissing): the single choke point every worktree
+    // creation passes through (`workspace.create.request{worktree}`,
+    // `create_paseo_worktree_request`, automation). `git worktree add` against a
+    // tmpfs-wiped source clone fails with a raw git error rather than something
+    // self-healing, so rehydrate first. Idempotent: a no-op on-host and whenever
+    // the source already exists, including the create-workspace path that
+    // already repaired it a few frames earlier.
+    await this.repairCloudWorkspacePathBestEffort(input.cwd, "create_paseo_worktree");
     return createWorktreeWorkflow(
       {
         paseoHome: this.paseoHome,
